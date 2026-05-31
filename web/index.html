@@ -1,0 +1,1302 @@
+<!DOCTYPE html>
+<html lang="ko" data-lang="ko" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plaud 5축 가이드</title>
+    <meta name="description" content="Plaud Cloud에 접근하는 다섯 가지 채널 — Web, Desktop, MCP, Skill, App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분과 실전 워크플로우 패턴 포함.">
+    <link rel="icon" type="image/png" href="/assets/logos/cmds-logo-round.png">
+    <link rel="apple-touch-icon" href="/assets/logos/cmds-logo-round.png">
+
+    <!-- Open Graph (1200×630 dedicated OG image) -->
+    <meta property="og:type" content="website">
+    <meta property="og:site_name" content="CMDSPACE">
+    <meta property="og:title" content="Plaud 5축 가이드">
+    <meta property="og:description" content="Plaud Cloud에 접근하는 다섯 가지 채널 — Web, Desktop, MCP, Skill, App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분과 실전 워크플로우 패턴 포함.">
+    <meta property="og:url" content="https://plaud.cmdspace.work">
+    <meta property="og:image" content="https://plaud.cmdspace.work/assets/og/og-web.png">
+    <meta property="og:image:secure_url" content="https://plaud.cmdspace.work/assets/og/og-web.png">
+    <meta property="og:image:type" content="image/png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Plaud 5축 가이드">
+    <meta property="og:locale" content="ko_KR">
+    <meta property="og:locale:alternate" content="en_US">
+
+    <!-- Twitter / X -->
+    <meta name="twitter:card" content="summary_large_image">
+    <meta name="twitter:title" content="Plaud 5축 가이드">
+    <meta name="twitter:description" content="Plaud Cloud에 접근하는 다섯 가지 채널 — Web, Desktop, MCP, Skill, App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분과 실전 워크플로우 패턴 포함.">
+    <meta name="twitter:image" content="https://plaud.cmdspace.work/assets/og/og-web.png">
+    <meta name="twitter:image:alt" content="Plaud 5축 가이드">
+
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
+
+    <style>
+        /* ═══════════════ TOKENS — Apple × CMDS Green ═══════════════ */
+        :root {
+            --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Pretendard', 'Helvetica Neue', Arial, sans-serif;
+            --font-display: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Pretendard', 'Helvetica Neue', Arial, sans-serif;
+            --font-mono: ui-monospace, 'SF Mono', 'Menlo', 'Monaco', Consolas, monospace;
+
+            --cmds-green: #134538;
+            --cmds-green-hover: #1a5d4b;
+            --cmds-green-bright: #22896a;
+            --cmds-green-glow: #2fb488;
+            --cmds-green-50: #f1f7f4;
+            --cmds-green-100: #dcebe3;
+            --cmds-green-200: #bad9c9;
+            --cmds-pink: #E985A2;
+            --cmds-pink-light: #F4A4B8;
+            --cmds-pink-dark: #D16C8A;
+            --cmds-pink-soft: #2b1922;
+
+            --bg: #fbfbfa;
+            --bg-elev: #ffffff;
+            --bg-subtle: #f5f6f4;
+            --fg: #0a0d0b;
+            --fg-muted: #4a544f;
+            --fg-subtle: #8a938e;
+            --border: #e6e8e6;
+            --border-strong: #d0d3d0;
+            --accent: var(--cmds-green);
+            --accent-soft: var(--cmds-green-50);
+
+            --section-px: clamp(24px, 5vw, 80px);
+            --header-h: 56px;
+            --max-w: 1200px;
+        }
+
+        [data-theme="dark"] {
+            --bg: #06080a;
+            --bg-elev: #0d1411;
+            --bg-subtle: #0a1110;
+            --fg: #f2f4f3;
+            --fg-muted: #9aa39d;
+            --fg-subtle: #626a66;
+            --border: #1a231f;
+            --border-strong: #26302a;
+            /* Dark mode highlight: CMDS Pink #E985A2 */
+            --accent: #E985A2;
+            --accent-soft: #2b1922;
+            --accent-strong: #F4A4B8;
+        }
+
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg);
+            color: var(--fg);
+            line-height: 1.55;
+            letter-spacing: -0.011em;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            font-feature-settings: 'kern', 'liga', 'calt', 'ss01';
+            text-rendering: optimizeLegibility;
+            overflow-x: hidden;
+        }
+        a { color: var(--accent); text-decoration: none; transition: opacity .15s ease; }
+        a:hover { opacity: 0.7; }
+        code { font-family: var(--font-mono); font-size: 0.9em; }
+
+        [data-lang="en"] .ko-only { display: none; }
+        [data-lang="ko"] .en-only { display: none; }
+
+        /* Accent word — themed highlight inside headlines (light=green, dark=pink) */
+        .accent-word { color: var(--cmds-green); }
+        [data-theme="dark"] .accent-word { color: var(--cmds-pink); }
+
+        /* ═══════════════ HEADER ═══════════════ */
+        .site-header {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+            height: var(--header-h);
+            background: color-mix(in srgb, var(--bg) 72%, transparent);
+            backdrop-filter: saturate(180%) blur(20px);
+            -webkit-backdrop-filter: saturate(180%) blur(20px);
+            border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+            display: flex; align-items: center;
+            padding: 0 clamp(16px, 3vw, 32px);
+            gap: 24px;
+        }
+        .brand {
+            display: flex; align-items: center; gap: 10px;
+            font-weight: 600; font-size: 15px;
+            color: var(--fg);
+            letter-spacing: -0.018em;
+        }
+        .brand-mark {
+            width: 28px; height: 28px;
+            border-radius: 50%;
+            object-fit: contain;
+            display: block;
+            flex-shrink: 0;
+            /* Round CMDS logo has transparent parts → no background needed */
+        }
+        /* Dark mode: round logo is designed black+white, works on both */
+
+        .header-nav {
+            display: flex; gap: 4px;
+            margin-left: auto;
+        }
+        .header-nav a {
+            padding: 7px 14px;
+            color: var(--fg-muted);
+            font-size: 14px;
+            font-weight: 500;
+            border-radius: 8px;
+            letter-spacing: -0.008em;
+            transition: background .15s ease, color .15s ease;
+        }
+        .header-nav a:hover { background: var(--bg-subtle); color: var(--fg); opacity: 1; }
+        .header-nav a.primary {
+            background: var(--cmds-green);
+            color: #fff;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.15);
+        }
+        .header-nav a.primary:hover { background: var(--cmds-green-hover); opacity: 1; }
+        /* Dark mode: nav primary CTA becomes Pink */
+        [data-theme="dark"] .header-nav a.primary { background: var(--cmds-pink, #E985A2); color: #0b0f0d; }
+        [data-theme="dark"] .header-nav a.primary:hover { background: var(--cmds-pink-dark, #D16C8A); color: #0b0f0d; }
+
+        .header-actions { display: flex; gap: 6px; }
+        .icon-btn {
+            width: 36px; height: 36px;
+            display: grid; place-items: center;
+            border: none; background: transparent;
+            color: var(--fg-muted);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background .15s;
+        }
+        .icon-btn:hover { background: var(--bg-subtle); color: var(--fg); }
+        .icon-btn svg { width: 16px; height: 16px; }
+
+        /* ═══════════════ HERO ═══════════════ */
+        .hero {
+            position: relative;
+            padding: calc(var(--header-h) + 80px) var(--section-px) 120px;
+            overflow: hidden;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+        }
+
+        .hero-bg {
+            position: absolute;
+            top: -20%; left: 50%;
+            width: 1400px; height: 1400px;
+            transform: translateX(-50%);
+            background: radial-gradient(circle at center,
+                color-mix(in srgb, var(--cmds-green) 12%, transparent) 0%,
+                transparent 60%);
+            pointer-events: none;
+            z-index: 0;
+        }
+        [data-theme="dark"] .hero-bg {
+            background: radial-gradient(circle at center,
+                color-mix(in srgb, var(--accent) 15%, transparent) 0%,
+                transparent 55%);
+        }
+
+        .hero-inner {
+            position: relative;
+            max-width: var(--max-w);
+            margin: 0 auto;
+            width: 100%;
+            z-index: 1;
+        }
+
+        .hero-eyebrow {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            letter-spacing: -0.005em;
+            color: var(--cmds-green);
+            padding: 6px 14px;
+            background: var(--accent-soft);
+            border-radius: 999px;
+            margin-bottom: 32px;
+            border: 1px solid color-mix(in srgb, var(--cmds-green) 15%, transparent);
+        }
+        [data-theme="dark"] .hero-eyebrow { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 30%, transparent); }
+        .hero-eyebrow::before {
+            content: '';
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--cmds-green);
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--cmds-green) 25%, transparent);
+        }
+        [data-theme="dark"] .hero-eyebrow::before { background: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+
+        .hero-title {
+            font-family: var(--font-display);
+            font-size: clamp(48px, 8vw, 104px);
+            font-weight: 700;
+            line-height: 1.02;
+            letter-spacing: -0.042em;
+            color: var(--fg);
+            margin-bottom: 36px;
+            max-width: 960px;
+        }
+        .hero-title .grad {
+            background: linear-gradient(135deg, var(--cmds-green) 0%, var(--cmds-green-bright) 50%, var(--cmds-green-glow) 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: inline-block;
+        }
+        [data-theme="dark"] .hero-title .grad {
+            background: linear-gradient(135deg, #F4A4B8 0%, #E985A2 50%, #D16C8A 100%);
+            -webkit-background-clip: text;
+            background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .hero-lede {
+            font-size: clamp(19px, 1.8vw, 22px);
+            line-height: 1.5;
+            letter-spacing: -0.015em;
+            color: var(--fg-muted);
+            max-width: 720px;
+            margin-bottom: 48px;
+            font-weight: 400;
+        }
+
+        .hero-cta {
+            display: flex; flex-wrap: wrap;
+            gap: 12px;
+            align-items: center;
+        }
+        .btn {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 14px 24px;
+            font-size: 15px;
+            font-weight: 500;
+            letter-spacing: -0.01em;
+            border-radius: 999px;
+            border: 1px solid transparent;
+            cursor: pointer;
+            transition: background .15s ease, transform .08s ease, box-shadow .15s ease, border-color .15s ease;
+        }
+        .btn-primary {
+            background: var(--cmds-green);
+            color: #fff;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), 0 1px 2px rgba(19,69,56,0.2), 0 8px 24px -8px rgba(19,69,56,0.3);
+        }
+        .btn-primary:hover { background: var(--cmds-green-hover); color: #fff; opacity: 1; box-shadow: inset 0 1px 0 rgba(255,255,255,0.12), 0 2px 4px rgba(19,69,56,0.25), 0 16px 36px -12px rgba(19,69,56,0.4); }
+        .btn-primary:active { transform: scale(0.985); }
+        /* Dark mode: primary CTA becomes Pink */
+        [data-theme="dark"] .btn-primary {
+            background: var(--cmds-pink, #E985A2);
+            color: #0b0f0d;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), 0 2px 6px rgba(0,0,0,0.4), 0 12px 32px -12px rgba(233,133,162,0.4);
+        }
+        [data-theme="dark"] .btn-primary:hover {
+            background: var(--cmds-pink-dark, #D16C8A);
+            color: #0b0f0d;
+        }
+
+        .btn-secondary {
+            background: var(--bg-elev);
+            color: var(--fg);
+            border-color: var(--border-strong);
+        }
+        .btn-secondary:hover { background: var(--bg-subtle); opacity: 1; border-color: var(--fg-subtle); }
+        .btn-ghost {
+            background: transparent;
+            color: var(--fg-muted);
+            padding: 10px 14px;
+        }
+        .btn-ghost:hover { color: var(--fg); opacity: 1; }
+
+        .hero-meta {
+            margin-top: 72px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 8px 40px;
+            max-width: 760px;
+            padding-top: 28px;
+            border-top: 1px solid var(--border);
+        }
+        .hero-meta-item .val {
+            font-family: var(--font-display);
+            font-size: 32px;
+            font-weight: 700;
+            letter-spacing: -0.028em;
+            color: var(--fg);
+            line-height: 1;
+        }
+        .hero-meta-item .lbl {
+            font-size: 13px;
+            color: var(--fg-subtle);
+            margin-top: 6px;
+            letter-spacing: -0.005em;
+        }
+
+        /* ═══════════════ SECTIONS ═══════════════ */
+        section.block {
+            padding: clamp(80px, 10vw, 140px) var(--section-px);
+            position: relative;
+        }
+        .block-inner { max-width: var(--max-w); margin: 0 auto; }
+
+        .block-eyebrow {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--cmds-green);
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            margin-bottom: 16px;
+        }
+        [data-theme="dark"] .block-eyebrow { color: var(--accent); }
+
+        .block-title {
+            font-family: var(--font-display);
+            font-size: clamp(36px, 5vw, 60px);
+            font-weight: 700;
+            line-height: 1.08;
+            letter-spacing: -0.032em;
+            color: var(--fg);
+            margin-bottom: 24px;
+            max-width: 800px;
+        }
+        .block-lede {
+            font-size: clamp(17px, 1.4vw, 20px);
+            line-height: 1.55;
+            color: var(--fg-muted);
+            letter-spacing: -0.012em;
+            max-width: 680px;
+        }
+
+        /* ═══════════════ THE IDEA ═══════════════ */
+        .idea {
+            background: var(--bg-subtle);
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+        }
+        .idea-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 80px;
+            align-items: start;
+        }
+        .idea-quote {
+            font-family: var(--font-display);
+            font-size: clamp(24px, 2.6vw, 36px);
+            line-height: 1.3;
+            font-weight: 500;
+            letter-spacing: -0.022em;
+            color: var(--fg);
+        }
+        .idea-quote span { color: var(--cmds-green); }
+        [data-theme="dark"] .idea-quote span { color: var(--accent); }
+        .idea-body p {
+            font-size: 17px;
+            line-height: 1.7;
+            color: var(--fg-muted);
+            margin-bottom: 1em;
+        }
+        @media (max-width: 820px) {
+            .idea-grid { grid-template-columns: 1fr; gap: 40px; }
+        }
+
+        /* ═══════════════ ARCHITECTURE (5 FILES) ═══════════════ */
+        .files-stack {
+            margin-top: 64px;
+            display: grid;
+            gap: 16px;
+        }
+        .file-row {
+            display: grid;
+            grid-template-columns: 100px 1fr auto;
+            gap: 24px;
+            padding: 28px 32px;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            align-items: center;
+            transition: all .2s ease;
+            position: relative;
+            overflow: hidden;
+        }
+        .file-row:hover {
+            border-color: color-mix(in srgb, var(--cmds-green) 30%, var(--border));
+            transform: translateY(-2px);
+            box-shadow: 0 12px 32px -12px rgba(19,69,56,0.15);
+        }
+        [data-theme="dark"] .file-row:hover {
+            border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+            box-shadow: 0 12px 32px -12px rgba(91,199,157,0.2);
+        }
+        .file-precedence {
+            font-family: var(--font-display);
+            font-size: 42px;
+            font-weight: 700;
+            color: var(--cmds-green);
+            letter-spacing: -0.03em;
+            opacity: 0.9;
+        }
+        [data-theme="dark"] .file-precedence { color: var(--accent); }
+        .file-precedence::before {
+            content: 'P';
+            font-size: 12px;
+            font-weight: 500;
+            vertical-align: top;
+            margin-right: 2px;
+            opacity: 0.6;
+        }
+        .file-name {
+            font-family: var(--font-display);
+            font-size: 22px;
+            font-weight: 600;
+            letter-spacing: -0.02em;
+            color: var(--fg);
+            margin-bottom: 4px;
+        }
+        .file-name code {
+            font-family: var(--font-mono);
+            font-size: 0.85em;
+            font-weight: 600;
+        }
+        .file-tag {
+            display: inline-block;
+            font-size: 11px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--cmds-green);
+            margin-left: 10px;
+            padding: 2px 8px;
+            background: var(--accent-soft);
+            border-radius: 4px;
+            vertical-align: middle;
+        }
+        [data-theme="dark"] .file-tag { color: var(--accent); }
+        .file-desc {
+            font-size: 15px;
+            color: var(--fg-muted);
+            line-height: 1.5;
+            letter-spacing: -0.008em;
+        }
+        .file-audience {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--fg-subtle);
+            text-align: right;
+        }
+        .file-audience::before { content: '→ '; opacity: 0.5; }
+        @media (max-width: 720px) {
+            .file-row { grid-template-columns: 1fr; gap: 8px; padding: 20px; }
+            .file-precedence { font-size: 28px; }
+            .file-audience { text-align: left; }
+        }
+
+        /* ═══════════════ PROCESS (4 STAGES) ═══════════════ */
+        .process-flow {
+            margin-top: 64px;
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0;
+            position: relative;
+        }
+        .process-flow::before {
+            content: '';
+            position: absolute;
+            top: 28px;
+            left: 40px;
+            right: 40px;
+            height: 2px;
+            background: linear-gradient(90deg,
+                var(--cmds-green) 0%,
+                var(--cmds-green-bright) 50%,
+                var(--cmds-green-glow) 100%);
+            opacity: 0.3;
+            z-index: 0;
+        }
+        [data-theme="dark"] .process-flow::before {
+            background: linear-gradient(90deg, var(--accent), #7fd9b2, #a8f0c8);
+            opacity: 0.5;
+        }
+        .process-stage {
+            position: relative;
+            padding: 0 16px;
+            text-align: center;
+        }
+        .stage-dot {
+            width: 56px; height: 56px;
+            margin: 0 auto 20px;
+            background: var(--bg-elev);
+            border: 2px solid var(--cmds-green);
+            border-radius: 50%;
+            display: grid; place-items: center;
+            font-family: var(--font-display);
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--cmds-green);
+            position: relative;
+            z-index: 1;
+            box-shadow: 0 4px 12px -4px rgba(19,69,56,0.2);
+        }
+        [data-theme="dark"] .stage-dot { color: var(--accent); border-color: var(--accent); box-shadow: 0 4px 12px -4px rgba(91,199,157,0.3); }
+        .stage-name {
+            font-family: var(--font-display);
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: -0.022em;
+            color: var(--fg);
+            margin-bottom: 6px;
+        }
+        .stage-category {
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: var(--cmds-green);
+            margin-bottom: 12px;
+        }
+        [data-theme="dark"] .stage-category { color: var(--accent); }
+        .stage-desc {
+            font-size: 14px;
+            color: var(--fg-muted);
+            line-height: 1.5;
+            letter-spacing: -0.005em;
+        }
+        @media (max-width: 820px) {
+            .process-flow { grid-template-columns: 1fr; gap: 40px; }
+            .process-flow::before { display: none; }
+        }
+
+        /* ═══════════════ AUDIENCES ═══════════════ */
+        .audiences {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 24px;
+            margin-top: 56px;
+        }
+        .aud-card {
+            padding: 40px;
+            background: var(--bg-elev);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            position: relative;
+            overflow: hidden;
+        }
+        .aud-card::before {
+            content: '';
+            position: absolute;
+            top: 0; right: 0;
+            width: 120px; height: 120px;
+            background: radial-gradient(circle at top right,
+                color-mix(in srgb, var(--cmds-green) 20%, transparent),
+                transparent 70%);
+            pointer-events: none;
+        }
+        [data-theme="dark"] .aud-card::before {
+            background: radial-gradient(circle at top right,
+                color-mix(in srgb, var(--accent) 25%, transparent),
+                transparent 70%);
+        }
+        .aud-icon {
+            width: 48px; height: 48px;
+            display: grid; place-items: center;
+            background: var(--accent-soft);
+            border-radius: 12px;
+            color: var(--cmds-green);
+            margin-bottom: 20px;
+        }
+        [data-theme="dark"] .aud-icon { color: var(--accent); }
+        .aud-icon svg { width: 22px; height: 22px; }
+        .aud-title {
+            font-family: var(--font-display);
+            font-size: 26px;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+            margin-bottom: 12px;
+        }
+        .aud-desc {
+            color: var(--fg-muted);
+            line-height: 1.6;
+            margin-bottom: 20px;
+            font-size: 15px;
+        }
+        .aud-list {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+        .aud-list li {
+            padding: 8px 0;
+            border-top: 1px solid var(--border);
+            font-size: 14px;
+            color: var(--fg);
+            letter-spacing: -0.005em;
+            display: flex; align-items: center; gap: 10px;
+        }
+        .aud-list li::before {
+            content: '';
+            width: 5px; height: 5px;
+            background: var(--cmds-green);
+            border-radius: 50%;
+            flex-shrink: 0;
+        }
+        [data-theme="dark"] .aud-list li::before { background: var(--accent); }
+        .aud-list li code { font-size: 12.5px; color: var(--fg-muted); margin-left: auto; }
+        @media (max-width: 820px) {
+            .audiences { grid-template-columns: 1fr; }
+        }
+
+        /* ═══════════════ CMDS CATEGORIES ═══════════════ */
+        .cat-grid {
+            margin-top: 56px;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 1px;
+            background: var(--border);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            overflow: hidden;
+        }
+        .cat-cell {
+            padding: 24px 28px;
+            background: var(--bg-elev);
+            transition: background .2s;
+        }
+        .cat-cell:hover { background: var(--bg-subtle); }
+        .cat-num {
+            font-family: var(--font-display);
+            font-size: 28px;
+            font-weight: 700;
+            color: var(--cmds-green);
+            letter-spacing: -0.025em;
+            line-height: 1;
+            margin-bottom: 8px;
+        }
+        [data-theme="dark"] .cat-num { color: var(--accent); }
+        .cat-name {
+            font-family: var(--font-display);
+            font-weight: 600;
+            font-size: 17px;
+            letter-spacing: -0.018em;
+            color: var(--fg);
+            margin-bottom: 4px;
+        }
+        .cat-sub {
+            font-size: 13px;
+            color: var(--fg-subtle);
+            letter-spacing: -0.005em;
+        }
+
+        /* ═══════════════ CODE TEASER ═══════════════ */
+        .teaser-box {
+            margin-top: 56px;
+            background: #0a0d0b;
+            border-radius: 20px;
+            overflow: hidden;
+            border: 1px solid color-mix(in srgb, #0a0d0b 50%, var(--border));
+            box-shadow: 0 24px 48px -24px rgba(19,69,56,0.3);
+        }
+        .teaser-tabs {
+            display: flex;
+            padding: 12px 16px 0;
+            background: #0a0d0b;
+            border-bottom: 1px solid #1a231f;
+            gap: 4px;
+        }
+        .teaser-tab {
+            padding: 8px 14px;
+            font-family: var(--font-mono);
+            font-size: 12px;
+            color: #9aa39d;
+            background: transparent;
+            border: none;
+            border-radius: 6px 6px 0 0;
+            cursor: pointer;
+            letter-spacing: -0.005em;
+        }
+        .teaser-tab.active { color: #fff; background: #13181580; border: 1px solid #1a231f; border-bottom: 1px solid #13181580; margin-bottom: -1px; }
+        .teaser-code {
+            padding: 24px 28px;
+            font-family: var(--font-mono);
+            font-size: 13.5px;
+            line-height: 1.7;
+            color: #dfe5e2;
+            overflow-x: auto;
+        }
+        .teaser-code .yaml-key { color: #5bc79d; }
+        .teaser-code .yaml-str { color: #d9c7a0; }
+        .teaser-code .yaml-com { color: #626a66; font-style: italic; }
+        .teaser-code .yaml-sep { color: #626a66; }
+
+        /* ═══════════════ CTA ═══════════════ */
+        .cta-block {
+            background: linear-gradient(135deg, var(--cmds-green) 0%, var(--cmds-green-hover) 60%, var(--cmds-green-bright) 100%);
+            color: #fff;
+            text-align: center;
+            padding: clamp(72px, 10vw, 120px) var(--section-px);
+            position: relative;
+            overflow: hidden;
+        }
+        .cta-block::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.08), transparent 50%),
+                        radial-gradient(circle at 70% 70%, rgba(47,180,136,0.15), transparent 50%);
+        }
+        /* Dark mode: CTA block becomes Pink gradient */
+        [data-theme="dark"] .cta-block {
+            background: linear-gradient(135deg, var(--cmds-pink) 0%, var(--cmds-pink-dark) 55%, #B8577A 100%);
+            color: #0b0f0d;
+        }
+        [data-theme="dark"] .cta-block::before {
+            background: radial-gradient(circle at 30% 30%, rgba(255,255,255,0.12), transparent 50%),
+                        radial-gradient(circle at 70% 70%, rgba(209,108,138,0.2), transparent 50%);
+        }
+        .cta-inner { position: relative; max-width: 720px; margin: 0 auto; }
+        .cta-title {
+            font-family: var(--font-display);
+            font-size: clamp(40px, 5vw, 56px);
+            font-weight: 700;
+            line-height: 1.1;
+            letter-spacing: -0.032em;
+            margin-bottom: 20px;
+        }
+        .cta-lede {
+            font-size: 19px;
+            opacity: 0.85;
+            margin-bottom: 40px;
+            line-height: 1.5;
+            letter-spacing: -0.012em;
+        }
+        .cta-buttons { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+        .btn-white {
+            background: #fff; color: var(--cmds-green);
+            padding: 14px 28px;
+            border-radius: 999px;
+            font-size: 15px; font-weight: 600;
+            letter-spacing: -0.01em;
+            display: inline-flex; align-items: center; gap: 8px;
+            transition: transform .08s, box-shadow .15s;
+        }
+        .btn-white:hover { opacity: 1; transform: translateY(-1px); box-shadow: 0 8px 24px -8px rgba(0,0,0,0.3); }
+        /* Dark mode: white button stays white but text uses a dark accent instead of green */
+        [data-theme="dark"] .btn-white { color: var(--cmds-pink-dark); }
+        [data-theme="dark"] .btn-white:hover { color: var(--cmds-pink-dark); opacity: 1; }
+
+        .btn-outline {
+            background: transparent; color: #fff;
+            padding: 14px 28px;
+            border: 1px solid rgba(255,255,255,0.3);
+            border-radius: 999px;
+            font-size: 15px; font-weight: 500;
+            letter-spacing: -0.01em;
+            display: inline-flex; align-items: center; gap: 8px;
+        }
+        .btn-outline:hover { background: rgba(255,255,255,0.1); color: #fff; opacity: 1; }
+        /* Dark mode on pink bg — outline darker for visibility */
+        [data-theme="dark"] .btn-outline { color: #0b0f0d; border-color: rgba(11,15,13,0.35); }
+        [data-theme="dark"] .btn-outline:hover { background: rgba(11,15,13,0.08); color: #0b0f0d; }
+
+        /* ═══════════════ BRAND LOCKUP (sign-off) ═══════════════ */
+        .brand-lockup {
+            padding: clamp(64px, 8vw, 96px) var(--section-px);
+            background: var(--bg);
+            border-top: 1px solid var(--border);
+        }
+        .brand-lockup-inner {
+            max-width: 640px;
+            margin: 0 auto;
+            text-align: center;
+        }
+        .lockup-img {
+            max-width: 320px;
+            width: 100%;
+            height: auto;
+            display: block;
+            margin: 0 auto;
+        }
+        /* Default: show light (black) logo. Dark mode: swap */
+        .lockup-dark { display: none; }
+        [data-theme="dark"] .lockup-light { display: none; }
+        [data-theme="dark"] .lockup-dark { display: block; }
+        .lockup-tagline {
+            margin-top: 24px;
+            font-family: var(--font-display);
+            font-size: 15px;
+            font-weight: 500;
+            letter-spacing: -0.01em;
+            color: var(--fg-subtle);
+        }
+        @media (max-width: 640px) {
+            .lockup-img { max-width: 260px; }
+        }
+
+        /* ═══════════════ FOOTER ═══════════════ */
+        .footer {
+            padding: 56px var(--section-px) 48px;
+            border-top: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--fg-muted);
+            font-size: 13.5px;
+        }
+        .footer-inner {
+            max-width: var(--max-w);
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+        .footer-inner a { color: var(--fg-muted); }
+        .footer-inner a:hover { color: var(--fg); opacity: 1; }
+        .footer-links { display: flex; gap: 20px; flex-wrap: wrap; }
+
+        /* ═══════════════ REVEAL ANIM ═══════════════ */
+        .reveal {
+            opacity: 0;
+            transform: translateY(20px);
+            transition: opacity .7s ease, transform .7s cubic-bezier(0.22, 0.61, 0.36, 1);
+        }
+        .reveal.visible { opacity: 1; transform: translateY(0); }
+        @media (prefers-reduced-motion: reduce) {
+            .reveal { opacity: 1; transform: none; transition: none; }
+        }
+
+        @media (max-width: 720px) {
+            .header-nav a:not(.primary) { display: none; }
+            .hero-meta-item .val { font-size: 26px; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header class="site-header">
+    <a class="brand" href="/">
+        <img class="brand-mark" src="/assets/logos/cmds-logo-round.png" alt="CMDS" width="28" height="28">
+        <span>Plaud 5축 가이드</span>
+    </a>
+    <nav class="header-nav">
+        <a href="#channels">5 Channels</a>
+        <a href="#roles">Capture · Manage</a>
+        <a href="#routing">Routing</a>
+        <a href="#workflows">Workflows</a>
+        <a href="https://web.plaud.ai" target="_blank" rel="noopener">Plaud Web ↗</a>
+    </nav>
+    <div class="header-actions">
+        <button class="icon-btn" id="langToggle" aria-label="Toggle language">
+            <span id="langLabel" style="font-size: 12px; font-weight: 500;">한</span>
+        </button>
+        <button class="icon-btn" id="themeToggle" aria-label="Toggle theme">
+            <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+        </button>
+    </div>
+</header>
+
+<!-- HERO -->
+<section class="hero">
+    <div class="hero-bg"></div>
+    <div class="hero-inner">
+        <div class="hero-eyebrow">
+            <span class="en-only">Plaud Access Layers · Updated 2026-05-22</span>
+            <span class="ko-only">Plaud 접근 5축 · 2026-05-22 업데이트</span>
+        </div>
+        <h1 class="hero-title">
+            <span class="en-only">One Plaud account.<br><span class="grad">Five channels</span> to use it.</span>
+            <span class="ko-only">하나의 Plaud 계정,<br><span class="grad">다섯 가지 채널</span>로 다루는 법.</span>
+        </h1>
+        <p class="hero-lede">
+            <span class="en-only">Web · Desktop · MCP · Skill · App — each channel has a different ceiling on what you can read, edit, and automate. This page is the decision SSOT for picking the right one.</span>
+            <span class="ko-only">Web · Desktop · MCP · Skill · App — 각 채널마다 읽기·편집·자동화 가능 범위가 다릅니다. 어떤 채널을 언제 써야 하는지 결정하는 SSOT.</span>
+        </p>
+        <div class="hero-cta">
+            <a class="btn btn-primary" href="#channels">
+                <span class="en-only">See the 5 channels</span><span class="ko-only">5축 비교 보기</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </a>
+            <a class="btn btn-secondary" href="#routing">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+                <span class="en-only">Decision guide</span><span class="ko-only">라우팅 가이드</span>
+            </a>
+            <a class="btn btn-ghost" href="https://docs.plaud.ai/mcp" target="_blank" rel="noopener">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14L21 3"/></svg>
+                Plaud MCP docs
+            </a>
+        </div>
+
+        <div class="hero-meta">
+            <div class="hero-meta-item"><div class="val">5</div><div class="lbl en-only">channels</div><div class="lbl ko-only">채널</div></div>
+            <div class="hero-meta-item"><div class="val">2</div><div class="lbl en-only">roles</div><div class="lbl ko-only">역할</div></div>
+            <div class="hero-meta-item"><div class="val">9</div><div class="lbl en-only">API endpoints</div><div class="lbl ko-only">API 엔드포인트</div></div>
+            <div class="hero-meta-item"><div class="val">14</div><div class="lbl en-only">auto-classify</div><div class="lbl ko-only">자동 분류</div></div>
+        </div>
+    </div>
+</section>
+
+<!-- THE IDEA -->
+<section class="block idea reveal">
+    <div class="block-inner">
+        <div class="idea-grid">
+            <div>
+                <div class="block-eyebrow en-only">The Idea</div>
+                <div class="block-eyebrow ko-only">핵심 아이디어</div>
+                <h2 class="idea-quote">
+                    <span class="en-only">Plaud Note is just the device — <span>the cloud is the platform</span>. And every channel into that cloud has its own ceiling.</span>
+                    <span class="ko-only">Plaud Note는 디바이스일 뿐 — <span>플랫폼은 클라우드</span>입니다. 그 클라우드로 들어가는 모든 채널은 각자의 천장을 가집니다.</span>
+                </h2>
+            </div>
+            <div class="idea-body">
+                <p class="en-only">After Plaud announced its official MCP server (2026-05-13), three more channels became visible: a public OAuth MCP, an unofficial bash skill, and a self-hosted Python·SwiftUI app that already wraps the web API. Add the official Web and Desktop apps, and you get <em>five</em>.</p>
+                <p class="en-only">They are not interchangeable. MCP is read-only. Skill exposes content MCP can't see (markMemo, highlight). The App is the only channel that can create folders, classify recordings with AI, and push to Obsidian. Desktop is the only channel that can <em>record live meetings</em> from system audio.</p>
+                <p class="ko-only">2026-05-13 Plaud가 공식 MCP 서버를 발표하면서 세 가지 채널이 더 가시화됐습니다 — OAuth MCP, 비공식 bash 스킬, 그리고 web API를 직접 감싸는 자체 Python·SwiftUI 앱. 거기에 공식 Web·Desktop을 더하면 <em>다섯 축</em>이 됩니다.</p>
+                <p class="ko-only">이들은 서로 대체재가 아닙니다. MCP는 read-only. 스킬은 MCP가 못 보는 콘텐츠(markMemo, highlight)를 노출합니다. 앱은 폴더 생성·AI 자동 분류·Obsidian 송출이 가능한 유일한 채널. Desktop은 시스템 오디오로 <em>회의를 실시간 녹음</em>할 수 있는 유일한 채널입니다.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ARCHITECTURE — 5 CHANNELS -->
+<section class="block" id="channels">
+    <div class="block-inner reveal">
+        <div class="block-eyebrow">
+            <span class="en-only">The 5 Channels</span>
+            <span class="ko-only">5축</span>
+        </div>
+        <h2 class="block-title">
+            <span class="en-only">Five doors into the <span class="accent-word">same cloud</span>.</span>
+            <span class="ko-only">같은 클라우드로 들어가는 <span class="accent-word">다섯 개의 문</span>.</span>
+        </h2>
+        <p class="block-lede">
+            <span class="en-only">Each row shows where the channel lives, how it authenticates, and what its primary surface looks like. Tagged ✅ for official Plaud surfaces and ⚠️ for unofficial reverse-engineered ones.</span>
+            <span class="ko-only">각 행은 채널의 위치 · 인증 방식 · 주 표면을 보여줍니다. ✅는 공식 채널, ⚠️는 web API 리버스 기반의 비공식 채널.</span>
+        </p>
+
+        <div class="files-stack">
+            <div class="file-row">
+                <div class="file-precedence">1</div>
+                <div>
+                    <div class="file-name"><code>Web</code><span class="file-tag">✅ Official</span></div>
+                    <div class="file-desc en-only"><code>web.plaud.ai</code> — full management surface (rename, folders, speaker labels, delete, share).</div>
+                    <div class="file-desc ko-only"><code>web.plaud.ai</code> — 풀 매니지 표면 (제목·폴더·스피커 라벨·삭제·공유).</div>
+                </div>
+                <div class="file-audience">Manage</div>
+            </div>
+            <div class="file-row">
+                <div class="file-precedence">2</div>
+                <div>
+                    <div class="file-name"><code>Desktop</code><span class="file-tag">✅ Official</span></div>
+                    <div class="file-desc en-only">Native Mac / Windows app — auto-detects Zoom · Meet · Teams, records system audio, takes screenshots, runs AutoFlow.</div>
+                    <div class="file-desc ko-only">Mac / Windows 네이티브 앱 — Zoom · Meet · Teams 자동 감지, 시스템 오디오 녹음, 스크린샷, AutoFlow.</div>
+                </div>
+                <div class="file-audience">Capture + Manage</div>
+            </div>
+            <div class="file-row">
+                <div class="file-precedence">3</div>
+                <div>
+                    <div class="file-name"><code>MCP</code><span class="file-tag">✅ Official</span></div>
+                    <div class="file-desc en-only"><code>mcp__plaud__*</code> via Claude Code / Cursor / Zed — OAuth, read-only, 7 tools.</div>
+                    <div class="file-desc ko-only">Claude Code · Cursor · Zed 등에서 호출하는 <code>mcp__plaud__*</code> — OAuth, read-only, 7개 도구.</div>
+                </div>
+                <div class="file-audience">Manage (LLM)</div>
+            </div>
+            <div class="file-row">
+                <div class="file-precedence">4</div>
+                <div>
+                    <div class="file-name"><code>Skill</code><span class="file-tag" style="background: color-mix(in srgb, var(--cmds-green) 10%, transparent);">⚠️ Unofficial</span></div>
+                    <div class="file-desc en-only"><code>~/.claude/skills/plaud-cloud-tools/</code> — bash wrappers over the captured web cURL. Exposes markMemo · highlight that MCP can't.</div>
+                    <div class="file-desc ko-only"><code>~/.claude/skills/plaud-cloud-tools/</code> — 캡쳐한 web cURL 기반 bash 래퍼. MCP가 못 보는 markMemo · highlight 노출.</div>
+                </div>
+                <div class="file-audience">Manage (CLI)</div>
+            </div>
+            <div class="file-row">
+                <div class="file-precedence">5</div>
+                <div>
+                    <div class="file-name"><code>App</code><span class="file-tag" style="background: color-mix(in srgb, var(--cmds-green) 10%, transparent);">⚠️ Unofficial</span></div>
+                    <div class="file-desc en-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS app. Only channel with write power (folder CRUD, rename, AI auto-classify, Obsidian export).</div>
+                    <div class="file-desc ko-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS 앱. 쓰기 권한을 가진 유일한 비공식 채널 (폴더 CRUD · 제목 변경 · AI 자동 분류 · Obsidian 송출).</div>
+                </div>
+                <div class="file-audience">Manage + Power</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ROLES — Capture vs Manage -->
+<section class="block idea" id="roles">
+    <div class="block-inner reveal">
+        <div class="block-eyebrow">
+            <span class="en-only">Two roles, one cloud</span>
+            <span class="ko-only">두 역할, 하나의 클라우드</span>
+        </div>
+        <h2 class="block-title">
+            <span class="en-only">Every channel does <span class="accent-word">Manage</span>. Only two do <span class="accent-word">Capture</span>.</span>
+            <span class="ko-only">모든 채널이 <span class="accent-word">매니지</span>를 합니다. <span class="accent-word">캡쳐</span>는 단 두 채널만.</span>
+        </h2>
+        <p class="block-lede">
+            <span class="en-only">Capture = create a new recording. Manage = read / edit / process existing recordings. Mixing these up is the #1 reason people pick the wrong channel.</span>
+            <span class="ko-only">캡쳐 = 신규 녹음 생성. 매니지 = 기존 녹음 읽기·편집·가공. 이 둘을 혼동하는 게 채널 선택 실수의 1번 원인입니다.</span>
+        </p>
+
+        <div class="process-flow">
+            <div class="process-stage">
+                <div class="stage-dot">HW</div>
+                <div class="stage-name">Plaud Note</div>
+                <div class="stage-category">Capture · device</div>
+                <div class="stage-desc en-only">Hardware recorder for in-person meetings, lectures, offline talks.</div>
+                <div class="stage-desc ko-only">대면 회의 · 강의 · 오프라인 토크용 하드웨어 녹음기.</div>
+            </div>
+            <div class="process-stage">
+                <div class="stage-dot">D</div>
+                <div class="stage-name">Desktop</div>
+                <div class="stage-category">Capture + Manage</div>
+                <div class="stage-desc en-only">Software recorder for online meetings (Zoom · Meet · Teams) — no bot, no joining.</div>
+                <div class="stage-desc ko-only">온라인 회의용 소프트웨어 녹음기 (Zoom · Meet · Teams) — 봇 미참여, 시스템 오디오.</div>
+            </div>
+            <div class="process-stage">
+                <div class="stage-dot">☁︎</div>
+                <div class="stage-name">Plaud Cloud</div>
+                <div class="stage-category">Shared backend</div>
+                <div class="stage-desc en-only">Every channel reads from / writes to the same cloud. <code>file_id</code> is the permanent URL key.</div>
+                <div class="stage-desc ko-only">모든 채널이 같은 클라우드를 읽고 씁니다. <code>file_id</code>가 영구 URL 키.</div>
+            </div>
+            <div class="process-stage">
+                <div class="stage-dot">M</div>
+                <div class="stage-name">Web · MCP · Skill · App</div>
+                <div class="stage-category">Manage only</div>
+                <div class="stage-desc en-only">Browse, read, summarize, classify, export. Cannot create new recordings.</div>
+                <div class="stage-desc ko-only">브라우징 · 읽기 · 요약 · 분류 · 송출. 신규 녹음 생성은 불가.</div>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ABILITY MATRIX — what each channel can read / write -->
+<section class="block reveal" id="abilities">
+    <div class="block-inner">
+        <div class="block-eyebrow">
+            <span class="en-only">Read vs Write — at a glance</span>
+            <span class="ko-only">읽기 vs 쓰기 — 한눈에</span>
+        </div>
+        <h2 class="block-title">
+            <span class="en-only">Who can do <span class="accent-word">what</span>.</span>
+            <span class="ko-only">누가 <span class="accent-word">무엇</span>을 할 수 있는가.</span>
+        </h2>
+
+        <div class="audiences">
+            <div class="aud-card">
+                <div class="aud-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/></svg>
+                </div>
+                <div class="aud-title en-only">Read — everyone reads, but unevenly</div>
+                <div class="aud-title ko-only">읽기 — 모두가 읽지만 깊이가 다름</div>
+                <p class="aud-desc en-only">List · transcript · AI summary are universal. highlight · markMemo · sum_multi_note are exposed by Skill / App but hidden by MCP. Outline is only partially exposed by MCP (raw via get_file). Folder tree visible to Web / Desktop / App only.</p>
+                <p class="aud-desc ko-only">파일 리스트 · 트랜스크립트 · AI 요약은 보편. highlight · markMemo · 다중 요약은 Skill / App만 노출, MCP는 숨김. Outline은 MCP에서 부분 노출(get_file 원본 경유). 폴더 트리는 Web · Desktop · App만 가시.</p>
+                <ul class="aud-list">
+                    <li>✅ <span class="en-only">All 5 — transcripts, summaries</span><span class="ko-only">5축 모두 — 트랜스크립트 · 요약</span></li>
+                    <li>⚠️ <span class="en-only">Skill / App only — markMemo, highlight</span><span class="ko-only">Skill · App만 — markMemo · highlight</span></li>
+                    <li>⚠️ <span class="en-only">Web / Desktop / App — folder tree</span><span class="ko-only">Web · Desktop · App — 폴더 트리</span></li>
+                    <li>⚠️ <span class="en-only">Desktop / Web — Ask Plaud (cited Q&A)</span><span class="ko-only">Desktop · Web — Ask Plaud (인용 Q&A)</span></li>
+                </ul>
+            </div>
+            <div class="aud-card">
+                <div class="aud-icon">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                </div>
+                <div class="aud-title en-only">Write — only 3 of 5 can write</div>
+                <div class="aud-title ko-only">쓰기 — 5축 중 3축만 가능</div>
+                <p class="aud-desc en-only">Web and Desktop have full edit (rename, folder CRUD, speaker labels, delete). App matches them on rename + folder, and is the <em>only</em> channel that adds AI-based auto-classification. MCP and Skill are read-only.</p>
+                <p class="aud-desc ko-only">Web · Desktop은 풀 편집 (제목 · 폴더 CRUD · 스피커 라벨 · 삭제). 앱은 제목 · 폴더만 동등, 대신 AI 자동 분류는 <em>유일</em>. MCP · Skill은 read-only.</p>
+                <ul class="aud-list">
+                    <li>✅ <span class="en-only">Web · Desktop — full edit</span><span class="ko-only">Web · Desktop — 풀 편집</span></li>
+                    <li>✅ <span class="en-only">App — rename · folder CRUD · move</span><span class="ko-only">App — 제목 변경 · 폴더 CRUD · 이동</span></li>
+                    <li>⭐ <span class="en-only">App only — AI auto-classify (14 categories)</span><span class="ko-only">App만 — AI 자동 분류 (14 카테고리)</span></li>
+                    <li>❌ <span class="en-only">MCP · Skill — no write at all</span><span class="ko-only">MCP · Skill — 쓰기 0건</span></li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- ROUTING MATRIX -->
+<section class="block reveal" id="routing" style="padding-top: 0;">
+    <div class="block-inner">
+        <div class="block-eyebrow">
+            <span class="en-only">Decision Guide</span>
+            <span class="ko-only">의사결정 가이드</span>
+        </div>
+        <h2 class="block-title">
+            <span class="en-only">Which channel for <span class="accent-word">which task</span>?</span>
+            <span class="ko-only">어떤 작업에 <span class="accent-word">어떤 채널</span>?</span>
+        </h2>
+        <p class="block-lede">
+            <span class="en-only">Pick by intent. The label inside each card is the recommended channel — sometimes one, sometimes a combination. "App only" means no other channel can do it.</span>
+            <span class="ko-only">의도로 고르세요. 카드 안의 라벨이 추천 채널 — 단일 또는 조합. "App only"는 다른 채널에선 불가능한 작업.</span>
+        </p>
+
+        <div class="cat-grid">
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Capture</div><div class="cat-name">Online meeting</div><div class="cat-sub">Desktop (Zoom · Meet · Teams 자동 감지 + 시스템 오디오)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Capture</div><div class="cat-name">In-person talk</div><div class="cat-sub">Plaud Note HW (디바이스 휴대)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Browse</div><div class="cat-name">"최근 녹음 / 요약"</div><div class="cat-sub">MCP (Claude 대화 중 자연어 호출)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Browse</div><div class="cat-name">GUI 빠른 탐색</div><div class="cat-sub">Desktop 또는 Web (Ask Plaud 인용 Q&A 포함)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Edit</div><div class="cat-name">제목 / 폴더 변경</div><div class="cat-sub">Web · Desktop · App (셋 다 가능)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Edit</div><div class="cat-name">스피커 라벨</div><div class="cat-sub">Web 또는 Desktop (Plaud 서버 반영)</div></div>
+            <div class="cat-cell" style="background: color-mix(in srgb, var(--cmds-green) 6%, transparent);"><div class="cat-num" style="font-size: 14px;">⭐ App only</div><div class="cat-name">AI 자동 분류</div><div class="cat-sub"><code>plaud classify --apply</code> (14 카테고리 SSOT)</div></div>
+            <div class="cat-cell" style="background: color-mix(in srgb, var(--cmds-green) 6%, transparent);"><div class="cat-num" style="font-size: 14px;">⭐ App only</div><div class="cat-name">Obsidian 회의록</div><div class="cat-sub"><code>plaud meeting-note</code> · <code>plaud obsidian</code></div></div>
+            <div class="cat-cell" style="background: color-mix(in srgb, var(--cmds-green) 6%, transparent);"><div class="cat-num" style="font-size: 14px;">⭐ App only</div><div class="cat-name">자체 STT 재전사</div><div class="cat-sub"><code>plaud cmds-transcribe</code> (ElevenLabs)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Export</div><div class="cat-name">노션 / Slack / 이메일</div><div class="cat-sub">MCP → <code>plaud-export</code> · 또는 Desktop → Zapier</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Export</div><div class="cat-name">27+ 형식</div><div class="cat-sub">Desktop (공식 export)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Bulk</div><div class="cat-name">오디오 일괄 백업</div><div class="cat-sub">Skill (<code>download-file.sh</code>) 또는 App (<code>plaud download</code>)</div></div>
+        </div>
+    </div>
+</section>
+
+<!-- WORKFLOWS — channel combinations -->
+<section class="block reveal" id="workflows" style="padding-top: 0;">
+    <div class="block-inner">
+        <div class="block-eyebrow">
+            <span class="en-only">Real-world combos</span>
+            <span class="ko-only">실전 조합 패턴</span>
+        </div>
+        <h2 class="block-title">
+            <span class="en-only">A full meeting workflow <span class="accent-word">stitches all five</span>.</span>
+            <span class="ko-only">제대로 된 회의 워크플로우는 <span class="accent-word">5축을 모두</span> 엮습니다.</span>
+        </h2>
+        <p class="block-lede">
+            <span class="en-only">No single channel covers a serious workflow end-to-end. The fluent pattern is to <em>chain</em> them — each channel doing what it's best at.</span>
+            <span class="ko-only">한 채널로 풀스택 워크플로우가 돌아가지 않습니다. 잘 쓰는 사람은 <em>체이닝</em>합니다 — 각 채널이 가장 잘하는 일만 시키는 방식.</span>
+        </p>
+
+        <div class="teaser-box">
+            <div class="teaser-tabs">
+                <button class="teaser-tab active">💻 meeting-workflow.sh</button>
+            </div>
+            <div class="teaser-code"><span class="yaml-com"># 1) Desktop — Zoom 회의 자동 감지 + 슬라이드 스크린샷</span>
+<span class="yaml-com"># (사용자 액션 없음, Plaud Cloud로 자동 sync)</span>
+
+<span class="yaml-com"># 2) App — 로컬 sync + AI 자동 분류</span>
+$ <span class="yaml-key">cd</span> ~/DEV/plaud-note-manager
+$ <span class="yaml-key">uv run plaud sync</span>
+$ <span class="yaml-key">uv run plaud classify --apply</span>     <span class="yaml-com"># 14 카테고리 SSOT로 자동 폴더 배치</span>
+
+<span class="yaml-com"># 3) App — Obsidian 회의록 송출</span>
+$ <span class="yaml-key">uv run plaud meeting-note</span> 07a961a46137012b9e1928bb9c088f6c
+
+<span class="yaml-com"># 4) MCP — Claude 대화 중 follow-up 이메일 초안</span>
+<span class="yaml-str">"이 회의로 follow-up 이메일 만들어줘"</span>  <span class="yaml-com"># → plaud-followup 자동 라우팅</span>
+
+<span class="yaml-com"># 5) Web — 외부 메모/노션에 박을 영구 URL</span>
+$ <span class="yaml-key">uv run plaud web</span> 07a961a4... --copy
+<span class="yaml-str">https://web.plaud.ai/file/07a961a46137012b9e1928bb9c088f6c</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- CTA -->
+<section class="cta-block">
+    <div class="cta-inner">
+        <h2 class="cta-title">
+            <span class="en-only">Pick the right door.<br>Chain when you must.</span>
+            <span class="ko-only">알맞은 문을 고르세요.<br>필요하면 엮으세요.</span>
+        </h2>
+        <p class="cta-lede">
+            <span class="en-only">Full source-of-truth doc lives in the App repo. Summary lives in the Obsidian vault. Both are linked below so you can pick up from either side next session.</span>
+            <span class="ko-only">상세 SSOT는 App 저장소에, 요약본은 Obsidian 볼트에 있습니다. 두 경로 다 아래 링크 — 다음 세션은 어느 쪽에서도 이어가실 수 있어요.</span>
+        </p>
+        <div class="cta-buttons">
+            <a class="btn-white" href="https://web.plaud.ai" target="_blank" rel="noopener">
+                <span class="en-only">Open Plaud Web</span><span class="ko-only">Plaud Web 열기</span>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </a>
+            <a class="btn-outline" href="https://www.plaud.ai/pages/plaud-desktop" target="_blank" rel="noopener">
+                <span class="en-only">Get Desktop</span><span class="ko-only">Desktop 받기</span>
+            </a>
+            <a class="btn-outline" href="https://docs.plaud.ai/mcp" target="_blank" rel="noopener">Plaud MCP docs ↗</a>
+        </div>
+    </div>
+</section>
+
+<!-- BRAND LOCKUP (sign-off) -->
+<section class="brand-lockup reveal">
+    <div class="brand-lockup-inner">
+        <img class="lockup-img lockup-light" src="/assets/logos/cmds-logo-typo-black.png" alt="CMDSPACE" loading="lazy">
+        <img class="lockup-img lockup-dark" src="/assets/logos/cmds-logo-typo-white.png" alt="CMDSPACE" loading="lazy">
+        <p class="lockup-tagline">
+            <span class="en-only">A CMDSPACE field note on Plaud.</span>
+            <span class="ko-only">CMDSPACE의 Plaud 사용 필드노트.</span>
+        </p>
+    </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="footer">
+    <div class="footer-inner">
+        <div>© 2026 CMDSPACE · Yohan Koo</div>
+        <div class="footer-links">
+            <a href="https://cmdspace.work" target="_blank" rel="noopener">cmdspace.work</a>
+            <a href="https://web.plaud.ai" target="_blank" rel="noopener">Plaud Web ↗</a>
+            <a href="https://docs.plaud.ai/mcp" target="_blank" rel="noopener">MCP docs ↗</a>
+            <a href="https://www.plaud.ai/pages/plaud-desktop" target="_blank" rel="noopener">Desktop ↗</a>
+        </div>
+    </div>
+</footer>
+
+<script>
+(function() {
+    'use strict';
+
+    function applyLang(lang) {
+        document.documentElement.lang = lang;
+        document.documentElement.dataset.lang = lang;
+        document.getElementById('langLabel').textContent = lang === 'en' ? '한' : 'EN';
+        localStorage.setItem('cmds-lang', lang);
+    }
+
+    function applyTheme(theme) {
+        document.documentElement.dataset.theme = theme;
+        localStorage.setItem('cmds-theme', theme);
+        const icon = document.getElementById('themeIcon');
+        if (theme === 'dark') {
+            icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+        } else {
+            icon.innerHTML = '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>';
+        }
+    }
+
+    document.getElementById('langToggle').addEventListener('click', () => {
+        applyLang(document.documentElement.dataset.lang === 'en' ? 'ko' : 'en');
+    });
+    document.getElementById('themeToggle').addEventListener('click', () => {
+        applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+    });
+
+    // Reveal on scroll
+    const io = new IntersectionObserver((entries) => {
+        entries.forEach(e => { if (e.isIntersecting) { e.target.classList.add('visible'); io.unobserve(e.target); } });
+    }, { rootMargin: '-10% 0px -10% 0px' });
+    document.querySelectorAll('.reveal').forEach(el => io.observe(el));
+
+    // ═══ Double-click empty space → toggle scroll to bottom / top ═══
+    document.addEventListener('dblclick', (e) => {
+        // only act on true empty areas — skip if the target is interactive/text content
+        const tag = e.target.tagName;
+        if (['A','BUTTON','INPUT','TEXTAREA','CODE','PRE','IMG','SVG','PATH','SPAN'].includes(tag)) return;
+        // also skip if user has selected text
+        if (window.getSelection().toString().length > 0) return;
+
+        const scrollY = window.scrollY;
+        const max = document.documentElement.scrollHeight - window.innerHeight;
+        const mid = max / 2;
+        // in top half → scroll to bottom; in bottom half → scroll to top
+        window.scrollTo({ top: scrollY < mid ? max : 0, behavior: 'smooth' });
+    });
+
+    // Init
+    applyLang(localStorage.getItem('cmds-lang') || 'en');
+    applyTheme(localStorage.getItem('cmds-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'));
+})();
+</script>
+
+</body>
+</html>

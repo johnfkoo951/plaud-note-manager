@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>OG Landing</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@font-face {
+    font-family: 'Pretendard';
+    src: url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/Pretendard-Bold.otf') format('opentype');
+    font-weight: 700;
+}
+@font-face {
+    font-family: 'Pretendard';
+    src: url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/Pretendard-Regular.otf') format('opentype');
+    font-weight: 400;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 1200px; height: 630px; overflow: hidden; }
+body {
+    font-family: -apple-system, 'SF Pro Display', Inter, 'Pretendard', sans-serif;
+    background: #fbfbfa;
+    color: #0a0d0b;
+    position: relative;
+    padding: 64px 72px;
+    display: flex; flex-direction: column; justify-content: space-between;
+}
+
+/* Green glow background */
+body::before {
+    content: '';
+    position: absolute;
+    top: -300px; right: -300px;
+    width: 900px; height: 900px;
+    background: radial-gradient(circle at center,
+        rgba(19,69,56,0.12) 0%,
+        transparent 60%);
+    pointer-events: none;
+}
+
+.top-row {
+    display: flex; align-items: center; justify-content: space-between;
+    position: relative;
+}
+.brand {
+    display: flex; align-items: center; gap: 14px;
+    font-weight: 600; font-size: 20px;
+    letter-spacing: -0.018em;
+    color: #0a0d0b;
+}
+.brand-mark {
+    width: 48px; height: 48px;
+    border-radius: 50%;
+    object-fit: contain;
+}
+
+.version-pill {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-family: 'SF Pro Text', Inter, 'Pretendard', sans-serif;
+    font-size: 15px;
+    font-weight: 500;
+    letter-spacing: -0.005em;
+    color: #134538;
+    padding: 8px 18px;
+    background: #f1f7f4;
+    border-radius: 999px;
+    border: 1px solid rgba(19,69,56,0.15);
+}
+.version-pill::before {
+    content: '';
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: #134538;
+    box-shadow: 0 0 0 4px rgba(19,69,56,0.18);
+}
+
+.main {
+    position: relative;
+    z-index: 1;
+}
+.title {
+    font-family: 'SF Pro Display', Inter, 'Pretendard', sans-serif;
+    font-weight: 700;
+    font-size: 96px;
+    line-height: 1.02;
+    letter-spacing: -0.042em;
+    color: #0a0d0b;
+    margin-bottom: 28px;
+}
+.title .accent {
+    background: linear-gradient(135deg, #134538 0%, #22896a 50%, #2fb488 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+.lede {
+    font-family: 'SF Pro Text', Inter, 'Pretendard', sans-serif;
+    font-size: 22px;
+    line-height: 1.45;
+    letter-spacing: -0.01em;
+    color: #4a544f;
+    max-width: 880px;
+    font-weight: 400;
+}
+
+.bottom-row {
+    display: flex; align-items: center; justify-content: space-between;
+    position: relative;
+    z-index: 1;
+}
+.stats {
+    display: flex; gap: 40px;
+}
+.stat .val {
+    font-family: 'SF Pro Display', Inter, 'Pretendard', sans-serif;
+    font-size: 28px;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    color: #0a0d0b;
+    line-height: 1;
+}
+.stat .lbl {
+    font-size: 13px;
+    color: #8a938e;
+    margin-top: 4px;
+    letter-spacing: -0.005em;
+}
+.url {
+    font-family: ui-monospace, 'SF Mono', 'Menlo', monospace;
+    font-size: 16px;
+    color: #134538;
+    font-weight: 500;
+}
+</style>
+</head>
+<body>
+<div class="top-row">
+    <div class="brand">
+        <img class="brand-mark" src="logo-round.png" alt="CMDS">
+        <span>Plaud Access Layers</span>
+    </div>
+    <div class="version-pill">2026-05 · CMDSPACE</div>
+</div>
+
+<div class="main">
+    <h1 class="title">
+        One Plaud account.<br><span class="accent">Five channels</span> to use it.
+    </h1>
+    <p class="lede">
+        Web · Desktop · MCP · Skill · App — read · edit · automate. 어떤 채널을 언제 써야 하는지 결정하는 SSOT.
+    </p>
+</div>
+
+<div class="bottom-row">
+    <div class="stats">
+        <div class="stat"><div class="val">5</div><div class="lbl">channels</div></div>
+        <div class="stat"><div class="val">2</div><div class="lbl">roles</div></div>
+        <div class="stat"><div class="val">9</div><div class="lbl">API endpoints</div></div>
+        <div class="stat"><div class="val">14</div><div class="lbl">auto-classify</div></div>
+    </div>
+    <div class="url">plaud.cmdspace.work</div>
+</div>
+</body>
+</html>
