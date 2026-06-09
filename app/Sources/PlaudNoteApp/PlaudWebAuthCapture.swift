@@ -4,7 +4,7 @@ struct PlaudWebAuthCapture: Codable, Equatable {
     var authorization: String
     var xDeviceID: String
     var xPldUser: String
-    var cookie: String
+    var cookie: String?
     var xPldTag: String?
     var baseURL: String?
     var appLanguage: String?

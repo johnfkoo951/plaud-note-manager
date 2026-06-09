@@ -73,6 +73,29 @@ def test_import_web_auth_rejects_missing_required_headers(tmp_path) -> None:
     assert "x_pld_user" in result.detail
 
 
+def test_import_web_auth_accepts_header_only_capture_after_live_validation(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_auth_env(monkeypatch)
+    env_path = tmp_path / ".env"
+
+    result = import_web_auth(
+        {
+            "authorization": "Bearer header.only",
+            "x_device_id": "device-from-webkit",
+            "x_pld_user": "user-from-webkit",
+        },
+        env_path=env_path,
+        live_validator=lambda: True,
+    )
+
+    assert result.status == "ok"
+    assert result.cookie_captured is False
+    written = env_path.read_text(encoding="utf-8")
+    assert "PLAUD_AUTHORIZATION='Bearer header.only'" in written
+    assert "PLAUD_COOKIE" not in written
+
+
 def test_import_web_auth_restores_previous_env_when_live_validation_fails(
     tmp_path, monkeypatch
 ) -> None:

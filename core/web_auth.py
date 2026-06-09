@@ -129,14 +129,14 @@ def import_web_auth(
         "authorization": _clean(parsed.authorization),
         "x_device_id": _clean(parsed.x_device_id),
         "x_pld_user": _clean(parsed.x_pld_user),
-        "cookie": _clean(parsed.cookie),
     }
     missing = [key for key, value in required.items() if value is None]
+    cookie = _clean(parsed.cookie)
     if missing:
         return WebAuthResult(
             "missing_required",
             "missing required Web Login fields: " + ", ".join(missing),
-            cookie_captured=required["cookie"] is not None,
+            cookie_captured=cookie is not None,
         )
 
     values = dict(DEFAULTS)
@@ -145,7 +145,8 @@ def import_web_auth(
     values["PLAUD_AUTHORIZATION"] = required["authorization"] or ""
     values["PLAUD_X_DEVICE_ID"] = required["x_device_id"] or ""
     values["PLAUD_X_PLD_USER"] = required["x_pld_user"] or ""
-    values["PLAUD_COOKIE"] = required["cookie"] or ""
+    if cookie:
+        values["PLAUD_COOKIE"] = cookie
 
     optional = {
         "PLAUD_X_PLD_TAG": parsed.x_pld_tag,
@@ -176,11 +177,11 @@ def import_web_auth(
             return WebAuthResult(
                 "live_auth_failed",
                 "captured Plaud credentials were rejected; restored previous .env",
-                cookie_captured=True,
+                cookie_captured=cookie is not None,
             )
 
     return WebAuthResult(
         "ok",
         "credentials refreshed from Plaud Web Login",
-        cookie_captured=True,
+        cookie_captured=cookie is not None,
     )

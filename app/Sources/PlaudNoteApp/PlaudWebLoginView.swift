@@ -3,66 +3,6 @@ import WebKit
 
 private let plaudAuthMessageName = "plaudAuthCapture"
 
-private let plaudAuthCaptureScript = """
-(() => {
-  if (window.__plaudAuthCaptureInstalled) { return; }
-  window.__plaudAuthCaptureInstalled = true;
-  const targetHost = "api-apne1.plaud.ai";
-  const post = (url, headers) => {
-    try {
-      const rawURL = String(url || "");
-      if (!rawURL.includes(targetHost)) { return; }
-      window.webkit.messageHandlers.plaudAuthCapture.postMessage({
-        url: rawURL,
-        headers: headers || {}
-      });
-    } catch (_) {}
-  };
-  const headersObject = (headers) => {
-    const out = {};
-    if (!headers) { return out; }
-    try {
-      if (headers instanceof Headers) {
-        headers.forEach((value, key) => { out[String(key).toLowerCase()] = String(value); });
-        return out;
-      }
-      if (Array.isArray(headers)) {
-        headers.forEach((pair) => {
-          if (pair && pair.length >= 2) { out[String(pair[0]).toLowerCase()] = String(pair[1]); }
-        });
-        return out;
-      }
-      Object.keys(headers).forEach((key) => { out[String(key).toLowerCase()] = String(headers[key]); });
-    } catch (_) {}
-    return out;
-  };
-  const originalFetch = window.fetch;
-  window.fetch = function(input, init) {
-    const inputHeaders = input && input.headers ? headersObject(input.headers) : {};
-    const initHeaders = init && init.headers ? headersObject(init.headers) : {};
-    const url = typeof input === "string" ? input : input && input.url;
-    post(url, Object.assign({}, inputHeaders, initHeaders));
-    return originalFetch.apply(this, arguments);
-  };
-  const originalOpen = XMLHttpRequest.prototype.open;
-  const originalSetRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
-  const originalSend = XMLHttpRequest.prototype.send;
-  XMLHttpRequest.prototype.open = function(method, url) {
-    this.__plaudAuthURL = url;
-    this.__plaudAuthHeaders = {};
-    return originalOpen.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.setRequestHeader = function(key, value) {
-    this.__plaudAuthHeaders[String(key).toLowerCase()] = String(value);
-    return originalSetRequestHeader.apply(this, arguments);
-  };
-  XMLHttpRequest.prototype.send = function() {
-    post(this.__plaudAuthURL, this.__plaudAuthHeaders);
-    return originalSend.apply(this, arguments);
-  };
-})();
-"""
-
 enum PlaudWebSession {
     static func clear(completion: @escaping () -> Void) {
         let store = WKWebsiteDataStore.default()
@@ -122,6 +62,7 @@ struct PlaudWebLoginView: NSViewRepresentable {
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
         webView.navigationDelegate = context.coordinator
+        webView.uiDelegate = context.coordinator
         context.coordinator.webView = webView
         webView.load(URLRequest(url: URL(string: "https://web.plaud.ai/")!))
         return webView
@@ -129,11 +70,12 @@ struct PlaudWebLoginView: NSViewRepresentable {
 
     func updateNSView(_ webView: WKWebView, context: Context) {}
 
-    final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var latestHeaders: [String: String] = [:]
         var latestURL: URL?
         var isEmitting = false
         var didCapture = false
+        var cookieReadAttempts = 0
         weak var webView: WKWebView?
 
         private let onCapture: (PlaudWebAuthCapture) -> Void
@@ -156,6 +98,18 @@ struct PlaudWebLoginView: NSViewRepresentable {
             onStatus("Plaud Web failed to load: \(error.localizedDescription)")
         }
 
+        func webView(
+            _ webView: WKWebView,
+            createWebViewWith configuration: WKWebViewConfiguration,
+            for navigationAction: WKNavigationAction,
+            windowFeatures: WKWindowFeatures
+        ) -> WKWebView? {
+            if navigationAction.targetFrame == nil {
+                webView.load(navigationAction.request)
+            }
+            return nil
+        }
+
         func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
@@ -172,6 +126,7 @@ struct PlaudWebLoginView: NSViewRepresentable {
             for (key, value) in headers {
                 latestHeaders[key.lowercased()] = String(describing: value)
             }
+            cookieReadAttempts = 0
             emitIfComplete()
         }
 
@@ -202,33 +157,54 @@ struct PlaudWebLoginView: NSViewRepresentable {
                     .joined(separator: "; ")
 
                 DispatchQueue.main.async {
-                    guard !cookieLine.isEmpty else {
+                    if cookieLine.isEmpty && self.cookieReadAttempts < 6 {
+                        self.cookieReadAttempts += 1
                         self.isEmitting = false
                         self.onStatus("Captured headers; waiting for Plaud cookies.")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            self.emitIfComplete()
+                        }
                         return
                     }
-
-                    self.didCapture = true
-                    self.isEmitting = false
-                    self.onStatus("Captured Plaud session. Saving locally.")
-                    self.onCapture(
-                        PlaudWebAuthCapture(
-                            authorization: authorization,
-                            xDeviceID: deviceID,
-                            xPldUser: user,
-                            cookie: cookieLine,
-                            xPldTag: self.header("x-pld-tag"),
-                            baseURL: self.baseURLString(),
-                            appLanguage: self.header("app-language"),
-                            appPlatform: self.header("app-platform"),
-                            editFrom: self.header("edit-from"),
-                            origin: self.header("origin"),
-                            referer: self.header("referer"),
-                            timezone: self.header("timezone")
-                        )
+                    self.finishCapture(
+                        authorization: authorization,
+                        deviceID: deviceID,
+                        user: user,
+                        cookieLine: cookieLine
                     )
                 }
             }
+        }
+
+        private func finishCapture(
+            authorization: String,
+            deviceID: String,
+            user: String,
+            cookieLine: String
+        ) {
+            didCapture = true
+            isEmitting = false
+            onStatus(
+                cookieLine.isEmpty
+                    ? "Captured headers. Saving without cookies."
+                    : "Captured Plaud session. Saving locally."
+            )
+            onCapture(
+                PlaudWebAuthCapture(
+                    authorization: authorization,
+                    xDeviceID: deviceID,
+                    xPldUser: user,
+                    cookie: cookieLine.isEmpty ? nil : cookieLine,
+                    xPldTag: header("x-pld-tag"),
+                    baseURL: baseURLString(),
+                    appLanguage: header("app-language"),
+                    appPlatform: header("app-platform"),
+                    editFrom: header("edit-from"),
+                    origin: header("origin"),
+                    referer: header("referer"),
+                    timezone: header("timezone")
+                )
+            )
         }
 
         private func baseURLString() -> String? {
