@@ -28,6 +28,7 @@ class PlaudConfig(BaseModel):
     origin: str = "https://web.plaud.ai"
     referer: str = "https://web.plaud.ai/"
     timezone: str = "Asia/Seoul"
+    cookie: str = ""
 
     def headers(self) -> dict[str, str]:
         h = {
@@ -44,6 +45,8 @@ class PlaudConfig(BaseModel):
         }
         if self.x_pld_tag:  # only send the legacy tag header when present
             h["x-pld-tag"] = self.x_pld_tag
+        if self.cookie:
+            h["cookie"] = self.cookie
         return h
 
 
@@ -76,4 +79,5 @@ def load_config(env_file: Path | None = None) -> PlaudConfig:
         origin=os.environ.get("PLAUD_ORIGIN", "https://web.plaud.ai"),
         referer=os.environ.get("PLAUD_REFERER", "https://web.plaud.ai/"),
         timezone=os.environ.get("PLAUD_TIMEZONE", "Asia/Seoul"),
+        cookie=os.environ.get("PLAUD_COOKIE", ""),
     )

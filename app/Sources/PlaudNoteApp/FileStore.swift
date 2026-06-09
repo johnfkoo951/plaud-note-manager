@@ -124,6 +124,10 @@ final class FileStore: ObservableObject {
     /// Latest Plaud credential health, refreshed at launch, after each sync,
     /// and on app activation. Drives the toolbar auth-status indicator.
     @Published var auth: AuthStatus?
+    /// True while `refreshAuthCredentials()` parses the copied Plaud cURL and
+    /// rewrites `.env`. Drives auth UI spinners and disabled
+    /// state.
+    @Published var refreshingAuth = false
 
     private var cloudSyncTimer: Timer?
     private var cloudSyncInterval: TimeInterval = 30
@@ -157,6 +161,9 @@ final class FileStore: ObservableObject {
                 .components(separatedBy: .newlines)
                 .map { trimTraceLine($0) }
                 .filter { !$0.isEmpty }
+            if cleaned.localizedCaseInsensitiveContains("workspace token expired") {
+                return "Plaud auth expired. Use auth > Sign in with Plaud, then retry."
+            }
 
             if cleaned.localizedCaseInsensitiveContains("traceback")
                 || cleaned.localizedCaseInsensitiveContains("most recent call last") {
@@ -396,7 +403,7 @@ final class FileStore: ObservableObject {
     func refreshAuth(live: Bool = false) async {
         var args = ["auth", "--json"]
         if live { args.append("--live") }
-        let output = await runPlaudOutput(args: args)
+        let output = await runPlaudOutput(args: args, showError: false)
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = trimmed.data(using: .utf8), !data.isEmpty else {
             auth = AuthStatus.unknown(detail: "No output from plaud auth.")
@@ -408,6 +415,82 @@ final class FileStore: ObservableObject {
             auth = AuthStatus.unknown(
                 detail: "Could not read auth status from Plaud CLI."
             )
+        }
+    }
+
+    /// Minimal shape of `plaud refresh-auth --json`'s output. The credential
+    /// itself is *never* in this payload — the command writes it straight to
+    /// `.env` after parsing the copied Plaud cURL.
+    private struct RefreshAuthResult: Decodable {
+        let status: String
+        let detail: String?
+    }
+
+    /// Refresh Plaud credentials from a Plaud API cURL. When `curlText` is nil,
+    /// the CLI falls back to the macOS pasteboard for the lightweight toolbar
+    /// flow. The full in-app auth sheet passes pasted text directly via stdin,
+    /// so the user never needs to run terminal commands.
+    ///
+    /// On success we re-run a *live* `refreshAuth()` so the toolbar indicator
+    /// reflects the new token, and a `sync()` so the library picks up anything
+    /// that was previously blocked on auth. The token/cookie are never surfaced
+    /// — we only read the `status`/`detail` fields the command prints.
+    @discardableResult
+    func refreshAuthCredentials(curlText: String? = nil) async -> Bool {
+        guard !refreshingAuth else { return false }
+        refreshingAuth = true
+        defer { refreshingAuth = false }
+
+        let cleanCurl = curlText?.trimmingCharacters(in: .whitespacesAndNewlines)
+        var args = ["refresh-auth", "--json"]
+        let stdinText: String?
+        if let cleanCurl, !cleanCurl.isEmpty {
+            args.append("--stdin")
+            stdinText = cleanCurl
+        } else {
+            stdinText = nil
+        }
+
+        let output = await runPlaudOutput(
+            args: args,
+            stdin: stdinText,
+            timeout: 20,
+            showError: false
+        )
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let data = trimmed.data(using: .utf8), !data.isEmpty,
+              let result = try? JSONDecoder().decode(RefreshAuthResult.self, from: data)
+        else {
+            lastCommandError = trimmed.isEmpty
+                ? "인증 갱신에 실패했습니다 — Plaud CLI에서 응답이 없습니다."
+                : "인증 갱신 응답을 해석하지 못했습니다: \(trimmed.prefix(200))"
+            return false
+        }
+
+        let detail = result.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let detailOrNil = (detail?.isEmpty ?? true) ? nil : detail
+
+        switch result.status {
+        case "ok":
+            lastCommandError = nil
+            // Update the indicator with a live check, then reload the library.
+            await refreshAuth(live: true)
+            await sync(showError: false)
+            return true
+        case "clipboard_empty":
+            lastCommandError = detailOrNil
+                ?? "Plaud API 요청을 cURL로 복사한 뒤 다시 눌러주세요."
+            return false
+        case "pbpaste_missing":
+            lastCommandError = detailOrNil
+                ?? "macOS 클립보드를 읽을 수 없습니다. 인증 창에 Plaud cURL을 직접 붙여넣어 주세요."
+            return false
+        default:
+            // invalid_curl | anything else.
+            let suffix = detailOrNil.map { " — \($0)" } ?? ""
+            lastCommandError = "인증 갱신에 실패했습니다 (\(result.status))\(suffix)"
+            return false
         }
     }
 
@@ -743,18 +826,67 @@ final class FileStore: ObservableObject {
         audioURL = url
     }
 
-    private func runPlaudOutput(args: [String]) async -> String {
+    /// Shell out to `uv run plaud …` and return stdout.
+    ///
+    /// `timeout` (seconds) is an optional watchdog: when set, the process is
+    /// terminated if it overruns. When `nil` (the default), behavior is
+    /// unchanged — it waits indefinitely via `waitUntilExit()`, matching every
+    /// existing caller.
+    func runPlaudOutput(
+        args: [String],
+        stdin: String? = nil,
+        timeout: TimeInterval? = nil,
+        showError: Bool = true
+    ) async -> String {
         let result = await Task.detached(priority: .userInitiated) { () -> CommandResult in
             let stdout = Pipe()
             let stderr = Pipe()
+            let input = stdin.map { _ in Pipe() }
             do {
                 let process = try PlaudCommand.makeProcess(args: args)
                 process.standardOutput = stdout
                 process.standardError = stderr
+                if let input {
+                    process.standardInput = input
+                }
                 try process.run()
-                process.waitUntilExit()
+                if let stdin,
+                   let input,
+                   let data = stdin.data(using: .utf8) {
+                    input.fileHandleForWriting.write(data)
+                    input.fileHandleForWriting.closeFile()
+                }
+
+                var timedOut = false
+                if let timeout {
+                    // Arm a watchdog that kills the process if it overruns, then
+                    // wait. Reading the pipes *after* the process exits (or is
+                    // killed) avoids a deadlock on a full pipe buffer for these
+                    // small-output commands.
+                    let watchdog = DispatchWorkItem {
+                        if process.isRunning {
+                            timedOut = true
+                            process.terminate()
+                        }
+                    }
+                    DispatchQueue.global().asyncAfter(
+                        deadline: .now() + timeout, execute: watchdog
+                    )
+                    process.waitUntilExit()
+                    watchdog.cancel()
+                } else {
+                    process.waitUntilExit()
+                }
+
                 let outData = stdout.fileHandleForReading.readDataToEndOfFile()
                 let errData = stderr.fileHandleForReading.readDataToEndOfFile()
+                if timedOut {
+                    return CommandResult(
+                        exitCode: -1,
+                        stdout: String(data: outData, encoding: .utf8) ?? "",
+                        stderr: "plaud command timed out after \(Int(timeout ?? 0))s"
+                    )
+                }
                 return CommandResult(
                     exitCode: process.terminationStatus,
                     stdout: String(data: outData, encoding: .utf8) ?? "",
@@ -768,7 +900,7 @@ final class FileStore: ObservableObject {
                 )
             }
         }.value
-        if !result.ok {
+        if !result.ok && showError {
             lastCommandError = result.failureMessage
         }
         return result.stdout

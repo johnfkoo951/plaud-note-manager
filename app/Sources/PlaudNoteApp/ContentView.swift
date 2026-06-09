@@ -33,7 +33,7 @@ private enum AppearanceMode: String, CaseIterable, Identifiable {
     }
 }
 
-private enum AppUI {
+enum AppUI {
     static let radius: CGFloat = 10
     static let tightRadius: CGFloat = 7
     static let panelPadding: CGFloat = 12
@@ -52,8 +52,20 @@ private enum AppUI {
     static let metaFont = Font.system(size: 11.5, weight: .medium)
     static let controlFont = Font.system(size: 12.5, weight: .semibold)
 
+    static let brandGreen = Color(red: 0.075, green: 0.271, blue: 0.220)
+    static let accentPink = Color(red: 0.847, green: 0.365, blue: 0.525)
     static let subtleFill = Color(NSColor.controlBackgroundColor).opacity(0.58)
     static let selectedFill = Color(NSColor.controlBackgroundColor).opacity(0.95)
+    static let cardFill = Color(NSColor.controlBackgroundColor).opacity(0.44)
+    static let cardStroke = Color(NSColor.separatorColor).opacity(0.42)
+}
+
+private func formatRecordingDurationMs(_ ms: Double?) -> String {
+    guard let ms, ms > 0 else { return "—" }
+    let s = Int(ms / 1000.0)
+    if s >= 3600 { return "\(s/3600)h \((s%3600)/60)m" }
+    if s >= 60 { return "\(s/60)m \(s%60)s" }
+    return "\(s)s"
 }
 
 @MainActor
@@ -168,9 +180,6 @@ private enum AuthStateStyle {
     }
 }
 
-/// The re-onboard command shown (and copyable) when the token needs refreshing.
-private let plaudReauthCommand = "pbpaste | uv run plaud onboard"
-
 /// Format an epoch-second timestamp as a compact local date+time, or "—".
 private func formatAuthEpoch(_ epoch: Int?) -> String {
     guard let epoch else { return "—" }
@@ -184,6 +193,7 @@ private func formatAuthEpoch(_ epoch: Int?) -> String {
 private struct AuthStatusIndicator: View {
     @ObservedObject var store: FileStore
     @State private var showPopover = false
+    @State private var showAuthSheet = false
     @State private var verifying = false
 
     private var style: AuthStateStyle { AuthStateStyle(store.auth?.state) }
@@ -238,6 +248,12 @@ private struct AuthStatusIndicator: View {
         .popover(isPresented: $showPopover, arrowEdge: .bottom) {
             popoverContent
         }
+        .sheet(isPresented: $showAuthSheet) {
+            PlaudAuthSheet(store: store) {
+                showAuthSheet = false
+                showPopover = false
+            }
+        }
     }
 
     private var popoverContent: some View {
@@ -283,35 +299,28 @@ private struct AuthStatusIndicator: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Re-authenticate")
                         .font(AppUI.controlFont)
-                    Text("Copy a fresh cURL from web.plaud.ai, then run:")
+                    Text("Sign in with Plaud inside the app. The app captures the web session locally.")
                         .font(AppUI.metaFont)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 6) {
-                        Text(plaudReauthCommand)
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(
-                                AppUI.subtleFill,
-                                in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
-                            )
-                        Button {
-                            let pb = NSPasteboard.general
-                            pb.clearContents()
-                            pb.setString(plaudReauthCommand, forType: .string)
-                        } label: {
-                            Image(systemName: "doc.on.clipboard")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Copy command to clipboard")
+                    Button {
+                        showAuthSheet = true
+                    } label: {
+                        Label("Sign in with Plaud", systemImage: "key.viewfinder")
                     }
+                    .buttonStyle(.borderedProminent)
                 }
             }
 
             Divider()
-            HStack {
+            HStack(spacing: 8) {
+                Button {
+                    NSWorkspace.shared.open(URL(string: "https://web.plaud.ai/")!)
+                } label: {
+                    Label("Open Plaud", systemImage: "safari")
+                }
+                .help("Open web.plaud.ai in your browser")
+
                 Button {
                     verifying = true
                     Task {
@@ -326,13 +335,12 @@ private struct AuthStatusIndicator: View {
                         Text("Verify now")
                     }
                 }
-                .disabled(verifying)
+                .disabled(verifying || store.refreshingAuth)
                 .help("Ping the Plaud API to confirm the token still works")
-                Spacer()
             }
         }
         .padding(AppUI.spacingL)
-        .frame(width: 300)
+        .frame(width: 360)
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {
@@ -802,6 +810,11 @@ private struct FileListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            LibraryOverview(store: store)
+                .padding(.horizontal, AppUI.spacingM)
+                .padding(.top, AppUI.spacingM)
+                .padding(.bottom, 10)
+
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search filename", text: $store.search)
@@ -816,8 +829,11 @@ private struct FileListView: View {
 
             List(selection: $store.selectedID) {
                 ForEach(store.files) { file in
-                    FileRow(file: file)
+                    FileRow(file: file, isSelected: store.selectedID == file.id)
                         .tag(Optional(file.id))
+                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                         .contextMenu {
                             Button("Rename…") {
                                 if let newName = promptForFilename(current: file.filename ?? "") {
@@ -858,79 +874,197 @@ private struct FileListView: View {
                             Button("Transcribe with ElevenLabs") {
                                 Task { await store.transcribeWithElevenLabs(file.id) }
                             }
-                        }
+                    }
                 }
             }
+            .listStyle(.plain)
         }
+    }
+}
+
+private struct LibraryOverview: View {
+    @ObservedObject var store: FileStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CMDSPACE")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundStyle(AppUI.brandGreen)
+                    Text("Recordings")
+                        .font(.system(size: 22, weight: .bold))
+                }
+                Spacer()
+                Image(systemName: "waveform.badge.sparkles")
+                    .font(.system(size: 18, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(AppUI.accentPink)
+            }
+
+            HStack(spacing: 7) {
+                MiniMetricCard(
+                    label: "All",
+                    value: "\(store.categoryCounts.all)",
+                    systemName: "tray.full",
+                    color: AppUI.brandGreen
+                )
+                MiniMetricCard(
+                    label: "Unfiled",
+                    value: "\(store.categoryCounts.unfiled)",
+                    systemName: "tray",
+                    color: AnuPalette.sky
+                )
+                MiniMetricCard(
+                    label: "Cached",
+                    value: "\(store.cacheStatus.cached)/\(store.cacheStatus.total)",
+                    systemName: "bolt.horizontal.circle",
+                    color: AppUI.accentPink
+                )
+            }
+        }
+        .padding(12)
+        .background(
+            LinearGradient(
+                colors: [
+                    AppUI.brandGreen.opacity(0.13),
+                    AppUI.accentPink.opacity(0.09),
+                    AppUI.cardFill,
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: AppUI.radius)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.radius)
+                .stroke(AppUI.cardStroke, lineWidth: 1)
+        )
+    }
+}
+
+private struct MiniMetricCard: View {
+    let label: String
+    let value: String
+    let systemName: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 4) {
+                Image(systemName: systemName)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                Text(label)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(color)
+            Text(value)
+                .font(.system(size: 14, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+        }
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppUI.cardStroke.opacity(0.7), lineWidth: 1)
+        )
     }
 }
 
 private struct FileRow: View {
     let file: PlaudFileVM
+    let isSelected: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Circle()
-                .fill(file.hasContent ? Color.green : Color.gray.opacity(0.3))
-                .frame(width: 6, height: 6)
-                .padding(.top, 8)
-                .help(file.hasContent ? "Cached" : "Not cached yet")
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                Circle()
+                    .fill(file.hasContent ? Color.green : Color.gray.opacity(0.42))
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 7)
+                    .help(file.hasContent ? "Cached" : "Not cached yet")
                 Text(file.filename ?? "(untitled)")
-                    .font(AppUI.rowTitleFont)
+                    .font(.system(size: 14.5, weight: .bold))
                     .lineLimit(2)
-                HStack(spacing: 8) {
-                    if let date = file.createdAt {
-                        Text(date,
-                             format: .dateTime.month().day().hour().minute())
-                            .font(AppUI.metaFont).foregroundStyle(.secondary)
-                    }
-                    if let durMs = file.durationMs, durMs > 0 {
-                        Text(formatDurationMs(durMs))
-                            .font(AppUI.metaFont).foregroundStyle(.secondary)
-                    }
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                if let date = file.createdAt {
+                    Text(date, format: .dateTime.month().day().hour().minute())
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(metaColor)
                 }
-                if folderLabel != nil || usageOption != nil {
-                    HStack(spacing: 6) {
-                        if let folderLabel {
-                            HStack(spacing: 4) {
-                                Image(systemName: "folder.fill")
-                                    .font(AppUI.metaFont)
-                                    .imageScale(.small)
-                                Text(folderLabel)
-                                    .font(AppUI.metaFont)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                            .foregroundStyle(folderTint)
-                            .help(folderHelpText)
-                        }
-                        if let usageOption {
-                            HStack(spacing: 3) {
-                                Image(systemName: usageOption.symbolName)
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                    .symbolRenderingMode(.hierarchical)
-                                    .frame(width: 12)
-                                Text(usageOption.title)
-                                    .font(AppUI.metaFont)
-                            }
-                            .foregroundStyle(usageOption.color)
-                            .help(usageOption.dbValue)
-                        }
-                    }
-                    .lineLimit(1)
-                }
-                if !file.primaryTags.isEmpty {
-                    HStack(spacing: 5) {
-                        ForEach(Array(file.primaryTags.prefix(3)), id: \.self) { tag in
-                            tagBadge(tagLabel(tag))
-                        }
-                    }
-                    .lineLimit(1)
+                if file.durationMs != nil {
+                    Text(formatRecordingDurationMs(file.durationMs))
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(metaColor)
                 }
             }
+            .padding(.leading, 15)
+
+            if folderLabel != nil || usageOption != nil {
+                HStack(spacing: 6) {
+                    if let folderLabel {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.fill")
+                                .font(AppUI.metaFont)
+                                .imageScale(.small)
+                            Text(folderLabel)
+                                .font(AppUI.metaFont)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.86) : folderTint)
+                        .help(folderHelpText)
+                    }
+                    if let usageOption {
+                        HStack(spacing: 3) {
+                            Image(systemName: usageOption.symbolName)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .symbolRenderingMode(.hierarchical)
+                                .frame(width: 12)
+                            Text(usageOption.title)
+                                .font(AppUI.metaFont)
+                        }
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.86) : usageOption.color)
+                        .help(usageOption.dbValue)
+                    }
+                }
+                .padding(.leading, 15)
+                .lineLimit(1)
+            }
+
+            if !file.primaryTags.isEmpty {
+                HStack(spacing: 5) {
+                    ForEach(Array(file.primaryTags.prefix(3)), id: \.self) { tag in
+                        tagBadge(tagLabel(tag))
+                    }
+                }
+                .padding(.leading, 15)
+                .lineLimit(1)
+            }
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isSelected
+                ? AppUI.accentPink.opacity(0.88)
+                : AppUI.cardFill,
+            in: RoundedRectangle(cornerRadius: AppUI.radius)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.radius)
+                .stroke(isSelected ? Color.white.opacity(0.16) : AppUI.cardStroke,
+                        lineWidth: 1)
+        )
     }
 
     private var folderLabel: String? {
@@ -951,6 +1085,10 @@ private struct FileRow: View {
         UsageStatusOption.resolve(file.usageStatus)
     }
 
+    private var metaColor: Color {
+        isSelected ? Color.white.opacity(0.72) : Color.secondary
+    }
+
     private func tagLabel(_ tag: String) -> String {
         let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("#") ? trimmed : "#\(trimmed)"
@@ -961,18 +1099,13 @@ private struct FileRow: View {
             .font(AppUI.metaFont)
             .lineLimit(1)
             .truncationMode(.tail)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(isSelected ? Color.white.opacity(0.78) : Color.secondary)
             .padding(.horizontal, 7)
             .padding(.vertical, 2.5)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: AppUI.tightRadius))
-    }
-
-    /// Plaud's `duration` is milliseconds. Convert before formatting.
-    private func formatDurationMs(_ ms: Double) -> String {
-        let s = Int(ms / 1000.0)
-        if s >= 3600 { return "\(s/3600)h \((s%3600)/60)m" }
-        if s >= 60 { return "\(s/60)m \(s%60)s" }
-        return "\(s)s"
+            .background(
+                isSelected ? Color.white.opacity(0.12) : Color.primary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
+            )
     }
 }
 
@@ -1109,11 +1242,17 @@ private struct RawTextView: View {
 private struct CenteredStateView: View {
     let message: String
     var loading: Bool = false
+    var systemImage: String? = nil
+    var tint: Color = .secondary
 
     var body: some View {
         HStack(spacing: AppUI.spacingS) {
             if loading {
                 ProgressView().controlSize(.small)
+            } else if let systemImage {
+                Image(systemName: systemImage)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(tint)
             }
             Text(message)
                 .font(AppUI.bodyFont)
@@ -1496,6 +1635,61 @@ private struct SidebarTogglePill: View {
     }
 }
 
+private struct DetailMetricStrip: View {
+    let file: PlaudFileVM
+
+    var body: some View {
+        HStack(spacing: 7) {
+            MiniMetricCard(
+                label: "Duration",
+                value: formatRecordingDurationMs(file.durationMs),
+                systemName: "timer",
+                color: AnuPalette.sky
+            )
+            MiniMetricCard(
+                label: "Folder",
+                value: folderValue,
+                systemName: "folder.fill",
+                color: file.folderColor.flatMap { Color(hex: $0) } ?? AppUI.brandGreen
+            )
+            MiniMetricCard(
+                label: "Cache",
+                value: file.hasContent ? "Ready" : "Pending",
+                systemName: file.hasContent ? "checkmark.circle.fill" : "circle.dashed",
+                color: file.hasContent ? AnuPalette.green : Color.secondary
+            )
+            MiniMetricCard(
+                label: "Status",
+                value: statusValue,
+                systemName: statusSymbol,
+                color: statusColor
+            )
+        }
+    }
+
+    private var folderValue: String {
+        guard let first = file.folderNames.first else { return "Unfiled" }
+        let extra = file.folderNames.count - 1
+        return extra > 0 ? "\(first) +\(extra)" : first
+    }
+
+    private var statusOption: UsageStatusOption? {
+        UsageStatusOption.resolve(file.usageStatus)
+    }
+
+    private var statusValue: String {
+        statusOption?.title ?? "Not Set"
+    }
+
+    private var statusSymbol: String {
+        statusOption?.symbolName ?? "circle"
+    }
+
+    private var statusColor: Color {
+        statusOption?.color ?? .secondary
+    }
+}
+
 private struct DetailView: View {
     @ObservedObject var store: FileStore
     @State private var player: AVPlayer?
@@ -1613,12 +1807,15 @@ private struct DetailView: View {
         // file_content.title — Plaud renames files post-transcription and the
         // cache lags behind. We also let the user click the title to force
         // a detail re-fetch if they want fresh keywords.
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Recording Workspace")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundStyle(AppUI.brandGreen)
                     HStack(spacing: 8) {
                         Text(file.filename ?? store.content?.title ?? "(untitled)")
-                            .font(.system(size: 19, weight: .bold))
+                            .font(.system(size: 21, weight: .bold))
                             .lineLimit(2)
                         Button {
                             if let id = store.selectedID {
@@ -1661,9 +1858,21 @@ private struct DetailView: View {
                     .help("Show AI summaries and Obsidian actions")
                 }
             }
+            DetailMetricStrip(file: file)
             MetadataBar(store: store, file: file)
         }
-        .padding(AppUI.panelPadding)
+        .padding(14)
+        .background(
+            LinearGradient(
+                colors: [
+                    AppUI.brandGreen.opacity(0.12),
+                    AppUI.accentPink.opacity(0.08),
+                    Color(NSColor.windowBackgroundColor).opacity(0.4),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
     }
 
 
@@ -2063,32 +2272,68 @@ private struct PlaudPanel: View {
     @ViewBuilder
     private var content: some View {
         let mode = ContentViewMode(rawValue: viewModeRaw) ?? .rendered
-        switch tab {
-        case .transcript:
-            let transcript = store.content?.transcript ?? ""
-            if mode == .raw {
-                RawTextView(text: transcript)
-            } else {
-                TranscriptBubbleList(text: transcript)
-            }
-        case .summary:
-            if let summaries = store.content?.summaries, !summaries.isEmpty,
-               summaryIndex < summaries.count {
-                let body = summaries[summaryIndex].body
+        if let plaudContent = store.content {
+            switch tab {
+            case .transcript:
+                let transcript = plaudContent.transcript
                 if mode == .raw {
-                    RawTextView(text: body)
+                    RawTextView(text: transcript)
                 } else {
-                    MarkdownDocumentView(text: body)
+                    TranscriptBubbleList(text: transcript)
                 }
-            } else {
-                CenteredStateView(message: "Loading content…", loading: true)
+            case .summary:
+                if !plaudContent.summaries.isEmpty,
+                   summaryIndex < plaudContent.summaries.count {
+                    let body = plaudContent.summaries[summaryIndex].body
+                    if mode == .raw {
+                        RawTextView(text: body)
+                    } else {
+                        MarkdownDocumentView(text: body)
+                    }
+                } else {
+                    CenteredStateView(
+                        message: "No Plaud summary cached for this recording yet.",
+                        systemImage: "doc.text.magnifyingglass"
+                    )
+                }
+            case .outline:
+                let outline = plaudContent.outline
+                if mode == .raw {
+                    RawTextView(text: outline)
+                } else {
+                    MarkdownDocumentView(text: outline)
+                }
             }
-        case .outline:
-            let outline = store.content?.outline ?? ""
-            if mode == .raw {
-                RawTextView(text: outline)
-            } else {
-                MarkdownDocumentView(text: outline)
+        } else {
+            missingContentState
+        }
+    }
+
+    @ViewBuilder
+    private var missingContentState: some View {
+        if store.auth == nil {
+            CenteredStateView(message: "Loading content…", loading: true)
+        } else {
+            switch AuthStateStyle(store.auth?.state) {
+            case .expired:
+                CenteredStateView(
+                    message: "Plaud auth expired. Use auth > Sign in with Plaud, then sync again.",
+                    systemImage: "xmark.shield.fill",
+                    tint: .red
+                )
+            case .unconfigured:
+                CenteredStateView(
+                    message: "Plaud auth is not configured. Use auth > Sign in with Plaud.",
+                    systemImage: "shield.slash.fill",
+                    tint: .red
+                )
+            case .unknown:
+                CenteredStateView(
+                    message: "Plaud content is not cached yet. Check auth, then sync or select the recording again.",
+                    systemImage: "questionmark.folder.fill"
+                )
+            case .valid, .expiring:
+                CenteredStateView(message: "Loading content…", loading: true)
             }
         }
     }

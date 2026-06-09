@@ -631,9 +631,103 @@ def auth_cmd(
         )
     if st.state in ("expired", "expiring", "unconfigured"):
         console.print(
-            "  [dim]refresh: copy a fresh cURL from web.plaud.ai → "
-            "pbpaste | uv run plaud onboard[/dim]"
+            "  [dim]refresh: use the app Auth button > Sign in with Plaud. "
+            "Advanced fallback: uv run plaud refresh-auth[/dim]"
         )
+
+
+@safe_command(name="refresh-auth")
+def refresh_auth_cmd(
+    json_out: bool = typer.Option(False, "--json"),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read the Plaud cURL from stdin instead of the macOS clipboard.",
+    ),
+) -> None:
+    """Refresh .env from a fresh Plaud API cURL."""
+    from core.refresh_auth import refresh_auth
+
+    curl_text = sys.stdin.read() if stdin else None
+    result = refresh_auth(curl_text=curl_text)
+    if json_out:
+        _emit_json(
+            {
+                "status": result.status,
+                "detail": result.detail,
+                "cookie_captured": result.cookie_captured,
+            }
+        )
+        return
+    if result.status == "ok":
+        cookie = "yes" if result.cookie_captured else "no"
+        console.print("[green]✅ credentials refreshed from copied cURL[/green]")
+        console.print(f"  cookie captured: {cookie}")
+        from core.auth_status import auth_status as get_auth
+
+        st = get_auth()
+        if st.expires_at:
+            exp = datetime.fromtimestamp(st.expires_at).strftime("%Y-%m-%d %H:%M")
+            console.print(f"  valid until {exp}")
+    elif result.status == "clipboard_empty":
+        console.print(f"[yellow]clipboard empty[/yellow] — {result.detail}")
+        raise typer.Exit(2)
+    elif result.status == "pbpaste_missing":
+        console.print(f"[red]pasteboard unavailable[/red] — {result.detail}")
+        raise typer.Exit(3)
+    else:
+        console.print(f"[red]refresh failed[/red] ({result.status}) — {result.detail}")
+        raise typer.Exit(1)
+
+
+@safe_command(name="web-auth")
+def web_auth_cmd(
+    json_out: bool = typer.Option(False, "--json"),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read the structured Plaud Web Login capture JSON from stdin.",
+    ),
+    skip_live: bool = typer.Option(
+        False,
+        "--skip-live",
+        help="Write captured credentials without the live API validation step.",
+    ),
+) -> None:
+    from core.web_auth import import_web_auth
+
+    if not stdin:
+        result = {
+            "status": "stdin_required",
+            "detail": "send Plaud Web Login capture JSON on stdin",
+            "cookie_captured": False,
+        }
+    else:
+        raw = sys.stdin.read()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            result = {
+                "status": "invalid_payload",
+                "detail": f"invalid JSON: {exc.msg}",
+                "cookie_captured": False,
+            }
+        else:
+            imported = import_web_auth(payload, validate_live=not skip_live)
+            result = {
+                "status": imported.status,
+                "detail": imported.detail,
+                "cookie_captured": imported.cookie_captured,
+            }
+
+    if json_out:
+        _emit_json(result)
+        return
+    if result["status"] == "ok":
+        console.print("[green]credentials refreshed from Plaud Web Login[/green]")
+        return
+    console.print(f"[red]web auth failed[/red] ({result['status']}) — {result['detail']}")
+    raise typer.Exit(1)
 
 
 def _render_dashboard_md(st: Any, counts: dict[str, Any], now: int) -> str:
@@ -659,7 +753,7 @@ def _render_dashboard_md(st: Any, counts: dict[str, Any], now: int) -> str:
     usage = counts.get("usage_status", {})
     usage_rows = "\n".join(f"| {k} | {v} |" for k, v in sorted(usage.items())) or "| (none) | 0 |"
     callout = (
-        "> [!warning] 토큰 만료/임박 — `pbpaste | uv run plaud onboard` 로 재인증"
+        "> [!warning] 토큰 만료/임박 — 앱 Auth 버튼에서 `Sign in with Plaud`로 재인증"
         if st.state in ("expired", "expiring", "unconfigured")
         else "> [!tip] 토큰 정상"
     )

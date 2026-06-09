@@ -85,7 +85,7 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
         return AuthStatus(
             configured=False,
             state="unconfigured",
-            detail=f"{exc}  — run: pbpaste | uv run plaud onboard",
+            detail=f"{exc}  — use the app Auth button and Sign in with Plaud",
         )
 
     token = cfg.authorization
