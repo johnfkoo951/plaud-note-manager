@@ -294,22 +294,23 @@ private struct AuthStatusIndicator: View {
                     .foregroundStyle(.secondary)
             }
 
-            if style.needsReauth {
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Re-authenticate")
-                        .font(AppUI.controlFont)
-                    Text("Open Plaud in your browser, then import the copied cURL inside the app.")
-                        .font(AppUI.metaFont)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Button {
-                        showAuthSheet = true
-                    } label: {
-                        Label("Authenticate with Plaud", systemImage: "key.viewfinder")
-                    }
-                    .buttonStyle(.borderedProminent)
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text(style.needsReauth ? "Re-authenticate" : "Update credentials")
+                    .font(AppUI.controlFont)
+                Text("Open Plaud in your browser, then import the copied cURL inside the app.")
+                    .font(AppUI.metaFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    showAuthSheet = true
+                } label: {
+                    Label(
+                        style.needsReauth ? "Authenticate with Plaud" : "Update Plaud Credentials",
+                        systemImage: "key.viewfinder"
+                    )
                 }
+                .buttonStyle(.borderedProminent)
             }
 
             Divider()

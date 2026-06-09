@@ -82,7 +82,7 @@ struct PlaudAuthSheet: View {
                 .disabled(isBusy)
             }
 
-            Text("Log in at web.plaud.ai in Safari or Chrome, copy an authenticated Plaud API request as cURL, and this app will import it from the clipboard. No terminal command.")
+            Text("A URL alone is not enough. In DevTools > Network, find the `api-apne1.plaud.ai/file/simple/web?...` request, right-click it, then Copy > Copy as cURL. The copied text must start with `curl` and include headers.")
                 .font(AppUI.metaFont)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -95,7 +95,7 @@ struct PlaudAuthSheet: View {
                 Text(
                     clipboardWatching
                         ? "Watching clipboard for a Plaud cURL..."
-                        : "Tip: after copying cURL, click Import Copied cURL or keep this watcher active."
+                        : "Chrome path: View > Developer > Developer Tools > Network > filter simple/web."
                 )
                 .font(AppUI.metaFont)
                 .foregroundStyle(clipboardWatching ? AppUI.accentPink : .secondary)
@@ -244,7 +244,7 @@ struct PlaudAuthSheet: View {
         }
         guard looksLikePlaudCurl(trimmed) else {
             curlText = trimmed
-            store.lastCommandError = "클립보드 텍스트가 Plaud API cURL처럼 보이지 않습니다. Plaud 요청을 Copy as cURL로 복사해 주세요."
+            store.lastCommandError = "URL만으로는 부족합니다. DevTools > Network에서 Plaud 요청을 우클릭한 뒤 Copy > Copy as cURL로 복사해 주세요."
             return
         }
         curlText = trimmed
