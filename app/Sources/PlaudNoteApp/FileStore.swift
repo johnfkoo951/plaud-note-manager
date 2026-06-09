@@ -162,7 +162,7 @@ final class FileStore: ObservableObject {
                 .map { trimTraceLine($0) }
                 .filter { !$0.isEmpty }
             if cleaned.localizedCaseInsensitiveContains("workspace token expired") {
-                return "Plaud auth expired. Use auth > Sign in with Plaud, then retry."
+                return "Plaud auth expired. Use auth > Authenticate with Plaud, then retry."
             }
 
             if cleaned.localizedCaseInsensitiveContains("traceback")

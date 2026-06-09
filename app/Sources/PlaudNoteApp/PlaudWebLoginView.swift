@@ -90,7 +90,7 @@ struct PlaudWebLoginView: NSViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            onStatus("Log in; waiting for Plaud API traffic.")
+            onStatus("Embedded login waiting for Plaud API traffic.")
             emitIfComplete()
         }
 
@@ -144,7 +144,7 @@ struct PlaudWebLoginView: NSViewRepresentable {
                   !deviceID.isEmpty,
                   !user.isEmpty
             else {
-                onStatus("Log in; waiting for Plaud auth headers.")
+                onStatus("Embedded login waiting for Plaud auth headers.")
                 return
             }
 

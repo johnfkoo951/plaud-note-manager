@@ -7,8 +7,10 @@ struct PlaudAuthSheet: View {
 
     @State private var curlText: String = ""
     @State private var authenticating = false
+    @State private var clipboardWatching = false
     @State private var showAdvancedCurl = false
-    @State private var webStatus = "Log in with Plaud. The app will capture the session locally."
+    @State private var showEmbeddedLogin = false
+    @State private var webStatus = "Embedded login is available if browser import is not enough."
     @State private var clearingSession = false
 
     private var trimmedCurl: String {
@@ -22,12 +24,20 @@ struct PlaudAuthSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppUI.spacingL) {
             header
-            webLoginCard
+            browserImportCard
+            embeddedLoginFallback
             advancedCurl
             footer
         }
         .padding(22)
-        .frame(width: 820, height: 720)
+        .frame(width: 820)
+        .task(id: clipboardWatching) {
+            guard clipboardWatching else { return }
+            await watchClipboardForPlaudCurl()
+        }
+        .onDisappear {
+            clipboardWatching = false
+        }
     }
 
     private var header: some View {
@@ -37,73 +47,145 @@ struct PlaudAuthSheet: View {
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(AppUI.accentPink)
             VStack(alignment: .leading, spacing: 3) {
-                Text("Sign in with Plaud")
+                Text("Authenticate with Plaud")
                     .font(.title3.weight(.semibold))
-                Text("No terminal command. Credentials are written only to the local .env.")
+                Text("Use your browser first. The app imports credentials locally and never prints tokens.")
                     .font(AppUI.metaFont)
                     .foregroundStyle(.secondary)
             }
             Spacer()
-            Button {
-                clearingSession = true
-                PlaudWebSession.clear {
-                    clearingSession = false
-                    webStatus = "Plaud Web session cleared. Sign in again."
+        }
+    }
+
+    private var browserImportCard: some View {
+        VStack(alignment: .leading, spacing: AppUI.spacingM) {
+            HStack(alignment: .center, spacing: AppUI.spacingM) {
+                Label("Browser login", systemImage: "safari")
+                    .font(AppUI.sectionFont)
+                Spacer()
+                Button {
+                    startBrowserLogin()
+                } label: {
+                    Label("Open Plaud", systemImage: "safari")
                 }
-            } label: {
-                HStack(spacing: 6) {
-                    if clearingSession {
-                        ProgressView().controlSize(.small)
+                Button {
+                    importClipboardCurl()
+                } label: {
+                    HStack(spacing: 6) {
+                        if isBusy {
+                            ProgressView().controlSize(.small)
+                        }
+                        Label("Import Copied cURL", systemImage: "doc.on.clipboard")
                     }
-                    Text("Clear Web Session")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(isBusy)
+            }
+
+            Text("Log in at web.plaud.ai in Safari or Chrome, copy an authenticated Plaud API request as cURL, and this app will import it from the clipboard. No terminal command.")
+                .font(AppUI.metaFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: AppUI.spacingS) {
+                Image(systemName: clipboardWatching ? "dot.radiowaves.left.and.right" : "doc.on.clipboard")
+                    .font(.system(size: 13, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(clipboardWatching ? AppUI.accentPink : .secondary)
+                Text(
+                    clipboardWatching
+                        ? "Watching clipboard for a Plaud cURL..."
+                        : "Tip: after copying cURL, click Import Copied cURL or keep this watcher active."
+                )
+                .font(AppUI.metaFont)
+                .foregroundStyle(clipboardWatching ? AppUI.accentPink : .secondary)
+                Spacer()
+                if clipboardWatching {
+                    Button("Stop Watching") {
+                        clipboardWatching = false
+                    }
+                    .controlSize(.small)
                 }
             }
-            .disabled(clearingSession || isBusy)
+        }
+        .padding(AppUI.spacingL)
+        .background(
+            LinearGradient(
+                colors: [
+                    AppUI.brandGreen.opacity(0.10),
+                    AppUI.accentPink.opacity(0.08),
+                    AppUI.cardFill
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: AppUI.radius)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.radius)
+                .stroke(AppUI.cardStroke, lineWidth: 1)
+        )
+    }
+
+    private var embeddedLoginFallback: some View {
+        DisclosureGroup("Embedded Web Login fallback", isExpanded: $showEmbeddedLogin) {
+            VStack(alignment: .leading, spacing: AppUI.spacingS) {
+                HStack {
+                    Label(webStatus, systemImage: authenticating ? "arrow.triangle.2.circlepath" : "globe")
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button {
+                        clearingSession = true
+                        PlaudWebSession.clear {
+                            clearingSession = false
+                            webStatus = "Plaud Web session cleared. Sign in again."
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if clearingSession {
+                                ProgressView().controlSize(.small)
+                            }
+                            Text("Clear Web Session")
+                        }
+                    }
+                    .disabled(clearingSession || isBusy)
+                }
+
+                Text("If Google shows a Bluetooth or passkey error here, use Try another way or the browser import above.")
+                    .font(AppUI.metaFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                webLoginCard
+            }
+            .padding(.top, AppUI.spacingS)
         }
     }
 
     private var webLoginCard: some View {
-        VStack(alignment: .leading, spacing: AppUI.spacingS) {
-            HStack {
-                Label(webStatus, systemImage: authenticating ? "arrow.triangle.2.circlepath" : "globe")
-                    .font(AppUI.metaFont)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    NSWorkspace.shared.open(URL(string: "https://web.plaud.ai/")!)
-                } label: {
-                    Label("Open in Browser", systemImage: "safari")
-                }
+        PlaudWebLoginView(
+            onCapture: { capture in
+                authenticateWithWebCapture(capture)
+            },
+            onStatus: { status in
+                webStatus = status
             }
-
-            PlaudWebLoginView(
-                onCapture: { capture in
-                    authenticateWithWebCapture(capture)
-                },
-                onStatus: { status in
-                    webStatus = status
-                }
-            )
-            .frame(minHeight: 480)
-            .clipShape(RoundedRectangle(cornerRadius: AppUI.radius))
-            .overlay(
-                RoundedRectangle(cornerRadius: AppUI.radius)
-                    .stroke(AppUI.cardStroke)
-            )
-        }
+        )
+        .frame(minHeight: 420)
+        .clipShape(RoundedRectangle(cornerRadius: AppUI.radius))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.radius)
+                .stroke(AppUI.cardStroke)
+        )
     }
 
     private var advancedCurl: some View {
-        DisclosureGroup("Advanced cURL fallback", isExpanded: $showAdvancedCurl) {
+        DisclosureGroup("Paste cURL manually", isExpanded: $showAdvancedCurl) {
             VStack(alignment: .leading, spacing: AppUI.spacingS) {
                 HStack(spacing: AppUI.spacingS) {
                     Button {
-                        let text = NSPasteboard.general.string(forType: .string) ?? ""
-                        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                            store.lastCommandError = "클립보드에 Plaud cURL 텍스트가 없습니다."
-                        } else {
-                            curlText = text
-                        }
+                        pasteClipboardIntoEditor()
                     } label: {
                         Label("Paste Clipboard", systemImage: "doc.on.clipboard")
                     }
@@ -138,7 +220,7 @@ struct PlaudAuthSheet: View {
 
     private var footer: some View {
         HStack {
-            Text("The app stores auth locally and never prints tokens after capture.")
+            Text("Credentials are stored in the project .env and used by the Plaud CLI bridge.")
                 .font(AppUI.metaFont)
                 .foregroundStyle(.secondary)
             Spacer()
@@ -147,8 +229,70 @@ struct PlaudAuthSheet: View {
         }
     }
 
+    private func startBrowserLogin() {
+        NSWorkspace.shared.open(URL(string: "https://web.plaud.ai/")!)
+        clipboardWatching = true
+        webStatus = "Browser opened. Copy a Plaud API request as cURL."
+    }
+
+    private func importClipboardCurl() {
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            store.lastCommandError = "클립보드에 Plaud cURL 텍스트가 없습니다."
+            return
+        }
+        guard looksLikePlaudCurl(trimmed) else {
+            curlText = trimmed
+            store.lastCommandError = "클립보드 텍스트가 Plaud API cURL처럼 보이지 않습니다. Plaud 요청을 Copy as cURL로 복사해 주세요."
+            return
+        }
+        curlText = trimmed
+        authenticateWithCurl(trimmed)
+    }
+
+    private func pasteClipboardIntoEditor() {
+        let text = NSPasteboard.general.string(forType: .string) ?? ""
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            store.lastCommandError = "클립보드에 Plaud cURL 텍스트가 없습니다."
+        } else {
+            curlText = text
+        }
+    }
+
+    @MainActor
+    private func watchClipboardForPlaudCurl() async {
+        var lastChangeCount = NSPasteboard.general.changeCount
+        while clipboardWatching && !Task.isCancelled {
+            if NSPasteboard.general.changeCount != lastChangeCount {
+                lastChangeCount = NSPasteboard.general.changeCount
+                let text = NSPasteboard.general.string(forType: .string) ?? ""
+                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if looksLikePlaudCurl(trimmed) {
+                    curlText = trimmed
+                    webStatus = "Plaud cURL found on clipboard. Importing..."
+                    authenticateWithCurl(trimmed)
+                    return
+                }
+            }
+            try? await Task.sleep(nanoseconds: 800_000_000)
+        }
+    }
+
+    private func looksLikePlaudCurl(_ text: String) -> Bool {
+        let lowercased = text.lowercased()
+        return lowercased.contains("curl")
+            && lowercased.contains("plaud")
+            && (
+                lowercased.contains("authorization")
+                    || lowercased.contains("x-pld-user")
+                    || lowercased.contains("x-device-id")
+            )
+    }
+
     private func authenticateWithWebCapture(_ capture: PlaudWebAuthCapture) {
         guard !isBusy else { return }
+        clipboardWatching = false
         authenticating = true
         Task {
             let ok = await store.refreshAuthFromWebLogin(capture)
@@ -157,16 +301,17 @@ struct PlaudAuthSheet: View {
                 if ok {
                     onDone()
                 } else {
-                    webStatus = "Capture received, but Plaud rejected it. Try Clear Web Session."
+                    webStatus = "Capture received, but Plaud rejected it. Try browser import."
                 }
             }
         }
     }
 
-    private func authenticateWithCurl() {
-        guard !trimmedCurl.isEmpty, !isBusy else { return }
+    private func authenticateWithCurl(_ curlOverride: String? = nil) {
+        let curl = (curlOverride ?? trimmedCurl).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !curl.isEmpty, !isBusy else { return }
+        clipboardWatching = false
         authenticating = true
-        let curl = trimmedCurl
         Task {
             let ok = await store.refreshAuthCredentials(curlText: curl)
             await MainActor.run {

@@ -299,14 +299,14 @@ private struct AuthStatusIndicator: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Re-authenticate")
                         .font(AppUI.controlFont)
-                    Text("Sign in with Plaud inside the app. The app captures the web session locally.")
+                    Text("Open Plaud in your browser, then import the copied cURL inside the app.")
                         .font(AppUI.metaFont)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                     Button {
                         showAuthSheet = true
                     } label: {
-                        Label("Sign in with Plaud", systemImage: "key.viewfinder")
+                        Label("Authenticate with Plaud", systemImage: "key.viewfinder")
                     }
                     .buttonStyle(.borderedProminent)
                 }
@@ -2317,13 +2317,13 @@ private struct PlaudPanel: View {
             switch AuthStateStyle(store.auth?.state) {
             case .expired:
                 CenteredStateView(
-                    message: "Plaud auth expired. Use auth > Sign in with Plaud, then sync again.",
+                    message: "Plaud auth expired. Use auth > Authenticate with Plaud, then sync again.",
                     systemImage: "xmark.shield.fill",
                     tint: .red
                 )
             case .unconfigured:
                 CenteredStateView(
-                    message: "Plaud auth is not configured. Use auth > Sign in with Plaud.",
+                    message: "Plaud auth is not configured. Use auth > Authenticate with Plaud.",
                     systemImage: "shield.slash.fill",
                     tint: .red
                 )
