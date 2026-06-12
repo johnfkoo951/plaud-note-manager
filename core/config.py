@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -10,6 +11,35 @@ from pydantic import BaseModel
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ENV = PROJECT_ROOT / ".env"
+
+
+def resolve_env_path(explicit: Path | None = None) -> Path:
+    """Resolve the .env path: explicit argument > PLAUD_ENV_FILE > project default."""
+    return explicit or Path(os.environ.get("PLAUD_ENV_FILE", DEFAULT_ENV))
+
+
+def env_quote(value: str) -> str:
+    """Single-quote a .env value, escaping backslashes and embedded quotes."""
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def write_env_file(values: Mapping[str, str], env_path: Path) -> None:
+    """Write `.env` with 0600 permissions — it holds live credentials.
+
+    Single writer shared by `plaud onboard` and the Web Login importer so the
+    quoting/permission behavior cannot drift between the two.
+    """
+    content = "\n".join(f"{key}={env_quote(value)}" for key, value in values.items()) + "\n"
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(env_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, content.encode("utf-8"))
+    finally:
+        os.close(fd)
+    # O_CREAT's mode only applies to newly created files — tighten a
+    # pre-existing 0644 .env too.
+    os.chmod(env_path, 0o600)
 
 
 class ConfigError(RuntimeError):
@@ -28,6 +58,7 @@ class PlaudConfig(BaseModel):
     origin: str = "https://web.plaud.ai"
     referer: str = "https://web.plaud.ai/"
     timezone: str = "Asia/Seoul"
+    cookie: str = ""
 
     def headers(self) -> dict[str, str]:
         h = {
@@ -44,11 +75,13 @@ class PlaudConfig(BaseModel):
         }
         if self.x_pld_tag:  # only send the legacy tag header when present
             h["x-pld-tag"] = self.x_pld_tag
+        if self.cookie:
+            h["cookie"] = self.cookie
         return h
 
 
 def load_config(env_file: Path | None = None) -> PlaudConfig:
-    env_path = env_file or Path(os.environ.get("PLAUD_ENV_FILE", DEFAULT_ENV))
+    env_path = resolve_env_path(env_file)
     if env_path.exists():
         # .env is the source of truth for credentials so re-onboarding (token
         # rotation) takes effect immediately. Trade-off: a stale PLAUD_* already
@@ -76,4 +109,5 @@ def load_config(env_file: Path | None = None) -> PlaudConfig:
         origin=os.environ.get("PLAUD_ORIGIN", "https://web.plaud.ai"),
         referer=os.environ.get("PLAUD_REFERER", "https://web.plaud.ai/"),
         timezone=os.environ.get("PLAUD_TIMEZONE", "Asia/Seoul"),
+        cookie=os.environ.get("PLAUD_COOKIE", ""),
     )

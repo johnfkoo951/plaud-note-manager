@@ -109,6 +109,7 @@ CREATE INDEX IF NOT EXISTS files_edit_time_idx ON files(edit_time DESC);
 CREATE INDEX IF NOT EXISTS files_trash_idx ON files(is_trash);
 CREATE INDEX IF NOT EXISTS note_tags_tag_idx ON note_tags(tag);
 CREATE INDEX IF NOT EXISTS note_refs_file_idx ON note_references(file_id);
+CREATE INDEX IF NOT EXISTS file_folders_folder_idx ON file_folders(folder_id);
 """
 
 
@@ -219,6 +220,20 @@ class Storage:
         with self._connect() as conn:
             return conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
 
+    # Cheap id-set accessors for derived progress (core/progress.py).
+
+    def active_file_ids(self) -> set[str]:
+        with self._connect() as conn:
+            return {r[0] for r in conn.execute("SELECT id FROM files WHERE is_trash = 0")}
+
+    def cached_file_ids(self) -> set[str]:
+        with self._connect() as conn:
+            return {r[0] for r in conn.execute("SELECT file_id FROM file_content")}
+
+    def cmds_transcribed_file_ids(self) -> set[str]:
+        with self._connect() as conn:
+            return {r[0] for r in conn.execute("SELECT DISTINCT file_id FROM cmds_transcripts")}
+
     def counts(self) -> dict[str, Any]:
         """Library summary counts for the status dashboard."""
         with self._connect() as conn:
@@ -264,6 +279,19 @@ class Storage:
                 "INSERT INTO file_folders (file_id, folder_id) VALUES (?, ?)",
                 [(file_id, fid) for fid in folder_ids],
             )
+
+    def files_with_multiple_folders(self) -> list[tuple[str, list[str]]]:
+        """Files whose local mapping still holds >1 folder (breaks Plaud web)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT file_id, GROUP_CONCAT(folder_id, char(31)) AS ids
+                  FROM file_folders
+                 GROUP BY file_id
+                HAVING COUNT(*) > 1
+                """
+            ).fetchall()
+        return [(r["file_id"], r["ids"].split(chr(31))) for r in rows]
 
     def set_file_name(self, file_id: str, name: str, *, now: int) -> None:
         with self._connect() as conn:

@@ -1,6 +1,6 @@
 # Plaud Note Manager — Development Status
 
-마지막 업데이트: 2026-05-29
+마지막 업데이트: 2026-06-12
 
 Plaud Cloud 녹음을 native macOS 앱 + Python CLI 한 쌍으로 관리하고,
 CMDS 자체 전사(ElevenLabs Scribe) + 다중 모델(Claude/Codex/Gemini/Grok)
@@ -66,14 +66,18 @@ swift build --package-path app
 ```
 
 ### 다음 세션에서 바로 이어갈 일
-1. taxonomy/모델 프리셋이 main에 머지된 상태이므로:
+1. `codex/web-login-auth` 브랜치 — Plaud Web Login 인증 기능 구현 + 하드닝 완료
+   (앱 Auth 버튼 → "Authenticate with Plaud" 시트, CLI `auth` / `refresh-auth` /
+   `web-auth`, validate-before-write, `.env` 0600). 다음 작업: main으로 머지.
+2. taxonomy/모델 프리셋이 main에 머지된 상태이므로:
    - `core/classification.py` taxonomy를 실데이터에 한 번 더 돌려 라우팅 정합성 확인
      (`plaud folder-plan` → `plaud classify --apply`).
    - 앱 Metadata bar에서 `usage_status` 변경이 즉시 DB와 UI에 반영되는지 한 번
      end-to-end 확인.
-2. `plaud status` 컬럼 의미 재정의 — 현재 대부분 `new`라 실제 진행률(캐시/전사/통합)을
-   반영하지 못함. agent 자동 루프 만들기 전에 선행.
-3. P0 UX 항목 중 keyword chip 클릭화 / AI Inspector 결과 별도 sheet 옵션 정리.
+3. `improve/v0.3-ux` 브랜치 — status 재정의 + P0 UX 4종 완료. 리뷰 후
+   codex/web-login-auth(또는 main)로 머지.
+4. agent 자동 루프 — 선행 조건이었던 진행률 데이터(`plaud status --json`)가
+   준비됨. launchd/cron 루프 설계 가능.
 
 ### 세션 충돌 방지 규칙
 - 작업 전 항상 `git status --short --branch`와 `git pull --ff-only` 확인.
@@ -117,11 +121,14 @@ plaud-note-manager/
 │   ├── paths.py              표준 경로 + override 처리
 │   ├── storage.py            SQLite 메타/캐시 (WAL 모드, files/folders/content/cmds_transcripts/speakers/note_metadata/note_tags/note_references)
 │   ├── models.py             Pydantic 도메인 모델
+│   ├── auth_status.py        .env JWT 검사 — 오프라인 만료 카운트다운 + 선택적 live 검증 (tri-state)
+│   ├── refresh_auth.py       클립보드/stdin의 Plaud cURL 파싱 → .env 갱신 (0600, PLAUD_ENV_FILE 존중)
+│   ├── web_auth.py           앱 Web Login 캡쳐 JSON import — live 검증 후 .env 기록 (validate-before-write)
 │   └── config.py             .env 로딩 (Plaud API credentials)
-├── cli/main.py               typer CLI: ~59개 명령어
+├── cli/main.py               typer CLI: ~70개 명령어
 ├── skill/SKILL.md            Claude Code skill (CLI 호출 래퍼)
 ├── agent/AGENT.md            자율 에이전트 정의 (배치 처리용)
-├── templates/                프롬프트 템플릿 (default / meeting / lecture / integrated / metadata / vault-meeting-note)
+├── templates/                프롬프트 템플릿 (default / meeting / lecture / integrated / metadata / vault-meeting-note / cmds-meeting / cmds-lecture / cmds-coaching)
 ├── data/
 │   ├── plaud.db              SQLite (WAL)
 │   ├── config.json           백엔드 + 경로 설정
@@ -134,7 +141,12 @@ plaud-note-manager/
         ├── PlaudNoteApp.swift    @main, NSApplication 활성화
         ├── ContentView.swift     NavigationSplitView (Sidebar / List / Detail) + Settings sheet
         ├── Database.swift        GRDB read/write pool, view models, 파일 system helpers
-        └── FileStore.swift       @MainActor ObservableObject, CLI bridge, 30s polling
+        ├── FileStore.swift       @MainActor ObservableObject, CLI bridge, 30s polling
+        ├── FileStore+Auth.swift  Web Login 캡쳐 → `plaud web-auth --stdin` CLI 브리지
+        ├── PlaudAuthSheet.swift  "Authenticate with Plaud" 시트 (browser cURL import 기본 · embedded fallback)
+        ├── PlaudWebLoginView.swift    WKWebView embedded Web Login (fallback 경로)
+        ├── PlaudWebLoginScript.swift  로그인 페이지 주입 JS — api-apne1.plaud.ai 요청 헤더 캡쳐
+        └── PlaudWebAuthCapture.swift  캡쳐 페이로드 모델 (web-auth JSON 계약과 1:1)
 ```
 
 ### 데이터 흐름
@@ -158,6 +170,72 @@ markdown files   Swift app (GRDB)
 ---
 
 ## 2. 완료된 기능
+
+### 2026-06-12 v0.3 업그레이드 — 파생 진행률 + P0 UX (branch improve/v0.3-ux)
+- [x] **`plaud status` 재정의** — 정적 `files.status`(대부분 'new') 대신
+      아티팩트에서 파생: `new`(메타만) → `cached`(detail 캐시) →
+      `transcribed`(CMDS 전사) → `integrated`(통합 결과 on disk).
+      `core/progress.py` SSOT, CLI `plaud status [--json] [--stage S] [--limit N]`.
+      실데이터 검증: 1182개 = new 142 / cached 1025 / transcribed 7 / integrated 8.
+      agent 자동 루프의 선행 조건 해소.
+- [x] **Progress 타일** — 디테일 Metadata bar의 Cache 타일을 파생 단계 표시로
+      교체 (Integrated/Transcribed/Cached/New, 아이콘+색상, 선택 파일만 계산).
+- [x] **키워드 chip 클릭화** — 디테일 헤더 키워드 → 캡슐 버튼, 클릭 시 검색 필터.
+- [x] **슬롯 결과 확대 sheet** — 슬롯 카드에 expand 버튼 → 720×560 sheet에서
+      동일 렌더링 + Copy, Integrated 모드는 All/Transcript/Summary picker 공유.
+- [x] **Sidebar drag-and-drop** — 파일 행 드래그 → 폴더/Unfiled 드롭
+      (단일-폴더 교체 의미론, 라디오 메뉴와 같은 쓰기 경로, 타겟 하이라이트).
+- [x] **시간 포맷 통일** — CMDS transcript/sections의 수기 HH:MM:SS를
+      `formatMinSec`(M:SS, ≥1h H:MM:SS)으로 일원화.
+
+### 2026-06-11 v0.2.0 업그레이드 — 폴더 단일화 · Grok CLI · 스피커/제목 편집 · 성능
+- [x] **폴더 단일화** — Plaud 웹은 파일당 폴더 1개만 지원 (복수 지정 시 웹 UI 깨짐).
+      `client.set_file_folders`가 2개 이상이면 ValueError, `plaud move <id> [folder]`는
+      단일 폴더만 받고 기존 연결을 대체. 앱 폴더 메뉴는 체크박스 → **라디오**
+      (현재 폴더 재클릭/Unfiled 선택 = 해제). `plaud folder-doctor [--apply]`로
+      기존 다중-폴더 파일 진단·복구 (2026-06-11 실데이터 4건 복구 완료).
+- [x] **Grok CLI 백엔드** — xAI 공식 Grok Build CLI (`~/.grok/bin/grok`) 연동.
+      `grok -p <prompt>` 단일턴 호출, 프롬프트는 argv (stdin 미지원, 700KB 가드).
+      서브프로세스 env에서 `XAI_API_KEY`를 제거해 **SuperGrok 구독 OAuth**로
+      인증 — API 비용 없음. `data/config.json` grok backend = cli 기본.
+- [x] **Plaud 서버 전사본 스피커 변경** — `plaud plaud-relabel <id> OLD=NEW …`
+      (web parity: `PATCH /file/{id}` body `trans_result` + `support_mul_summ`,
+      `original_speaker`는 최초 1회만 백필·보존). 앱 Plaud 탭 person.2 버튼 →
+      스피커 일괄 rename 시트. 보이스프린트 roster 변경은 기존
+      `speaker-rename-server` 그대로.
+- [x] **제목 인라인 편집** — 디테일 헤더 제목 클릭(또는 hover 연필) → TextField,
+      Enter 커밋 = 낙관적 SQLite 기록 + 백그라운드 `plaud rename`.
+- [x] **Summary 슬롯 UI 정리** — 모드 세그먼트에 아이콘+색상 (Summary=파랑,
+      Integrated=초록) + 모드 설명 캡션, 템플릿을 칩으로 노출.
+- [x] **볼트 기반 템플릿 3종 추가** — `cmds-meeting` / `cmds-lecture` /
+      `cmds-coaching`. CMDS Guide v2.7 frontmatter 규칙(따옴표 위키링크,
+      영어 description), ~함체, `>[!info]` 콜아웃, Discussion/Next Steps 구조로
+      볼트에 바로 저장 가능한 .md를 출력.
+- [x] **성능** — `file_folders(folder_id)` 인덱스 추가, 사이드바 폴더 카운트
+      N+1 → grouped JOIN 1쿼리, 카테고리 카운트 3쿼리 → 1쿼리(NOT EXISTS),
+      DB 워처 알림 300ms 디바운스, masterFiles 폴더 서브쿼리 → grouped JOIN
+      (실DB로 신·구 결과 동치 검증).
+
+### 2026-06-11 업그레이드 — Plaud Web Login 인증
+- [x] 앱 툴바 Auth 버튼 → **"Authenticate with Plaud"** 시트
+      (`PlaudAuthSheet.swift`). Browser login (Open Plaud → Import Copied cURL)이
+      기본 경로, embedded Web Login (WKWebView 캡쳐)은 fallback —
+      WKWebView 안의 Google 로그인이 passkey/Bluetooth 오류를 낼 수 있어
+      browser import를 기본으로 승격 (`1dba731`). 최후 수단은
+      `pbpaste | uv run plaud onboard`.
+- [x] CLI `plaud refresh-auth` — macOS 클립보드의 Plaud cURL을 파싱해 `.env` 갱신
+      (`--stdin` 지원, `PLAUD_ENV_FILE` 존중).
+- [x] CLI `plaud web-auth --stdin` — WKWebView 캡쳐 JSON을 받는 앱 내부 브리지.
+      **validate-before-write**: live API 검증을 통과해야 `.env`에 쓴다.
+      실제 거부(401/403)·이미 만료된 토큰이면 `.env`를 건드리지 않고
+      `live_auth_failed`, 네트워크 불통이면 저장 후 `live_check_unavailable`
+      (tri-state — 거부 vs 불통 구분). JSON 모드는 항상 exit 0, 호출자는
+      `status` 필드로 판정.
+- [x] CLI `plaud auth` — JWT exp 기반 오프라인 만료 카운트다운, `--live`로
+      실제 토큰 검증.
+- [x] 보안 계약: `.env`는 0600 권한으로 기록, 기존 `.env.bak-<epoch>` 백업은
+      완전 제거 (디스크에 자격증명 사본을 남기지 않음). WKWebView 캡쳐 핸들러는
+      `*.plaud.ai` origin으로 제한.
 
 ### Progressive disclosure + vault graph
 - [x] `core/disclosure.py` 도입 — 4단계 progressive-disclosure 쿼리 API
@@ -297,26 +375,30 @@ markdown files   Swift app (GRDB)
 - [x] AppleScript로 새 Terminal에서 `claude < prompt.txt` 자동 실행
 - [x] CMDS-vault 경로 자동 주입 + 옵시디언-스킬 활용
 
-### CLI (총 ~59개 명령)
+### CLI (총 ~70개 명령)
 ```
 peek / brief / outline-of / deep / query / resources / show / vault-index / vault-link /
 list / sync / sync-content / contents / detail / transcript / summary / outline /
-download / status / metadata / usage-status / tags / tag-add / tag-remove / metadata-generate /
-meeting-note / move / rename / folders / folder-create / folder-rename / folder-delete /
+download / status / dashboard / metadata / usage-status / tags / tag-add / tag-remove /
+metadata-generate / meeting-note / note-edit / move / rename /
+folders / folder-create / folder-rename / folder-delete /
 cmds-transcribe / cmds-relabel / cmds-summarize / cmds-integrate /
-templates / template-show / template-save / template-delete / models / folder-plan / classify /
+templates / template-show / template-save / template-delete / models / folder-plan / classify / folder-doctor /
 slots / slot-add / slot-delete /
-speakers / speaker-add / speaker-delete /
-config / config-backend / config-model / config-path / paths /
-audio-url / export / obsidian / web / onboard
+speakers / speaker-add / speaker-delete / server-speakers / speaker-rename-server / plaud-relabel /
+config / config-vault / config-author / config-backend / config-model / config-path / paths /
+audio-url / export / obsidian / web / onboard / auth / refresh-auth / web-auth
 ```
 
 ---
 
 ## 3. 알려진 제한
 
-- **Plaud SPA 임베드 불가**: web.plaud.ai의 SPA가 js-cookie 기반 인증이라
-  fetch 헤더 인젝션만으로는 로그인 우회 못 함. native UI로 우회.
+- **Plaud SPA 임베드 제한 (앱 UI)**: web.plaud.ai의 SPA가 js-cookie 기반 인증이라
+  fetch 헤더 인젝션만으로는 앱 UI 임베드 불가 — 앱 UI는 native 유지. 단,
+  **로그인 페이지 임베드는 자격증명 캡쳐 용도로는 동작**한다 (Auth 시트의
+  embedded Web Login fallback). WKWebView 안의 Google 로그인이 passkey/Bluetooth
+  오류를 낼 수 있어 browser cURL import가 기본 경로.
 - **CLI 인증은 각 CLI 책임**: claude/codex/gemini를 셸에서 미리 로그인해야
   CLI 모드 사용 가능. 앱이 토큰을 다루지 않음 (의도적).
 - **Gemini CLI 미설치 환경**: 현재 시스템에 `gemini` 미설치 → API 모드로
@@ -335,11 +417,7 @@ audio-url / export / obsidian / web / onboard
 ## 4. 우선순위 To-do
 
 ### P0 (UX 다듬기)
-- [ ] Time format을 모든 곳에서 `MM:SS` 통일 (Database.swift:`formatMinSec`은 적용
-      됐지만 transcript display / outline 일부 아직 HH:MM:SS 가능성)
-- [ ] Detail 헤더에서 keyword tags를 클릭 가능한 chip으로 (현재 단순 텍스트)
-- [ ] AI Inspector Panel: 슬롯 결과가 길어지면 별도 sheet/window에서 보기 옵션
-- [ ] Sidebar drag-and-drop으로 파일 → 폴더 이동 (현재 우클릭만)
+(2026-06-12 v0.3에서 전부 완료 — §2 참고)
 
 ### P1 (기능 확장)
 - [ ] **Audio playback synced with transcript** — 현재 시간 위치 highlight,
@@ -382,7 +460,9 @@ audio-url / export / obsidian / web / onboard
 ## 5. 검증된 워크플로우
 
 ```
-1. plaud onboard          (cURL 붙여넣기, 최초 1회 + 토큰 만료 시)
+1. 앱 Auth 버튼 → "Authenticate with Plaud"   (최초 1회 + 토큰 만료 시.
+   CLI는 cURL 복사 후 plaud refresh-auth — 클립보드 자동.
+   fallback: pbpaste | plaud onboard. 상태 확인: plaud auth)
 2. plaud sync             (1024 파일 메타데이터 캐시)
 3. (선택) plaud sync-content   (전사/요약 일괄 백필, 8-10분)
 4. 앱 실행 → 파일 클릭     (캐시 없으면 자동 detail 페치)
@@ -409,6 +489,14 @@ audio-url / export / obsidian / web / onboard
 - **Web embed 시도 실패 후 native 회귀**: 1시간 가량 try했지만 SPA의 cookie
   기반 인증이 fetch 인젝션으로 우회 안 됨. native가 폴더 edit/delete + 모든
   Plaud 기능 재구현해야 했지만 결국 더 빠른 UX + 양방향 sync 자동.
+  (2026-06-11 부분 번복: 앱 UI 임베드는 여전히 기각이지만, **로그인 자격증명
+  캡쳐용 WKWebView**는 Auth 시트의 fallback으로 부활 — 기본은 browser cURL
+  import. §3 참고.)
+- **인증 보안 계약 (2026-06-11)**: `.env`는 0600으로 기록하고
+  `.env.bak-<epoch>` 온디스크 백업은 제거 — 디스크에 자격증명 사본을 남기지
+  않는다. `web-auth`는 live 검증을 통과해야 `.env`를 쓴다
+  (validate-before-write); 네트워크 불통이면 저장 후 `live_check_unavailable`
+  경고로만 알린다.
 
 ---
 

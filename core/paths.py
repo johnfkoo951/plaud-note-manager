@@ -59,6 +59,11 @@ def summaries_dir(file_id: str) -> Path:
     return p
 
 
+def integrated_base() -> Path:
+    """Integrated output root WITHOUT creating it (for read-only scans)."""
+    return _override("integrated") or INTEGRATED_DIR
+
+
 def integrated_dir(file_id: str) -> Path:
     base = _override("integrated") or INTEGRATED_DIR
     p = base / file_id

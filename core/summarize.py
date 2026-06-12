@@ -2,8 +2,8 @@
 
 Backend choice is per-model and stored in `data/config.json`:
 
-  - "cli": shell out to `claude` / `codex` / `gemini` (uses each CLI's auth —
-    OAuth subscription, API key, whatever the CLI is logged in with).
+  - "cli": shell out to `claude` / `codex` / `gemini` / `grok` (uses each CLI's
+    auth — OAuth subscription, API key, whatever the CLI is logged in with).
   - "api": direct HTTP with the provider's REST API and an env-var key
     (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`).
 
@@ -29,6 +29,20 @@ MODEL_COMMANDS: dict[str, list[str]] = {
     "claude": ["claude", "--print"],
     "codex": ["codex", "exec", "--skip-git-repo-check"],
     "gemini": ["gemini", "--prompt-interactive=false"],
+    # Grok Build (SuperGrok subscription OAuth — no API cost). `-p` takes the
+    # prompt as the LAST argv element; stdin piping is not supported.
+    "grok": ["grok", "--disable-web-search", "--no-memory", "--no-subagents", "-p"],
+}
+
+# Models whose CLI takes the prompt as an argument instead of stdin.
+PROMPT_AS_ARG = {"grok"}
+
+# macOS ARG_MAX is 1 MiB shared with the environment; leave generous headroom.
+PROMPT_ARG_LIMIT = 700_000
+
+# GUI apps inherit a minimal PATH; known install locations checked as fallback.
+CLI_FALLBACK_PATHS: dict[str, list[Path]] = {
+    "grok": [Path.home() / ".grok" / "bin" / "grok"],
 }
 
 
@@ -43,11 +57,21 @@ class ModelFailed(RuntimeError):
 # -------- public entry --------
 
 
+def _resolve_binary(model: str, name: str) -> str | None:
+    found = shutil.which(name)
+    if found:
+        return found
+    for candidate in CLI_FALLBACK_PATHS.get(model, []):
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return None
+
+
 def model_available(model: str) -> bool:
     backend = app_config.backend_for(model)
     if backend == "cli":
         cmd = MODEL_COMMANDS.get(model)
-        return bool(cmd and shutil.which(cmd[0]))
+        return bool(cmd and _resolve_binary(model, cmd[0]))
     if backend == "api":
         env_key = _api_key_env(model)
         return bool(env_key and (os.environ.get(env_key) or _zshrc_value(env_key)))
@@ -95,14 +119,31 @@ def _run_cli(model: str, prompt: str, *, timeout: int) -> str:
         if _api_key_env(model):
             raise ModelNotInstalled(f"{model} has no CLI backend — set {model} to api.")
         raise ModelNotInstalled(f"unknown model: {model}")
-    if not shutil.which(cmd[0]):
+    binary = _resolve_binary(model, cmd[0])
+    if not binary:
         raise ModelNotInstalled(f"`{cmd[0]}` CLI not on PATH. Install it or switch backend to api.")
+    argv = [binary, *cmd[1:]]
+    stdin_input: str | None = prompt
+    env = None
+    if model in PROMPT_AS_ARG:
+        if len(prompt.encode("utf-8")) > PROMPT_ARG_LIMIT:
+            raise ModelFailed(
+                f"prompt too large for the {model} CLI ({len(prompt.encode('utf-8'))} bytes "
+                f"> {PROMPT_ARG_LIMIT}); switch this slot to another backend for this file."
+            )
+        argv.append(prompt)
+        stdin_input = None
+    if model == "grok":
+        # Strip XAI_API_KEY so Grok Build authenticates with the SuperGrok
+        # subscription OAuth session instead of billing the API key.
+        env = {k: v for k, v in os.environ.items() if k != "XAI_API_KEY"}
     proc = subprocess.run(
-        cmd,
-        input=prompt,
+        argv,
+        input=stdin_input,
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=env,
     )
     if proc.returncode != 0:
         raise ModelFailed(

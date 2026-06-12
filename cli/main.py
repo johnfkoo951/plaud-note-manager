@@ -23,7 +23,6 @@ from core.classification import FOLDER_TAXONOMY, classify_snapshot
 from core.client import PlaudAPIError
 from core.config import ConfigError
 from core.model_registry import PROVIDER_LABELS
-from core.models import FileStatus
 from core.storage import DEFAULT_DB, Storage
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -497,15 +496,52 @@ def folder_rename(folder_id: str, name: str = "", color: str = "", icon: str = "
 
 
 @safe_command(name="move")
-def move(file_id: str, folder_ids: list[str] = typer.Argument(None)) -> None:
-    """Assign a file to one or more folders. Pass no folders to clear (Unfiled)."""
+def move(file_id: str, folder_id: str = typer.Argument(None)) -> None:
+    """Assign a file to ONE folder (replacing the old one). Omit folder to clear.
+
+    Plaud web supports a single folder per file — multiple assignments corrupt
+    the web UI, so this command no longer accepts more than one folder.
+    """
+    folder_ids = [folder_id] if folder_id else []
     cfg = load_config()
     with PlaudClient(cfg) as client:
-        client.set_file_folders(file_id, folder_ids or [])
+        client.set_file_folders(file_id, folder_ids)
     storage = Storage()
-    storage.set_file_folders(file_id, folder_ids or [])
-    target = ", ".join(folder_ids) if folder_ids else "(Unfiled)"
-    console.print(f"[green]moved[/green] {file_id} -> {target}")
+    storage.set_file_folders(file_id, folder_ids)
+    console.print(f"[green]moved[/green] {file_id} -> {folder_id or '(Unfiled)'}")
+
+
+@safe_command(name="folder-doctor")
+def folder_doctor(
+    apply: bool = typer.Option(False, "--apply", help="Fix by keeping one folder per file."),
+) -> None:
+    """Find files whose local mapping has >1 folder and repair to a single one.
+
+    Keeps the folder recorded in note_metadata when available, otherwise the
+    first linked folder; with --apply the fix is pushed to Plaud and SQLite.
+    """
+    storage = Storage()
+    broken = storage.files_with_multiple_folders()
+    if not broken:
+        console.print("[green]ok[/green] every file has at most one folder")
+        return
+    fixes: list[tuple[str, str]] = []
+    for file_id, ids in broken:
+        meta = storage.get_note_metadata(file_id)
+        keep = ids[0]
+        if meta and meta["folder_id"] in ids:
+            keep = meta["folder_id"]
+        fixes.append((file_id, keep))
+        console.print(f"  {file_id}: {len(ids)} folders -> keep {keep}")
+    if not apply:
+        console.print(f"[yellow]{len(fixes)} files need repair[/yellow] — rerun with --apply")
+        return
+    cfg = load_config()
+    with PlaudClient(cfg) as client:
+        for file_id, keep in fixes:
+            client.set_file_folders(file_id, [keep])
+            storage.set_file_folders(file_id, [keep])
+    console.print(f"[green]repaired[/green] {len(fixes)} files to single-folder")
 
 
 @safe_command()
@@ -586,12 +622,56 @@ def download(file_id: str, output_dir: Path = Path("downloads"), force: bool = F
 
 
 @safe_command()
-def status() -> None:
-    """Show local DB summary by status."""
+def status(
+    json_out: bool = typer.Option(False, "--json"),
+    stage: str = typer.Option(
+        None, "--stage", help="list files in one stage (new/cached/transcribed/integrated)"
+    ),
+    limit: int = typer.Option(20, "--limit", help="max files listed with --stage"),
+) -> None:
+    """Library progress — derived from cached/transcribed/integrated artifacts.
+
+    Stages: new (metadata only) → cached (Plaud detail cached) → transcribed
+    (CMDS STT exists) → integrated (integrated output on disk). Derived live
+    from artifacts, so it cannot go stale like the old files.status column.
+    """
+    from core.progress import STAGES, derive_progress
+
+    if stage is not None and stage not in STAGES:
+        raise typer.BadParameter(f"stage must be one of: {', '.join(STAGES)}")
+
     storage = Storage()
-    for s in FileStatus:
-        rows = storage.files_by_status(s)
-        console.print(f"{s.value:>12}: {len(rows)}")
+    prog = derive_progress(storage)
+    total = len(prog.stages)
+
+    def stage_files(name: str) -> list[str]:
+        ids = [fid for fid, s in prog.stages.items() if s == name]
+        rows = [storage.get_file_row(fid) for fid in ids]
+        rows = [r for r in rows if r is not None]
+        rows.sort(key=lambda r: r["edit_time"] or 0, reverse=True)
+        return [r["id"] for r in rows]
+
+    if json_out:
+        payload: dict = {"counts": prog.counts, "total": total}
+        if stage:
+            payload["stage"] = stage
+            payload["files"] = stage_files(stage)[:limit]
+        _emit_json(payload)
+        return
+
+    console.print("[bold]Library progress[/bold] (derived)")
+    width = 24
+    for s in reversed(STAGES):
+        n = prog.counts.get(s, 0)
+        bar = "█" * (round(width * n / total) if total else 0)
+        console.print(f"  {s:>11}: {n:>5}  [dim]{bar}[/dim]")
+    console.print(f"  {'total':>11}: {total:>5}")
+    if stage:
+        ids = stage_files(stage)
+        console.print(f"\n[bold]{stage}[/bold] ({len(ids)} files, showing {min(limit, len(ids))})")
+        for fid in ids[:limit]:
+            row = storage.get_file_row(fid)
+            console.print(f"  {fid}  {(row['filename'] or '') if row else ''}")
 
 
 _AUTH_ICON = {
@@ -625,15 +705,126 @@ def auth_cmd(
     if st.expires_at:
         exp = datetime.fromtimestamp(st.expires_at).strftime("%Y-%m-%d %H:%M")
         console.print(f"  expires:   {exp}  ({st.remaining_human} left)")
-    if st.live_ok is not None:
-        console.print(
-            "  live ping: " + ("[green]reachable[/green]" if st.live_ok else "[red]rejected[/red]")
-        )
+    if st.live_state is not None:
+        live_label = {
+            "ok": "[green]reachable[/green]",
+            "rejected": "[red]rejected[/red]",
+            "unreachable": "[yellow]could not reach Plaud (network)[/yellow]",
+        }.get(st.live_state, st.live_state)
+        console.print(f"  live ping: {live_label}")
     if st.state in ("expired", "expiring", "unconfigured"):
         console.print(
-            "  [dim]refresh: copy a fresh cURL from web.plaud.ai → "
-            "pbpaste | uv run plaud onboard[/dim]"
+            "  [dim]refresh: use the app Auth button > Authenticate with Plaud. "
+            "Advanced fallback: uv run plaud refresh-auth[/dim]"
         )
+
+
+@safe_command(name="refresh-auth")
+def refresh_auth_cmd(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit JSON and always exit 0; callers must check the status field.",
+    ),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read the Plaud cURL from stdin instead of the macOS clipboard.",
+    ),
+) -> None:
+    """Refresh .env from a fresh Plaud API cURL."""
+    from core.refresh_auth import refresh_auth
+
+    curl_text = sys.stdin.read() if stdin else None
+    result = refresh_auth(curl_text=curl_text)
+    if json_out:
+        _emit_json(
+            {
+                "status": result.status,
+                "detail": result.detail,
+                "cookie_captured": result.cookie_captured,
+            }
+        )
+        return
+    if result.status == "ok":
+        cookie = "yes" if result.cookie_captured else "no"
+        console.print("[green]✅ credentials refreshed from copied cURL[/green]")
+        console.print(f"  cookie captured: {cookie}")
+        from core.auth_status import auth_status as get_auth
+
+        st = get_auth()
+        if st.expires_at:
+            exp = datetime.fromtimestamp(st.expires_at).strftime("%Y-%m-%d %H:%M")
+            console.print(f"  valid until {exp}")
+    elif result.status == "clipboard_empty":
+        console.print(f"[yellow]clipboard empty[/yellow] — {result.detail}")
+        raise typer.Exit(2)
+    elif result.status == "pbpaste_missing":
+        console.print(f"[red]pasteboard unavailable[/red] — {result.detail}")
+        raise typer.Exit(3)
+    else:
+        console.print(f"[red]refresh failed[/red] ({result.status}) — {result.detail}")
+        raise typer.Exit(1)
+
+
+@safe_command(name="web-auth")
+def web_auth_cmd(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit JSON and always exit 0; callers must check the status field.",
+    ),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read the structured Plaud Web Login capture JSON from stdin.",
+    ),
+    skip_live: bool = typer.Option(
+        False,
+        "--skip-live",
+        help="Write captured credentials without the live API validation step "
+        "(validation runs by default).",
+    ),
+) -> None:
+    """Import a Plaud Web Login capture (JSON on stdin) into .env — requires --stdin (used by the macOS app)."""
+    from core.web_auth import import_web_auth
+
+    if not stdin:
+        result = {
+            "status": "stdin_required",
+            "detail": "send Plaud Web Login capture JSON on stdin",
+            "cookie_captured": False,
+        }
+    else:
+        raw = sys.stdin.read()
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            result = {
+                "status": "invalid_payload",
+                "detail": f"invalid JSON: {exc.msg}",
+                "cookie_captured": False,
+            }
+        else:
+            imported = import_web_auth(payload, validate_live=not skip_live)
+            result = {
+                "status": imported.status,
+                "detail": imported.detail,
+                "cookie_captured": imported.cookie_captured,
+            }
+
+    if json_out:
+        _emit_json(result)
+        return
+    if result["status"] == "ok":
+        console.print("[green]credentials refreshed from Plaud Web Login[/green]")
+        return
+    if result["status"] == "live_check_unavailable":
+        # Credentials were saved — only the live verification could not run.
+        console.print(f"[yellow]credentials saved but unverified[/yellow] — {result['detail']}")
+        return
+    console.print(f"[red]web auth failed[/red] ({result['status']}) — {result['detail']}")
+    raise typer.Exit(1)
 
 
 def _render_dashboard_md(st: Any, counts: dict[str, Any], now: int) -> str:
@@ -652,14 +843,17 @@ def _render_dashboard_md(st: Any, counts: dict[str, Any], now: int) -> str:
         exp_line = f"- **Expires**: {exp}  ({st.remaining_human} left)\n"
         fm_exp = datetime.fromtimestamp(st.expires_at).isoformat(timespec="minutes")
     live_line = ""
-    if st.live_ok is not None:
-        live_line = (
-            f"- **Live ping**: {'reachable ✅' if st.live_ok else 'rejected ❌ — re-onboard'}\n"
-        )
+    if st.live_state is not None:
+        live_label = {
+            "ok": "reachable ✅",
+            "rejected": "rejected ❌ — re-onboard",
+            "unreachable": "could not reach Plaud (network) ⚠️",
+        }.get(st.live_state, st.live_state)
+        live_line = f"- **Live ping**: {live_label}\n"
     usage = counts.get("usage_status", {})
     usage_rows = "\n".join(f"| {k} | {v} |" for k, v in sorted(usage.items())) or "| (none) | 0 |"
     callout = (
-        "> [!warning] 토큰 만료/임박 — `pbpaste | uv run plaud onboard` 로 재인증"
+        "> [!warning] 토큰 만료/임박 — 앱 Auth 버튼 → `Authenticate with Plaud`로 재인증"
         if st.state in ("expired", "expiring", "unconfigured")
         else "> [!tip] 토큰 정상"
     )
@@ -1274,6 +1468,34 @@ def speaker_rename_server(old_name: str, new_name: str) -> None:
             s["need_sync"] = True
         client.sync_speakers(targets)
     console.print(f"[green]renamed[/green] {old_name} → {new_name} ({len(targets)} profile)")
+
+
+@safe_command(name="plaud-relabel")
+def plaud_relabel(
+    file_id: str,
+    mapping: list[str] = typer.Argument(..., help="OLD=NEW pairs, e.g. 'Speaker 1=구요한'"),
+) -> None:
+    """Rename speakers in the Plaud SERVER transcript of ONE file (web parity).
+
+    PATCHes the full trans_result back like web.plaud.ai does, preserving
+    original_speaker, then refreshes the local content cache.
+    """
+    pairs: dict[str, str] = {}
+    for raw in mapping:
+        old, sep, new = raw.partition("=")
+        if not sep or not old.strip() or not new.strip():
+            raise typer.BadParameter(f"expected OLD=NEW, got: {raw}")
+        pairs[old.strip()] = new.strip()
+    cfg = load_config()
+    with PlaudClient(cfg) as client:
+        changed = client.rename_transcript_speakers(file_id, pairs)
+        if not changed:
+            console.print("[yellow]no segments matched[/yellow] — nothing pushed")
+            return
+        # Refresh the local cache so the app reflects the server transcript.
+        content = client.file_content(file_id)
+    Storage().save_content(content, now=int(time.time()))
+    console.print(f"[green]relabeled[/green] {changed} segments in {file_id}")
 
 
 @safe_command(name="note-edit")

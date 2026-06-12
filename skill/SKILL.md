@@ -21,6 +21,7 @@ description: Manage Plaud Cloud recordings — sync metadata, download audio, tr
 ```bash
 cd "$PLAUD_HOME"
 
+uv run plaud auth                   # 자격증명 상태 (만료 카운트다운, --live 실검증)
 uv run plaud sync                   # Plaud Cloud -> 로컬 DB 동기화
 uv run plaud list --limit 20        # 최근 20개 조회
 uv run plaud contents <fileId>      # 전사/요약/outline 캐시 + md 저장
@@ -48,6 +49,11 @@ uv run plaud resources --json       # 로컬 리소스(전사/요약/통합)를 
 
 기존 plaud-cloud-tools와 동일한 cURL 복사 방식. `.env`를 프로젝트 루트에 두고,
 `pbpaste | uv run plaud onboard`를 실행하거나 `.env.example`을 참고해 직접 작성.
+
+상태 확인: `uv run plaud auth` (만료 카운트다운, `--live`로 실 토큰 검증).
+토큰 만료/미설정 시 — 1차: 앱 Auth 버튼 → Authenticate with Plaud,
+2차(CLI): 새 cURL 복사 후 `uv run plaud refresh-auth` (클립보드 자동 파싱),
+최후: `pbpaste | uv run plaud onboard`.
 
 ## Model Presets
 

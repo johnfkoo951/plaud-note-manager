@@ -397,11 +397,37 @@
 
 ---
 
+## Phase 11 — Plaud Web Login 인증 (2026-06)
+
+`codex/web-login-auth` 브랜치에서 진행된 변경 (`0181dd7`..`f1b5ced` + 2026-06-11
+하드닝 세션). main 머지 대기.
+
+### S17. Plaud Web Login 인증 — 앱 Auth 시트 + CLI 갱신 경로
+- ✅ 앱 툴바 Auth 버튼 → **"Authenticate with Plaud"** 시트 (`PlaudAuthSheet.swift`)
+      — Browser login (Open Plaud → Import Copied cURL)이 기본, embedded Web Login
+      (WKWebView 캡쳐, `PlaudWebLoginView.swift` 외)은 fallback. WKWebView 안의
+      Google 로그인이 passkey/Bluetooth 오류를 낼 수 있어 browser import를
+      기본으로 승격 (`1dba731`).
+- ✅ CLI: `auth` (오프라인 만료 카운트다운 · `--live` 실검증),
+      `refresh-auth` (클립보드 cURL 파싱 · `--stdin` · `PLAUD_ENV_FILE` 존중),
+      `web-auth --stdin` (앱 내부 WKWebView 캡쳐 JSON 브리지)
+- ✅ **validate-before-write**: live 검증 통과 후에만 `.env` 기록 — 401/403
+      거부·이미 만료된 토큰이면 `.env` 불변 (`live_auth_failed`), 네트워크
+      불통이면 저장 후 `live_check_unavailable` (tri-state). JSON 모드는 항상
+      exit 0, 호출자는 `status` 필드로 판정.
+- ✅ 보안: `.env` 0600 기록, `.env.bak-<epoch>` 온디스크 백업 제거, 캡쳐 핸들러
+      `*.plaud.ai` origin 제한
+- ✅ 회귀 테스트: `tests/test_auth_refresh.py`, `tests/test_web_auth.py`
+
+---
+
 ## 통계
 
 - **총 사용자 요청**: 31건 (R1~R31)
-- **추가 자동 발전 항목**: 16건 (S1~S16, 다른 세션 작업으로 추정)
-- **거부된/회귀된 기능**: 1건 (Phase 3 웹 임베드 — Plaud SPA 인증 한계로 native 복귀)
+- **추가 자동 발전 항목**: 17건 (S1~S17, 다른 세션 작업으로 추정)
+- **거부된/회귀된 기능**: 1건 (Phase 3 웹 임베드 — Plaud SPA 인증 한계로 native 복귀.
+  2026-06 부분 번복: 임베드는 앱 UI용으론 여전히 거부지만, 로그인 자격증명 캡쳐용
+  WKWebView는 Auth 시트 fallback으로 부활 — S17)
 - **외부 의존성**:
   - Python: httpx · pydantic · typer · python-dotenv · rich
   - Swift: GRDB.swift

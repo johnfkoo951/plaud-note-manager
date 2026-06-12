@@ -33,7 +33,7 @@ private enum AppearanceMode: String, CaseIterable, Identifiable {
     }
 }
 
-private enum AppUI {
+enum AppUI {
     static let radius: CGFloat = 10
     static let tightRadius: CGFloat = 7
     static let panelPadding: CGFloat = 12
@@ -52,8 +52,20 @@ private enum AppUI {
     static let metaFont = Font.system(size: 11.5, weight: .medium)
     static let controlFont = Font.system(size: 12.5, weight: .semibold)
 
+    static let brandGreen = Color(red: 0.075, green: 0.271, blue: 0.220)
+    static let accentPink = Color(red: 0.847, green: 0.365, blue: 0.525)
     static let subtleFill = Color(NSColor.controlBackgroundColor).opacity(0.58)
     static let selectedFill = Color(NSColor.controlBackgroundColor).opacity(0.95)
+    static let cardFill = Color(NSColor.controlBackgroundColor).opacity(0.44)
+    static let cardStroke = Color(NSColor.separatorColor).opacity(0.42)
+}
+
+private func formatRecordingDurationMs(_ ms: Double?) -> String {
+    guard let ms, ms > 0 else { return "—" }
+    let s = Int(ms / 1000.0)
+    if s >= 3600 { return "\(s/3600)h \((s%3600)/60)m" }
+    if s >= 60 { return "\(s/60)m \(s%60)s" }
+    return "\(s)s"
 }
 
 @MainActor
@@ -168,9 +180,6 @@ private enum AuthStateStyle {
     }
 }
 
-/// The re-onboard command shown (and copyable) when the token needs refreshing.
-private let plaudReauthCommand = "pbpaste | uv run plaud onboard"
-
 /// Format an epoch-second timestamp as a compact local date+time, or "—".
 private func formatAuthEpoch(_ epoch: Int?) -> String {
     guard let epoch else { return "—" }
@@ -184,6 +193,7 @@ private func formatAuthEpoch(_ epoch: Int?) -> String {
 private struct AuthStatusIndicator: View {
     @ObservedObject var store: FileStore
     @State private var showPopover = false
+    @State private var showAuthSheet = false
     @State private var verifying = false
 
     private var style: AuthStateStyle { AuthStateStyle(store.auth?.state) }
@@ -238,6 +248,12 @@ private struct AuthStatusIndicator: View {
         .popover(isPresented: $showPopover, arrowEdge: .bottom) {
             popoverContent
         }
+        .sheet(isPresented: $showAuthSheet) {
+            PlaudAuthSheet(store: store) {
+                showAuthSheet = false
+                showPopover = false
+            }
+        }
     }
 
     private var popoverContent: some View {
@@ -278,40 +294,34 @@ private struct AuthStatusIndicator: View {
                     .foregroundStyle(.secondary)
             }
 
-            if style.needsReauth {
-                Divider()
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Re-authenticate")
-                        .font(AppUI.controlFont)
-                    Text("Copy a fresh cURL from web.plaud.ai, then run:")
-                        .font(AppUI.metaFont)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack(spacing: 6) {
-                        Text(plaudReauthCommand)
-                            .font(.system(size: 11.5, design: .monospaced))
-                            .textSelection(.enabled)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(
-                                AppUI.subtleFill,
-                                in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
-                            )
-                        Button {
-                            let pb = NSPasteboard.general
-                            pb.clearContents()
-                            pb.setString(plaudReauthCommand, forType: .string)
-                        } label: {
-                            Image(systemName: "doc.on.clipboard")
-                        }
-                        .buttonStyle(.borderless)
-                        .help("Copy command to clipboard")
-                    }
+            Divider()
+            VStack(alignment: .leading, spacing: 6) {
+                Text(style.needsReauth ? "Re-authenticate" : "Update credentials")
+                    .font(AppUI.controlFont)
+                Text("Open Plaud in your browser, then import the copied cURL inside the app.")
+                    .font(AppUI.metaFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    showAuthSheet = true
+                } label: {
+                    Label(
+                        style.needsReauth ? "Authenticate with Plaud" : "Update Plaud Credentials",
+                        systemImage: "key.viewfinder"
+                    )
                 }
+                .buttonStyle(.borderedProminent)
             }
 
             Divider()
-            HStack {
+            HStack(spacing: 8) {
+                Button {
+                    NSWorkspace.shared.open(URL(string: "https://web.plaud.ai/")!)
+                } label: {
+                    Label("Open Plaud", systemImage: "safari")
+                }
+                .help("Open web.plaud.ai in your browser")
+
                 Button {
                     verifying = true
                     Task {
@@ -326,13 +336,12 @@ private struct AuthStatusIndicator: View {
                         Text("Verify now")
                     }
                 }
-                .disabled(verifying)
+                .disabled(verifying || store.refreshingAuth)
                 .help("Ping the Plaud API to confirm the token still works")
-                Spacer()
             }
         }
         .padding(AppUI.spacingL)
-        .frame(width: 300)
+        .frame(width: 360)
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {
@@ -538,9 +547,11 @@ private struct SettingsSheet: View {
                                 backendRow(m)
                             }
                         }
-                        Text("CLI mode uses `claude` / `codex` / `gemini` shell commands "
-                             + "(OAuth or whatever the CLI is logged in with). "
-                             + "Grok uses xAI API. Presets are read from the CMDS API Information folder.")
+                        Text("CLI mode uses `claude` / `codex` / `gemini` / `grok` shell "
+                             + "commands (OAuth or whatever the CLI is logged in with — "
+                             + "Grok via Grok Build `grok -p` with a SuperGrok subscription, "
+                             + "no API cost). API mode uses the env key shown next to each "
+                             + "row. Presets are read from the CMDS API Information folder.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -698,6 +709,10 @@ private struct SidebarView: View {
     @State private var editing: FolderVM?
     @State private var creating: Bool = false
     @State private var createName: String = ""
+    /// Folder id currently hovered by a file drag (nil = none). Drives the
+    /// subtle drop highlight on the targeted folder row.
+    @State private var dropTargetID: String?
+    @State private var unfiledTargeted: Bool = false
 
     var body: some View {
         List(selection: Binding(
@@ -706,7 +721,17 @@ private struct SidebarView: View {
         )) {
             Section {
                 row(.allFiles, "tray.full", "All files", store.categoryCounts.all)
+                // Dropping a file on Unfiled clears its folder assignment.
                 row(.unfiled, "tray", "Unfiled", store.categoryCounts.unfiled)
+                    .background(
+                        unfiledTargeted ? Color.accentColor.opacity(0.18) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
+                    )
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let fileID = items.first, !fileID.isEmpty else { return false }
+                        store.assignFolder(fileID, folderID: nil)
+                        return true
+                    } isTargeted: { unfiledTargeted = $0 }
                 row(.trash, "trash", "Trash", store.categoryCounts.trash)
             }
             Section {
@@ -725,11 +750,30 @@ private struct SidebarView: View {
                             .frame(width: 34, alignment: .trailing)
                     }
                     .padding(.vertical, 2)
+                    .background(
+                        dropTargetID == folder.id
+                            ? Color.accentColor.opacity(0.18)
+                            : Color.clear,
+                        in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
+                    )
                     .tag(SidebarItem.folder(folder.id))
                     .contextMenu {
                         Button("Edit folder") { editing = folder }
                         Button("Delete", role: .destructive) {
                             Task { await store.deleteFolder(folder.id) }
+                        }
+                    }
+                    // Drop a dragged file row here to re-file it (single-folder
+                    // replace semantics, same as the radio menus).
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let fileID = items.first, !fileID.isEmpty else { return false }
+                        store.assignFolder(fileID, folderID: folder.id)
+                        return true
+                    } isTargeted: { targeted in
+                        if targeted {
+                            dropTargetID = folder.id
+                        } else if dropTargetID == folder.id {
+                            dropTargetID = nil
                         }
                     }
                 }
@@ -795,6 +839,44 @@ private struct SidebarView: View {
     }
 }
 
+// MARK: - Folder radio menu
+
+/// Shared menu body for assigning a file's single Plaud folder. Radio
+/// behavior: a checkmark marks the current folder only; picking a folder
+/// replaces the assignment, and picking the current folder again (or the
+/// explicit "Unfiled" item at the top) clears it.
+private struct FolderRadioMenuItems: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+
+    var body: some View {
+        let assigned = store.folderIDs(for: fileID)
+        Button {
+            store.assignFolder(fileID, folderID: nil)
+        } label: {
+            if assigned.isEmpty {
+                Label("Unfiled", systemImage: "checkmark")
+            } else {
+                Label("Unfiled", systemImage: "tray")
+            }
+        }
+        Divider()
+        ForEach(store.folders) { folder in
+            let isCurrent = assigned.contains(folder.id)
+            Button {
+                // Re-clicking the current folder clears the assignment.
+                store.assignFolder(fileID, folderID: isCurrent ? nil : folder.id)
+            } label: {
+                if isCurrent {
+                    Label(folder.name, systemImage: "checkmark")
+                } else {
+                    Text(folder.name)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - File List
 
 private struct FileListView: View {
@@ -802,6 +884,11 @@ private struct FileListView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            LibraryOverview(store: store)
+                .padding(.horizontal, AppUI.spacingM)
+                .padding(.top, AppUI.spacingM)
+                .padding(.bottom, 10)
+
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
                 TextField("Search filename", text: $store.search)
@@ -816,12 +903,19 @@ private struct FileListView: View {
 
             List(selection: $store.selectedID) {
                 ForEach(store.files) { file in
-                    FileRow(file: file)
+                    FileRow(file: file, isSelected: store.selectedID == file.id)
                         .tag(Optional(file.id))
+                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
+                        // Drag onto a sidebar folder (or Unfiled) to re-file.
+                        // Payload is the plain file id string; click-to-select
+                        // is untouched because the drag only starts on movement.
+                        .draggable(file.id)
                         .contextMenu {
                             Button("Rename…") {
                                 if let newName = promptForFilename(current: file.filename ?? "") {
-                                    Task { await store.renameFile(file.id, to: newName) }
+                                    store.renameFile(file.id, to: newName)
                                 }
                             }
                             Button("Open in Plaud Web") {
@@ -831,26 +925,12 @@ private struct FileListView: View {
                                 store.copyPlaudWebURL(file.id)
                             }
                             Divider()
+                            // Radio semantics: a file lives in at most ONE
+                            // folder (Plaud Web breaks with several). Clicking
+                            // a folder replaces the assignment; clicking the
+                            // current folder again (or Unfiled) clears it.
                             Menu("Move to folder") {
-                                let assigned = store.folderIDs(for: file.id)
-                                Button {
-                                    store.moveFile(file.id, toFolders: [])
-                                } label: {
-                                    Label("Unfiled (clear all)",
-                                          systemImage: assigned.isEmpty ? "checkmark" : "tray")
-                                }
-                                Divider()
-                                ForEach(store.folders) { folder in
-                                    Button {
-                                        store.toggleFolder(file.id, folderID: folder.id)
-                                    } label: {
-                                        if assigned.contains(folder.id) {
-                                            Label(folder.name, systemImage: "checkmark")
-                                        } else {
-                                            Text(folder.name)
-                                        }
-                                    }
-                                }
+                                FolderRadioMenuItems(store: store, fileID: file.id)
                             }
                             Button("Send to Obsidian") {
                                 Task { await store.sendToObsidian(file.id) }
@@ -858,79 +938,197 @@ private struct FileListView: View {
                             Button("Transcribe with ElevenLabs") {
                                 Task { await store.transcribeWithElevenLabs(file.id) }
                             }
-                        }
+                    }
                 }
             }
+            .listStyle(.plain)
         }
+    }
+}
+
+private struct LibraryOverview: View {
+    @ObservedObject var store: FileStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("CMDSPACE")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundStyle(AppUI.brandGreen)
+                    Text("Recordings")
+                        .font(.system(size: 22, weight: .bold))
+                }
+                Spacer()
+                Image(systemName: "waveform.badge.sparkles")
+                    .font(.system(size: 18, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(AppUI.accentPink)
+            }
+
+            HStack(spacing: 7) {
+                MiniMetricCard(
+                    label: "All",
+                    value: "\(store.categoryCounts.all)",
+                    systemName: "tray.full",
+                    color: AppUI.brandGreen
+                )
+                MiniMetricCard(
+                    label: "Unfiled",
+                    value: "\(store.categoryCounts.unfiled)",
+                    systemName: "tray",
+                    color: AnuPalette.sky
+                )
+                MiniMetricCard(
+                    label: "Cached",
+                    value: "\(store.cacheStatus.cached)/\(store.cacheStatus.total)",
+                    systemName: "bolt.horizontal.circle",
+                    color: AppUI.accentPink
+                )
+            }
+        }
+        .padding(12)
+        .background(
+            LinearGradient(
+                colors: [
+                    AppUI.brandGreen.opacity(0.13),
+                    AppUI.accentPink.opacity(0.09),
+                    AppUI.cardFill,
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: AppUI.radius)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.radius)
+                .stroke(AppUI.cardStroke, lineWidth: 1)
+        )
+    }
+}
+
+private struct MiniMetricCard: View {
+    let label: String
+    let value: String
+    let systemName: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: 4) {
+                Image(systemName: systemName)
+                    .font(.system(size: 10.5, weight: .semibold))
+                    .symbolRenderingMode(.hierarchical)
+                Text(label)
+                    .font(.system(size: 10.5, weight: .bold))
+                    .lineLimit(1)
+            }
+            .foregroundStyle(color)
+            Text(value)
+                .font(.system(size: 14, weight: .bold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.78)
+        }
+        .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 7)
+        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppUI.cardStroke.opacity(0.7), lineWidth: 1)
+        )
     }
 }
 
 private struct FileRow: View {
     let file: PlaudFileVM
+    let isSelected: Bool
 
     var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Circle()
-                .fill(file.hasContent ? Color.green : Color.gray.opacity(0.3))
-                .frame(width: 6, height: 6)
-                .padding(.top, 8)
-                .help(file.hasContent ? "Cached" : "Not cached yet")
-            VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                Circle()
+                    .fill(file.hasContent ? Color.green : Color.gray.opacity(0.42))
+                    .frame(width: 7, height: 7)
+                    .padding(.top, 7)
+                    .help(file.hasContent ? "Cached" : "Not cached yet")
                 Text(file.filename ?? "(untitled)")
-                    .font(AppUI.rowTitleFont)
+                    .font(.system(size: 14.5, weight: .bold))
                     .lineLimit(2)
-                HStack(spacing: 8) {
-                    if let date = file.createdAt {
-                        Text(date,
-                             format: .dateTime.month().day().hour().minute())
-                            .font(AppUI.metaFont).foregroundStyle(.secondary)
-                    }
-                    if let durMs = file.durationMs, durMs > 0 {
-                        Text(formatDurationMs(durMs))
-                            .font(AppUI.metaFont).foregroundStyle(.secondary)
-                    }
+                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                if let date = file.createdAt {
+                    Text(date, format: .dateTime.month().day().hour().minute())
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(metaColor)
                 }
-                if folderLabel != nil || usageOption != nil {
-                    HStack(spacing: 6) {
-                        if let folderLabel {
-                            HStack(spacing: 4) {
-                                Image(systemName: "folder.fill")
-                                    .font(AppUI.metaFont)
-                                    .imageScale(.small)
-                                Text(folderLabel)
-                                    .font(AppUI.metaFont)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                            }
-                            .foregroundStyle(folderTint)
-                            .help(folderHelpText)
-                        }
-                        if let usageOption {
-                            HStack(spacing: 3) {
-                                Image(systemName: usageOption.symbolName)
-                                    .font(.system(size: 10.5, weight: .semibold))
-                                    .symbolRenderingMode(.hierarchical)
-                                    .frame(width: 12)
-                                Text(usageOption.title)
-                                    .font(AppUI.metaFont)
-                            }
-                            .foregroundStyle(usageOption.color)
-                            .help(usageOption.dbValue)
-                        }
-                    }
-                    .lineLimit(1)
-                }
-                if !file.primaryTags.isEmpty {
-                    HStack(spacing: 5) {
-                        ForEach(Array(file.primaryTags.prefix(3)), id: \.self) { tag in
-                            tagBadge(tagLabel(tag))
-                        }
-                    }
-                    .lineLimit(1)
+                if file.durationMs != nil {
+                    Text(formatRecordingDurationMs(file.durationMs))
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(metaColor)
                 }
             }
+            .padding(.leading, 15)
+
+            if folderLabel != nil || usageOption != nil {
+                HStack(spacing: 6) {
+                    if let folderLabel {
+                        HStack(spacing: 4) {
+                            Image(systemName: "folder.fill")
+                                .font(AppUI.metaFont)
+                                .imageScale(.small)
+                            Text(folderLabel)
+                                .font(AppUI.metaFont)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.86) : folderTint)
+                        .help(folderHelpText)
+                    }
+                    if let usageOption {
+                        HStack(spacing: 3) {
+                            Image(systemName: usageOption.symbolName)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .symbolRenderingMode(.hierarchical)
+                                .frame(width: 12)
+                            Text(usageOption.title)
+                                .font(AppUI.metaFont)
+                        }
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.86) : usageOption.color)
+                        .help(usageOption.dbValue)
+                    }
+                }
+                .padding(.leading, 15)
+                .lineLimit(1)
+            }
+
+            if !file.primaryTags.isEmpty {
+                HStack(spacing: 5) {
+                    ForEach(Array(file.primaryTags.prefix(3)), id: \.self) { tag in
+                        tagBadge(tagLabel(tag))
+                    }
+                }
+                .padding(.leading, 15)
+                .lineLimit(1)
+            }
         }
-        .padding(.vertical, 2)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 9)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            isSelected
+                ? AppUI.accentPink.opacity(0.88)
+                : AppUI.cardFill,
+            in: RoundedRectangle(cornerRadius: AppUI.radius)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.radius)
+                .stroke(isSelected ? Color.white.opacity(0.16) : AppUI.cardStroke,
+                        lineWidth: 1)
+        )
     }
 
     private var folderLabel: String? {
@@ -951,6 +1149,10 @@ private struct FileRow: View {
         UsageStatusOption.resolve(file.usageStatus)
     }
 
+    private var metaColor: Color {
+        isSelected ? Color.white.opacity(0.72) : Color.secondary
+    }
+
     private func tagLabel(_ tag: String) -> String {
         let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("#") ? trimmed : "#\(trimmed)"
@@ -961,18 +1163,13 @@ private struct FileRow: View {
             .font(AppUI.metaFont)
             .lineLimit(1)
             .truncationMode(.tail)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(isSelected ? Color.white.opacity(0.78) : Color.secondary)
             .padding(.horizontal, 7)
             .padding(.vertical, 2.5)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: AppUI.tightRadius))
-    }
-
-    /// Plaud's `duration` is milliseconds. Convert before formatting.
-    private func formatDurationMs(_ ms: Double) -> String {
-        let s = Int(ms / 1000.0)
-        if s >= 3600 { return "\(s/3600)h \((s%3600)/60)m" }
-        if s >= 60 { return "\(s/60)m \(s%60)s" }
-        return "\(s)s"
+            .background(
+                isSelected ? Color.white.opacity(0.12) : Color.primary.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
+            )
     }
 }
 
@@ -1109,11 +1306,17 @@ private struct RawTextView: View {
 private struct CenteredStateView: View {
     let message: String
     var loading: Bool = false
+    var systemImage: String? = nil
+    var tint: Color = .secondary
 
     var body: some View {
         HStack(spacing: AppUI.spacingS) {
             if loading {
                 ProgressView().controlSize(.small)
+            } else if let systemImage {
+                Image(systemName: systemImage)
+                    .symbolRenderingMode(.hierarchical)
+                    .foregroundStyle(tint)
             }
             Text(message)
                 .font(AppUI.bodyFont)
@@ -1496,6 +1699,104 @@ private struct SidebarTogglePill: View {
     }
 }
 
+/// Derived pipeline stage for the Progress tile. Stage = highest reached:
+/// Integrated (any integrated .md on disk) > Transcribed (cmds_transcripts
+/// row) > Cached (file_content row) > New. Computed for the *selected* file
+/// only — one directory scan + one EXISTS query — never per list row.
+private enum PipelineStage {
+    case integrated, transcribed, cached, new
+
+    static func derive(for file: PlaudFileVM) -> PipelineStage {
+        if Database.shared.integratedAnyExists(fileID: file.id) { return .integrated }
+        if Database.shared.cmdsTranscriptExists(for: file.id) { return .transcribed }
+        if file.hasContent { return .cached }
+        return .new
+    }
+
+    var title: String {
+        switch self {
+        case .integrated: return "Integrated"
+        case .transcribed: return "Transcribed"
+        case .cached: return "Cached"
+        case .new: return "New"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .integrated: return "checkmark.seal"
+        case .transcribed: return "waveform"
+        case .cached: return "internaldrive"
+        case .new: return "circle.dashed"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .integrated: return AnuPalette.green
+        case .transcribed: return AnuPalette.teal
+        case .cached: return AnuPalette.sky
+        case .new: return Color.secondary
+        }
+    }
+}
+
+private struct DetailMetricStrip: View {
+    let file: PlaudFileVM
+    let stage: PipelineStage
+
+    var body: some View {
+        HStack(spacing: 7) {
+            MiniMetricCard(
+                label: "Duration",
+                value: formatRecordingDurationMs(file.durationMs),
+                systemName: "timer",
+                color: AnuPalette.sky
+            )
+            MiniMetricCard(
+                label: "Folder",
+                value: folderValue,
+                systemName: "folder.fill",
+                color: file.folderColor.flatMap { Color(hex: $0) } ?? AppUI.brandGreen
+            )
+            MiniMetricCard(
+                label: "Progress",
+                value: stage.title,
+                systemName: stage.symbolName,
+                color: stage.color
+            )
+            MiniMetricCard(
+                label: "Status",
+                value: statusValue,
+                systemName: statusSymbol,
+                color: statusColor
+            )
+        }
+    }
+
+    private var folderValue: String {
+        guard let first = file.folderNames.first else { return "Unfiled" }
+        let extra = file.folderNames.count - 1
+        return extra > 0 ? "\(first) +\(extra)" : first
+    }
+
+    private var statusOption: UsageStatusOption? {
+        UsageStatusOption.resolve(file.usageStatus)
+    }
+
+    private var statusValue: String {
+        statusOption?.title ?? "Not Set"
+    }
+
+    private var statusSymbol: String {
+        statusOption?.symbolName ?? "circle"
+    }
+
+    private var statusColor: Color {
+        statusOption?.color ?? .secondary
+    }
+}
+
 private struct DetailView: View {
     @ObservedObject var store: FileStore
     @State private var player: AVPlayer?
@@ -1504,6 +1805,12 @@ private struct DetailView: View {
     @State private var statusObserver: NSKeyValueObservation?
     @State private var sourceTab: SourceTab = .plaud
     @AppStorage("showRightWorkSidebar") private var showRightWorkSidebar: Bool = true
+    /// Inline title editing (detail header). Click the title (or the hover
+    /// pencil) to edit; Enter commits, Esc/blur cancels.
+    @State private var editingTitle = false
+    @State private var titleDraft = ""
+    @State private var titleHovered = false
+    @FocusState private var titleFieldFocused: Bool
 
     var body: some View {
         if let file = store.selectedFile {
@@ -1538,6 +1845,7 @@ private struct DetailView: View {
                 player?.pause()
                 player = nil
                 store.audioURL = nil
+                editingTitle = false
             }
             .onChange(of: store.audioURL) { _, url in
                 statusObserver = nil
@@ -1613,13 +1921,43 @@ private struct DetailView: View {
         // file_content.title — Plaud renames files post-transcription and the
         // cache lags behind. We also let the user click the title to force
         // a detail re-fetch if they want fresh keywords.
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Recording Workspace")
+                        .font(.system(size: 10, weight: .heavy))
+                        .foregroundStyle(AppUI.brandGreen)
                     HStack(spacing: 8) {
-                        Text(file.filename ?? store.content?.title ?? "(untitled)")
-                            .font(.system(size: 19, weight: .bold))
-                            .lineLimit(2)
+                        if editingTitle {
+                            TextField("Recording title", text: $titleDraft)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 21, weight: .bold))
+                                .focused($titleFieldFocused)
+                                .onSubmit { commitTitleEdit(file: file) }
+                                .onExitCommand { cancelTitleEdit() }
+                                .onChange(of: titleFieldFocused) { _, focused in
+                                    // Losing focus without Enter cancels.
+                                    if !focused && editingTitle { cancelTitleEdit() }
+                                }
+                                .onAppear { titleFieldFocused = true }
+                                .frame(maxWidth: 480)
+                        } else {
+                            Text(file.filename ?? store.content?.title ?? "(untitled)")
+                                .font(.system(size: 21, weight: .bold))
+                                .lineLimit(2)
+                                .onTapGesture { beginTitleEdit(file: file) }
+                                .help("Click to rename")
+                            Button {
+                                beginTitleEdit(file: file)
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(titleHovered ? 1 : 0)
+                            .help("Rename recording")
+                        }
                         Button {
                             if let id = store.selectedID {
                                 Task { await store.refetchDetail(id) }
@@ -1641,12 +1979,15 @@ private struct DetailView: View {
                         .buttonStyle(.plain)
                         .help("Open in Plaud Web (web.plaud.ai/file/\(file.id))")
                     }
+                    .onHover { titleHovered = $0 }
                     HStack(spacing: 8) {
                         Text(file.id).font(.caption2).foregroundStyle(.tertiary)
                         if let kw = store.content?.keywords, !kw.isEmpty {
-                            Text(kw.prefix(5).joined(separator: " · "))
-                                .font(AppUI.metaFont).foregroundStyle(.secondary)
-                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                ForEach(Array(kw.prefix(5)), id: \.self) { keyword in
+                                    keywordChip(keyword)
+                                }
+                            }
                         }
                     }
                 }
@@ -1661,11 +2002,65 @@ private struct DetailView: View {
                     .help("Show AI summaries and Obsidian actions")
                 }
             }
+            // Stage is derived here (not inside the strip) so it recomputes on
+            // every store publish — e.g. right after a transcription or
+            // integration finishes — instead of only when the file row changes.
+            DetailMetricStrip(file: file, stage: .derive(for: file))
             MetadataBar(store: store, file: file)
         }
-        .padding(AppUI.panelPadding)
+        .padding(14)
+        .background(
+            LinearGradient(
+                colors: [
+                    AppUI.brandGreen.opacity(0.12),
+                    AppUI.accentPink.opacity(0.08),
+                    Color(NSColor.windowBackgroundColor).opacity(0.4),
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+        )
     }
 
+
+    /// Clickable keyword chip: clicking filters the file list by routing the
+    /// keyword through the same search field a user would type into.
+    private func keywordChip(_ keyword: String) -> some View {
+        Button {
+            store.search = keyword
+        } label: {
+            Text(keyword)
+                .font(AppUI.metaFont)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(Color.primary.opacity(0.07), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("이 키워드로 검색")
+    }
+
+    // MARK: Inline title editing
+
+    private func beginTitleEdit(file: PlaudFileVM) {
+        titleDraft = file.filename ?? store.content?.title ?? ""
+        editingTitle = true
+    }
+
+    private func commitTitleEdit(file: PlaudFileVM) {
+        guard editingTitle else { return }
+        editingTitle = false
+        let trimmed = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let current = file.filename ?? store.content?.title ?? ""
+        guard !trimmed.isEmpty, trimmed != current else { return }
+        // Optimistic local rename + background `plaud rename`.
+        store.renameFile(file.id, to: trimmed)
+    }
+
+    private func cancelTitleEdit() {
+        editingTitle = false
+    }
 
     @ViewBuilder
     private func audioBar(file: PlaudFileVM) -> some View {
@@ -1759,23 +2154,17 @@ private struct MetadataBar: View {
                 }
             }
 
-            // Read-only Plaud-synced data: note type + folder. Tertiary style
-            // signals "you don't edit this here — it comes from Plaud".
-            if (metadata?.noteType?.isEmpty == false)
-                || (metadata?.folderName?.isEmpty == false) {
-                HStack(spacing: AppUI.spacingS) {
-                    if let type = metadata?.noteType, !type.isEmpty {
-                        Label(type, systemImage: "doc.text")
-                            .font(AppUI.metaFont)
-                            .foregroundStyle(.tertiary)
-                    }
-                    if let folder = metadata?.folderName, !folder.isEmpty {
-                        Label(folder, systemImage: "folder")
-                            .font(AppUI.metaFont)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer(minLength: 0)
+            // Plaud-synced data: note type (read-only) + folder. The folder
+            // is an interactive radio menu — picking a folder replaces the
+            // single assignment, picking the current one (or Unfiled) clears.
+            HStack(spacing: AppUI.spacingS) {
+                if let type = metadata?.noteType, !type.isEmpty {
+                    Label(type, systemImage: "doc.text")
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(.tertiary)
                 }
+                folderMenu
+                Spacer(minLength: 0)
             }
 
             // Locally-owned editable controls: usage status, tag input, AI
@@ -1869,6 +2258,27 @@ private struct MetadataBar: View {
         .onChange(of: file.id) { _, _ in newTag = "" }
     }
 
+    /// Name of the file's single assigned folder, preferring the live folder
+    /// sync over the (lagging) note_metadata copy.
+    private var currentFolderName: String {
+        if let name = file.folderNames.first, !name.isEmpty { return name }
+        if let name = metadata?.folderName, !name.isEmpty { return name }
+        return "Unfiled"
+    }
+
+    private var folderMenu: some View {
+        Menu {
+            FolderRadioMenuItems(store: store, fileID: file.id)
+        } label: {
+            Label(currentFolderName, systemImage: "folder")
+                .font(AppUI.metaFont)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundStyle(.secondary)
+        .help("Assign Plaud folder (one folder per file)")
+    }
+
     private func addTag() {
         let tag = newTag.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !tag.isEmpty else { return }
@@ -1948,6 +2358,7 @@ private struct PlaudPanel: View {
     @ObservedObject var store: FileStore
     @State private var tab: Tab = .summary
     @State private var summaryIndex: Int = 0
+    @State private var renamingSpeakers: Bool = false
     @AppStorage("defaultContentViewMode") private var viewModeRaw: String =
         ContentViewMode.rendered.rawValue
 
@@ -1970,6 +2381,17 @@ private struct PlaudPanel: View {
             // Summaries can be appended/replaced after generation; reset the
             // selected tab index so it never points past the new array bounds.
             summaryIndex = 0
+        }
+        .sheet(isPresented: $renamingSpeakers) {
+            if let fid = store.selectedID {
+                PlaudSpeakerRenameSheet(
+                    store: store,
+                    fileID: fid,
+                    speakers: Self.distinctSpeakers(
+                        in: store.content?.transcript ?? ""
+                    )
+                ) { renamingSpeakers = false }
+            }
         }
     }
 
@@ -2000,10 +2422,39 @@ private struct PlaudPanel: View {
 
             Spacer()
             ViewModeSegment(rawValue: $viewModeRaw)
+            Button {
+                renamingSpeakers = true
+            } label: {
+                Image(systemName: "person.2")
+                    .help("Rename speakers in the Plaud transcript (applies on the Plaud server)")
+            }
+            .buttonStyle(.borderless)
+            .frame(width: 28)
+            .disabled(store.selectedID == nil
+                      || (store.content?.transcript.isEmpty ?? true))
             copyMenu
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    /// Distinct speaker labels in the formatted Plaud transcript
+    /// (`[ts] Speaker: content` lines), in first-seen order.
+    private static func distinctSpeakers(in transcript: String) -> [String] {
+        var seen: [String] = []
+        for line in transcript.components(separatedBy: .newlines) {
+            guard line.first == "[",
+                  let close = line.firstIndex(of: "]") else { continue }
+            let rest = line[line.index(after: close)...]
+                .trimmingCharacters(in: .whitespaces)
+            guard let colon = rest.firstIndex(of: ":") else { continue }
+            let speaker = String(rest[..<colon])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !speaker.isEmpty, !seen.contains(speaker) {
+                seen.append(speaker)
+            }
+        }
+        return seen
     }
 
     private func tabButton(_ title: String, _ k: Tab) -> some View {
@@ -2063,33 +2514,190 @@ private struct PlaudPanel: View {
     @ViewBuilder
     private var content: some View {
         let mode = ContentViewMode(rawValue: viewModeRaw) ?? .rendered
-        switch tab {
-        case .transcript:
-            let transcript = store.content?.transcript ?? ""
-            if mode == .raw {
-                RawTextView(text: transcript)
-            } else {
-                TranscriptBubbleList(text: transcript)
-            }
-        case .summary:
-            if let summaries = store.content?.summaries, !summaries.isEmpty,
-               summaryIndex < summaries.count {
-                let body = summaries[summaryIndex].body
+        if let plaudContent = store.content {
+            switch tab {
+            case .transcript:
+                let transcript = plaudContent.transcript
                 if mode == .raw {
-                    RawTextView(text: body)
+                    RawTextView(text: transcript)
                 } else {
-                    MarkdownDocumentView(text: body)
+                    TranscriptBubbleList(text: transcript)
                 }
-            } else {
-                CenteredStateView(message: "Loading content…", loading: true)
+            case .summary:
+                if !plaudContent.summaries.isEmpty,
+                   summaryIndex < plaudContent.summaries.count {
+                    let body = plaudContent.summaries[summaryIndex].body
+                    if mode == .raw {
+                        RawTextView(text: body)
+                    } else {
+                        MarkdownDocumentView(text: body)
+                    }
+                } else {
+                    CenteredStateView(
+                        message: "No Plaud summary cached for this recording yet.",
+                        systemImage: "doc.text.magnifyingglass"
+                    )
+                }
+            case .outline:
+                let outline = plaudContent.outline
+                if mode == .raw {
+                    RawTextView(text: outline)
+                } else {
+                    MarkdownDocumentView(text: outline)
+                }
             }
-        case .outline:
-            let outline = store.content?.outline ?? ""
-            if mode == .raw {
-                RawTextView(text: outline)
-            } else {
-                MarkdownDocumentView(text: outline)
+        } else {
+            missingContentState
+        }
+    }
+
+    @ViewBuilder
+    private var missingContentState: some View {
+        if store.auth == nil {
+            CenteredStateView(message: "Loading content…", loading: true)
+        } else {
+            switch AuthStateStyle(store.auth?.state) {
+            case .expired:
+                CenteredStateView(
+                    message: "Plaud auth expired. Use auth > Authenticate with Plaud, then sync again.",
+                    systemImage: "xmark.shield.fill",
+                    tint: .red
+                )
+            case .unconfigured:
+                CenteredStateView(
+                    message: "Plaud auth is not configured. Use auth > Authenticate with Plaud.",
+                    systemImage: "shield.slash.fill",
+                    tint: .red
+                )
+            case .unknown:
+                CenteredStateView(
+                    message: "Plaud content is not cached yet. Check auth, then sync or select the recording again.",
+                    systemImage: "questionmark.folder.fill"
+                )
+            case .valid, .expiring:
+                // Only spin while a detail fetch is actually in flight;
+                // otherwise the fetch already failed and a retry is needed.
+                if store.selectedID.map({ store.pendingDetailFetch.contains($0) }) == true {
+                    CenteredStateView(message: "Loading content…", loading: true)
+                } else {
+                    VStack(spacing: AppUI.spacingS) {
+                        CenteredStateView(
+                            message: "Couldn't load content for this recording.",
+                            systemImage: "exclamationmark.triangle.fill",
+                            tint: .orange
+                        )
+                        Button {
+                            store.retryContentFetch()
+                        } label: {
+                            Label("Retry", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
             }
+        }
+    }
+}
+
+// MARK: - Plaud Speaker Rename Sheet
+
+/// Rename speakers in the **Plaud server** transcript. Lists the distinct
+/// speaker labels of the currently displayed transcript, each with a field
+/// prefilled with the current name. Apply runs
+/// `plaud plaud-relabel <id> OLD=NEW …` and then re-fetches detail so the
+/// UI reflects the server-side rename.
+private struct PlaudSpeakerRenameSheet: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+    let speakers: [String]
+    let dismiss: () -> Void
+
+    /// Target name per raw speaker label, prefilled with the current name.
+    @State private var names: [String: String] = [:]
+
+    private var isRunning: Bool { store.plaudRelabelingIDs.contains(fileID) }
+
+    /// Mapping of only the names the user actually changed.
+    private var changedMapping: [String: String] {
+        var mapping: [String: String] = [:]
+        for raw in speakers {
+            let new = (names[raw] ?? raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !new.isEmpty, new != raw {
+                mapping[raw] = new
+            }
+        }
+        return mapping
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rename speakers").font(.headline)
+            Text("Renames the speakers on the Plaud server transcript, then refreshes the local copy.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if speakers.isEmpty {
+                Text("No speaker labels found in this transcript.")
+                    .font(AppUI.bodyFont)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(speakers, id: \.self) { raw in
+                    HStack(spacing: 8) {
+                        Text(raw)
+                            .font(AppUI.bodyFont)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(width: 140, alignment: .leading)
+                        Image(systemName: "arrow.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        TextField("New name", text: binding(for: raw))
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(isRunning)
+                    }
+                }
+            }
+
+            HStack {
+                if isRunning {
+                    ProgressView().controlSize(.small)
+                    Text("Renaming on Plaud…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .disabled(isRunning)
+                Button("Apply") { apply() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isRunning || changedMapping.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 440)
+        .onAppear {
+            for raw in speakers where names[raw] == nil {
+                names[raw] = raw
+            }
+        }
+    }
+
+    private func binding(for raw: String) -> Binding<String> {
+        Binding(
+            get: { names[raw] ?? raw },
+            set: { names[raw] = $0 }
+        )
+    }
+
+    private func apply() {
+        let mapping = changedMapping
+        guard !mapping.isEmpty else { return }
+        Task {
+            // Failure surfaces via store.lastCommandError (alert in
+            // ContentView); the sheet closes either way after the run.
+            await store.relabelPlaudSpeakers(fileID, mapping: mapping)
+            dismiss()
         }
     }
 }
@@ -2354,9 +2962,10 @@ private struct CmdsPanel: View {
         }
     }
 
+    /// Section labels share the app-wide M:SS convention (H:MM:SS ≥ 1 hour)
+    /// via `Database.formatMinSec` instead of a hand-rolled format.
     private func formatTime(_ sec: Double) -> String {
-        let s = Int(sec)
-        return String(format: "%02d:%02d", s / 60, s % 60)
+        Database.formatMinSec(Int(sec))
     }
 }
 
@@ -2383,6 +2992,8 @@ private struct AIInspectorPanel: View {
     /// the slot's template is "integrated", else .summary.
     @State private var modeMap: [String: SlotMode] = [:]
     @State private var expanded: Set<String> = []
+    /// Slot whose output is shown in the large expand sheet (nil = closed).
+    @State private var expandedSlot: Database.Slot?
     /// Per-slot view: which integrated subsection to show (all / transcript / summary).
     @State private var viewMap: [String: Database.IntegratedKind] = [:]
     @State private var refreshTick: Int = 0
@@ -2393,6 +3004,20 @@ private struct AIInspectorPanel: View {
         case summary, integrated
         var id: String { rawValue }
         var label: String { self == .summary ? "Summary" : "Integrated" }
+        /// Segment icon: plain doc for the single-summary path, merge arrows
+        /// for the integrated (Plaud + CMDS) pipeline.
+        var icon: String {
+            self == .summary ? "doc.text" : "arrow.triangle.merge"
+        }
+        /// Accent tint so the two modes are distinct at a glance:
+        /// Summary = blue, Integrated = green.
+        var tint: Color { self == .summary ? .blue : .green }
+        /// One-line explanation of what generating in this mode produces.
+        var caption: String {
+            self == .summary
+                ? "Plaud 전사·요약만 사용해 단일 요약 생성"
+                : "Plaud + CMDS 전사를 통합해 최종 전사본 + 요약 생성"
+        }
     }
 
     var body: some View {
@@ -2423,6 +3048,7 @@ private struct AIInspectorPanel: View {
         .onChange(of: store.selectedID) { _, _ in
             reload()
             expanded.removeAll()
+            expandedSlot = nil
         }
         .onChange(of: store.summarizingKeys.count) { _, _ in
             refreshTick &+= 1
@@ -2432,6 +3058,9 @@ private struct AIInspectorPanel: View {
                 addingSlot = false
                 reload()
             }
+        }
+        .sheet(item: $expandedSlot) { slot in
+            slotOutputSheet(slot)
         }
     }
 
@@ -2581,10 +3210,13 @@ private struct AIInspectorPanel: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: hasOutput ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundColor(hasOutput ? .green : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(slot.name).font(AppUI.rowTitleFont)
-                    Text("\(slot.model) · \(slot.outputModel) · \(slot.template)")
-                        .font(AppUI.metaFont).foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        slotChip("\(slot.model) · \(slot.outputModel)",
+                                 icon: "cpu")
+                        slotChip(slot.template, icon: "doc.plaintext")
+                    }
                 }
                 Spacer()
                 Button(role: .destructive) {
@@ -2627,6 +3259,14 @@ private struct AIInspectorPanel: View {
                 Spacer()
                 if hasOutput {
                     copyMenu(slot: slot, mode: m)
+                    Button {
+                        expandedSlot = slot
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Expand output in a larger window")
                     Button(isOpen ? "Hide" : "Show") {
                         if isOpen { expanded.remove(slot.id) }
                         else { expanded.insert(slot.id) }
@@ -2645,28 +3285,66 @@ private struct AIInspectorPanel: View {
         .cornerRadius(AppUI.radius)
     }
 
+    /// Small rounded chip for slot metadata (model id, template).
+    private func slotChip(_ text: String, icon: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+            Text(text)
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2.5)
+        .background(Color.primary.opacity(0.07), in: Capsule())
+    }
+
+    /// Mode picker: icon + label segments, tinted per mode (Summary = blue,
+    /// Integrated = green), with a one-line caption explaining what the
+    /// selected mode generates.
     private func slotModeControl(_ slot: Database.Slot) -> some View {
-        HStack(spacing: 2) {
-            ForEach(SlotMode.allCases) { option in
-                let selected = mode(for: slot) == option
-                Button {
-                    modeMap[slot.id] = option
-                } label: {
-                    Text(option.label)
+        let current = mode(for: slot)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 2) {
+                ForEach(SlotMode.allCases) { option in
+                    let selected = current == option
+                    Button {
+                        modeMap[slot.id] = option
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: option.icon)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .symbolRenderingMode(.hierarchical)
+                            Text(option.label)
+                        }
                         .font(AppUI.controlFont)
-                        .foregroundStyle(selected ? .primary : .secondary)
+                        .foregroundStyle(selected ? option.tint : .secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5)
                         .background(
-                            selected ? AppUI.selectedFill : Color.clear,
+                            selected ? option.tint.opacity(0.14) : Color.clear,
                             in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
                         )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppUI.tightRadius)
+                                .stroke(selected ? option.tint.opacity(0.45)
+                                                 : Color.clear,
+                                        lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
+            .padding(3)
+            .background(AppUI.subtleFill,
+                        in: RoundedRectangle(cornerRadius: AppUI.radius))
+
+            Text(current.caption)
+                .font(.caption2)
+                .foregroundStyle(current.tint)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(3)
-        .background(AppUI.subtleFill, in: RoundedRectangle(cornerRadius: AppUI.radius))
     }
 
     @ViewBuilder
@@ -2688,6 +3366,34 @@ private struct AIInspectorPanel: View {
                 }
             }
         }
+    }
+
+    /// Large resizable sheet showing a slot's output. Reuses the exact inline
+    /// pieces: `outputBody` (same rendered markdown view, and for integrated
+    /// mode the same All / Transcript / Summary picker backed by the shared
+    /// `viewMap`, so the card and sheet stay in sync) and `copyMenu` (same raw
+    /// markdown copy logic).
+    @ViewBuilder
+    private func slotOutputSheet(_ slot: Database.Slot) -> some View {
+        let m = mode(for: slot)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("\(slot.name) — \(m.label)")
+                    .font(.headline)
+                Spacer()
+                copyMenu(slot: slot, mode: m)
+                Button("Done") { expandedSlot = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+            Divider()
+            ScrollView {
+                outputBody(slot: slot, mode: m)
+                    .padding(.bottom, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 720, minHeight: 560)
     }
 
     private func integratedKindControl(_ slot: Database.Slot) -> some View {
