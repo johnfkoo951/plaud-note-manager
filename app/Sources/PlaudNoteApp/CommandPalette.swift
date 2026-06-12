@@ -205,7 +205,7 @@ struct CommandPaletteOverlay: View {
             handleEscape()
             return .handled
         default:
-            // Single-key triggers (E, V, U, M, T, O, W, R) fire only while
+            // Single-key triggers (E, S, V, U, M, T, O, W, R) fire only while
             // the search field is empty; otherwise keystrokes just filter.
             guard mode == .actions, query.isEmpty,
                   press.modifiers.isEmpty || press.modifiers == .capsLock
@@ -307,6 +307,19 @@ struct CommandPaletteOverlay: View {
             return true
         })
 
+        let isStarred = file?.starred ?? false
+        items.append(PaletteAction(
+            id: "star",
+            title: isStarred ? "Unstar" : "Star",
+            systemImage: isStarred ? "star.slash" : "star",
+            keyHint: "S",
+            isEnabled: hasSelection
+        ) {
+            guard let fileID else { return true }
+            store.toggleStar(fileID)
+            return true
+        })
+
         items.append(PaletteAction(
             id: "move",
             title: "Move to Folder…",
@@ -338,12 +351,9 @@ struct CommandPaletteOverlay: View {
             isEnabled: hasSelection && !metadataRunning
         ) {
             guard let fileID else { return true }
-            let choice = defaultAIModelChoice()
-            Task {
-                await store.generateMetadata(
-                    fileID, model: choice.provider, modelID: choice.modelID
-                )
-            }
+            // No explicit model: the CLI resolves the configured classify
+            // model (Settings > Auto-classify) — single source of truth.
+            Task { await store.generateMetadata(fileID) }
             return true
         })
 
@@ -427,6 +437,8 @@ struct CommandPaletteOverlay: View {
                              systemImage: "tray.full", target: .allFiles))
         items.append(navItem(id: "nav-unfiled", title: "Go to: Unfiled",
                              systemImage: "tray", target: .unfiled))
+        items.append(navItem(id: "nav-starred", title: "Go to: Starred",
+                             systemImage: "star", target: .starred))
         items.append(navItem(id: "nav-trash", title: "Go to: Trash",
                              systemImage: "trash", target: .trash))
         for folder in store.folders {

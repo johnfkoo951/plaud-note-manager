@@ -15,7 +15,7 @@ from .tags import normalize_tags
 DEFAULT_DB = PROJECT_ROOT / "data" / "plaud.db"
 
 # Bump when SCHEMA_TABLES/_migrate change; gates the migration fast-path.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS files (
@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS files (
     is_trash    INTEGER NOT NULL DEFAULT 0,
     status      TEXT NOT NULL DEFAULT 'new',
     local_path  TEXT,
+    -- Local-only reading state; upsert_file never touches these, so they
+    -- survive cloud syncs. seen_at NULL = the user has not opened it yet.
+    seen_at     INTEGER,
+    starred     INTEGER NOT NULL DEFAULT 0,
     synced_at   INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL
 );
@@ -133,6 +137,13 @@ class Storage:
             conn.execute("ALTER TABLE files ADD COLUMN is_trash INTEGER NOT NULL DEFAULT 0")
         if "start_time" not in cols:
             conn.execute("ALTER TABLE files ADD COLUMN start_time INTEGER")
+        if "seen_at" not in cols:
+            conn.execute("ALTER TABLE files ADD COLUMN seen_at INTEGER")
+            # The pre-existing library counts as "seen" — only recordings that
+            # arrive after this migration should light up as unread.
+            conn.execute("UPDATE files SET seen_at = strftime('%s','now')")
+        if "starred" not in cols:
+            conn.execute("ALTER TABLE files ADD COLUMN starred INTEGER NOT NULL DEFAULT 0")
         note_cols = {row[1] for row in conn.execute("PRAGMA table_info(note_metadata)")}
         if note_cols:
             if "usage_status" not in note_cols:
@@ -219,6 +230,20 @@ class Storage:
     def get_file_row(self, file_id: str) -> sqlite3.Row | None:
         with self._connect() as conn:
             return conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
+
+    def mark_seen(self, file_id: str, *, now: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE files SET seen_at = ? WHERE id = ? AND seen_at IS NULL",
+                (now, file_id),
+            )
+
+    def set_starred(self, file_id: str, starred: bool) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE files SET starred = ? WHERE id = ?",
+                (1 if starred else 0, file_id),
+            )
 
     # Cheap id-set accessors for derived progress (core/progress.py).
 

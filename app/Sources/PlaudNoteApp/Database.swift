@@ -23,6 +23,12 @@ struct PlaudFileVM: Identifiable, Hashable, FetchableRecord {
     let folderColor: String?
     let primaryTags: [String]
     let usageStatus: String?
+    /// LOCAL-ONLY read state (epoch seconds when the user first opened the
+    /// recording); nil = never opened. `var` so optimistic in-memory updates
+    /// can flip it without a full reload.
+    var seenAt: Int64?
+    /// LOCAL-ONLY star flag.
+    var starred: Bool
 
     init(row: Row) {
         self.id = row["id"]
@@ -37,6 +43,9 @@ struct PlaudFileVM: Identifiable, Hashable, FetchableRecord {
         self.folderColor = row["folder_color"]
         self.primaryTags = Self.splitList(row["primary_tags"])
         self.usageStatus = row["usage_status"]
+        // Safe defaults when the columns don't exist yet (pre-migration DB).
+        self.seenAt = row["seen_at"]
+        self.starred = (row["starred"] as Int64? ?? 0) != 0
     }
 
     private static func splitList(_ raw: String?) -> [String] {
@@ -191,6 +200,7 @@ struct ModelPresetVM: Identifiable, Hashable {
 enum SidebarItem: Hashable {
     case allFiles
     case unfiled
+    case starred
     case trash
     case folder(String)
 }
@@ -224,6 +234,28 @@ final class Database: @unchecked Sendable {
     private func ensureMetadataSchema() {
         guard !metadataSchemaReady, let pool else { return }
         try? pool.write { db in
+            // Defensive guard for the LOCAL-ONLY read/star columns. The app's
+            // first reload can run before any `plaud` CLI command has had a
+            // chance to migrate, so mirror the Python migration here (same
+            // idempotent ALTERs; the version-gated Python migration skips
+            // columns that already exist). Deliberately does NOT touch
+            // PRAGMA user_version — that stays owned by the Python side.
+            let fileRows = try Row.fetchAll(db, sql: "PRAGMA table_info(files)")
+            let fileColumns = Set(fileRows.compactMap { row -> String? in row["name"] })
+            if !fileColumns.isEmpty, !fileColumns.contains("seen_at") {
+                try db.execute(sql: "ALTER TABLE files ADD COLUMN seen_at INTEGER")
+                // The pre-existing library counts as "seen" — only recordings
+                // that arrive after this migration light up as unread.
+                try db.execute(sql: """
+                    UPDATE files SET seen_at = strftime('%s','now')
+                     WHERE seen_at IS NULL
+                """)
+            }
+            if !fileColumns.isEmpty, !fileColumns.contains("starred") {
+                try db.execute(sql: """
+                    ALTER TABLE files ADD COLUMN starred INTEGER NOT NULL DEFAULT 0
+                """)
+            }
             try db.execute(sql: """
                 CREATE TABLE IF NOT EXISTS note_metadata (
                     file_id TEXT PRIMARY KEY,
@@ -338,6 +370,52 @@ final class Database: @unchecked Sendable {
         }
     }
 
+    /// Mark a recording as seen (read). LOCAL-ONLY column; no server call.
+    /// The `seen_at IS NULL` guard keeps the first-open timestamp stable.
+    @discardableResult
+    func markSeen(fileID: String) -> Error? {
+        lock.lock(); defer { lock.unlock() }
+        tryOpen()
+        guard let pool else {
+            return DatabaseError(message: "Database pool unavailable")
+        }
+        do {
+            try pool.write { db in
+                try db.execute(
+                    sql: """
+                    UPDATE files SET seen_at = strftime('%s','now')
+                     WHERE id = ? AND seen_at IS NULL
+                    """,
+                    arguments: [fileID]
+                )
+            }
+            return nil
+        } catch {
+            return error
+        }
+    }
+
+    /// Toggle the LOCAL-ONLY star flag. Mirrors `plaud star <id> [--off]`.
+    @discardableResult
+    func setStarred(fileID: String, starred: Bool) -> Error? {
+        lock.lock(); defer { lock.unlock() }
+        tryOpen()
+        guard let pool else {
+            return DatabaseError(message: "Database pool unavailable")
+        }
+        do {
+            try pool.write { db in
+                try db.execute(
+                    sql: "UPDATE files SET starred = ? WHERE id = ?",
+                    arguments: [starred ? 1 : 0, fileID]
+                )
+            }
+            return nil
+        } catch {
+            return error
+        }
+    }
+
     private func read<T>(_ block: (GRDB.Database) throws -> T) -> T? {
         lock.lock(); defer { lock.unlock() }
         tryOpen()
@@ -350,7 +428,8 @@ final class Database: @unchecked Sendable {
     /// in Swift (trash flag + the file's folder-id membership). Loading this
     /// once lets folder-clicks and search keystrokes filter without a DB hop.
     struct MasterFile: Identifiable, Hashable {
-        let file: PlaudFileVM
+        /// `var` so FileStore can flip seen/star state optimistically.
+        var file: PlaudFileVM
         let folderIDs: Set<String>
         var id: String { file.id }
     }
@@ -482,6 +561,8 @@ final class Database: @unchecked Sendable {
             sql += " AND f.is_trash = 0"
         case .unfiled:
             sql += " AND f.is_trash = 0 AND f.id NOT IN (SELECT file_id FROM file_folders)"
+        case .starred:
+            sql += " AND f.is_trash = 0 AND f.starred = 1"
         case .trash:
             sql += " AND f.is_trash = 1"
         case .folder(let id):
@@ -519,8 +600,8 @@ final class Database: @unchecked Sendable {
         } ?? []
     }
 
-    func categoryCounts() -> (all: Int, unfiled: Int, trash: Int) {
-        // Single pass over `files` instead of three separate COUNT queries.
+    func categoryCounts() -> (all: Int, unfiled: Int, starred: Int, trash: Int) {
+        // Single pass over `files` instead of four separate COUNT queries.
         // NOT EXISTS (not NOT IN) so a NULL file_id row can never poison the
         // unfiled predicate.
         read { db in
@@ -530,14 +611,16 @@ final class Database: @unchecked Sendable {
                            SELECT 1 FROM file_folders ff
                             WHERE ff.file_id = files.id
                        )), 0) AS unfiled_count,
+                       COALESCE(SUM(is_trash = 0 AND starred = 1), 0) AS starred_count,
                        COALESCE(SUM(is_trash = 1), 0) AS trash_count
                   FROM files
-            """) else { return (0, 0, 0) }
+            """) else { return (0, 0, 0, 0) }
             let all: Int = row["all_count"] ?? 0
             let unfiled: Int = row["unfiled_count"] ?? 0
+            let starred: Int = row["starred_count"] ?? 0
             let trash: Int = row["trash_count"] ?? 0
-            return (all, unfiled, trash)
-        } ?? (0, 0, 0)
+            return (all, unfiled, starred, trash)
+        } ?? (0, 0, 0, 0)
     }
 
     /// Count of files that don't yet have cached transcripts/summary.
@@ -603,10 +686,15 @@ final class Database: @unchecked Sendable {
     ]
 
     /// App config shared with the Python CLI. Direct read of `data/config.json`.
+    /// Writes go through the `plaud config-*` CLI commands so unknown keys are
+    /// always preserved by the Python side.
     struct AppConfig {
         var backends: [String: String]
         var models: [String: String]
         var paths: [String: String]
+        /// Which model runs auto-classify / metadata-generate by default
+        /// (top-level `classify_model` key; `plaud config-classify`).
+        var classifyModel: String
     }
 
     func loadAppConfig() -> AppConfig {
@@ -615,7 +703,8 @@ final class Database: @unchecked Sendable {
             backends: ["claude": "cli", "codex": "cli", "gemini": "cli",
                        "grok": "api"],
             models: Self.fallbackModelIDs,
-            paths: ["transcripts": "", "summaries": "", "integrated": ""]
+            paths: ["transcripts": "", "summaries": "", "integrated": ""],
+            classifyModel: "claude"
         )
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -624,6 +713,7 @@ final class Database: @unchecked Sendable {
         if let b = obj["backends"] as? [String: String] { cfg.backends.merge(b) { _, new in new } }
         if let m = obj["models"] as? [String: String] { cfg.models.merge(m) { _, new in new } }
         if let p = obj["paths"] as? [String: String] { cfg.paths.merge(p) { _, new in new } }
+        if let c = obj["classify_model"] as? String, !c.isEmpty { cfg.classifyModel = c }
         return cfg
     }
 

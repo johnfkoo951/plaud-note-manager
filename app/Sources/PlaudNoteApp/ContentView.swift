@@ -401,12 +401,14 @@ struct ContentView: View {
     /// on the NavigationSplitView itself so toolbar placement is unchanged by
     /// the palette's ZStack wrapper.
     private var mainSplitView: some View {
+        // Wider-detail default layout: comfortable sidebar + file list, the
+        // detail pane takes the rest so the source tab row never wraps.
         NavigationSplitView {
             SidebarView(store: store)
-                .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 240)
+                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
         } content: {
             FileListView(store: store)
-                .navigationSplitViewColumnWidth(min: 260, ideal: 320, max: 460)
+                .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
         } detail: {
             DetailView(store: store)
         }
@@ -416,7 +418,7 @@ struct ContentView: View {
                     ToolbarIconLabel(systemName: "gearshape")
                 }
                 .keyboardShortcut(".", modifiers: .command)
-                .help("Settings (Command + .)")
+                .help("Settings (Command + , or Command + .)")
                 Button {
                     Task { await store.deepSync() }
                 } label: {
@@ -554,8 +556,9 @@ private struct SettingsSheet: View {
                             .frame(width: 260)
                         }
 
-                        Text("Command + . opens this panel. Rendered view uses chat bubbles "
-                             + "for transcripts and AnuPpuccin-flavored Markdown for notes.")
+                        Text("Command + , (or Command + .) opens this panel. Rendered view "
+                             + "uses chat bubbles for transcripts and AnuPpuccin-flavored "
+                             + "Markdown for notes.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -572,6 +575,27 @@ private struct SettingsSheet: View {
                              + "Grok via Grok Build `grok -p` with a SuperGrok subscription, "
                              + "no API cost). API mode uses the env key shown next to each "
                              + "row. Presets are read from the CMDS API Information folder.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    section("Auto-classify") {
+                        settingsRow("Classify model") {
+                            Picker("", selection: Binding(
+                                get: { config.classifyModel },
+                                set: { newVal in
+                                    config.classifyModel = newVal
+                                    Task { await store.setClassifyModel(newVal) }
+                                }
+                            )) {
+                                ForEach(models, id: \.self) { Text($0).tag($0) }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(width: 280)
+                        }
+                        Text(classifyModelCaption)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -609,6 +633,26 @@ private struct SettingsSheet: View {
         .onAppear {
             presets = Database.shared.loadModelPresets()
         }
+    }
+
+    /// Which subscription/API the configured classify model will bill,
+    /// resolved from the backends map — e.g. "via claude CLI (구독)" or
+    /// "via xAI API ($XAI_API_KEY)".
+    private var classifyModelCaption: String {
+        let model = config.classifyModel
+        let providerLabels = [
+            "claude": "Anthropic", "codex": "OpenAI",
+            "gemini": "Google", "grok": "xAI",
+        ]
+        let route: String
+        if (config.backends[model] ?? "cli") == "api" {
+            route = "via \(providerLabels[model] ?? model) API "
+                + "($\(envHints[model] ?? ""))"
+        } else {
+            route = "via \(model) CLI (구독)"
+        }
+        return "Auto-classify and metadata generation run \(route). "
+            + "Used whenever no explicit model override is given."
     }
 
     private func section<Content: View>(
@@ -752,6 +796,8 @@ private struct SidebarView: View {
                         store.assignFolder(fileID, folderID: nil)
                         return true
                     } isTargeted: { unfiledTargeted = $0 }
+                row(.starred, "star.fill", "Starred", store.categoryCounts.starred,
+                    tint: FileRow.starGold)
                 row(.trash, "trash", "Trash", store.categoryCounts.trash)
             }
             Section {
@@ -844,10 +890,20 @@ private struct SidebarView: View {
 
     @ViewBuilder
     private func row(_ item: SidebarItem, _ symbol: String,
-                     _ title: String, _ count: Int) -> some View {
+                     _ title: String, _ count: Int,
+                     tint: Color? = nil) -> some View {
         HStack {
-            Label(title, systemImage: symbol)
+            if let tint {
+                Label {
+                    Text(title)
+                } icon: {
+                    Image(systemName: symbol).foregroundStyle(tint)
+                }
                 .font(AppUI.rowTitleFont)
+            } else {
+                Label(title, systemImage: symbol)
+                    .font(AppUI.rowTitleFont)
+            }
             Spacer()
             Text("\(count)")
                 .font(AppUI.metaFont)
@@ -931,7 +987,9 @@ private struct FileListView: View {
 
             List(selection: $store.selectedID) {
                 ForEach(store.files) { file in
-                    FileRow(file: file, isSelected: store.selectedID == file.id)
+                    FileRow(file: file,
+                            isSelected: store.selectedID == file.id,
+                            onToggleStar: { store.toggleStar(file.id) })
                         .tag(Optional(file.id))
                         // Flat rows own their padding; zero insets keep the
                         // accent bar + hover fill flush with the list edges.
@@ -945,6 +1003,13 @@ private struct FileListView: View {
                         // only triggers on a horizontal two-finger gesture.
                         .draggable(file.id)
                         .contextMenu {
+                            Button {
+                                store.toggleStar(file.id)
+                            } label: {
+                                Label(file.starred ? "Unstar" : "Star",
+                                      systemImage: file.starred ? "star.slash" : "star")
+                            }
+                            Divider()
                             Button("Rename…") {
                                 if let newName = promptForFilename(current: file.filename ?? "") {
                                     store.renameFile(file.id, to: newName)
@@ -989,6 +1054,16 @@ private struct FileListView: View {
                                           ? "tray.and.arrow.up" : "archivebox")
                             }
                             .tint(.gray)
+                            // Second leading action — never triggered by a
+                            // full swipe (that stays Archive).
+                            Button {
+                                store.toggleStar(file.id)
+                            } label: {
+                                Label(file.starred ? "Unstar" : "Star",
+                                      systemImage: file.starred
+                                          ? "star.slash" : "star.fill")
+                            }
+                            .tint(.yellow)
                         }
                         .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                             Button {
@@ -1187,17 +1262,22 @@ private struct MiniMetricCard: View {
 private struct FileRow: View {
     let file: PlaudFileVM
     let isSelected: Bool
+    /// Clicking the dot/star slot toggles the star (small tap target only,
+    /// so row selection elsewhere is untouched).
+    let onToggleStar: () -> Void
     @State private var hovering = false
 
     /// Leading inset for line 2 so it aligns with the title after the
-    /// 7pt cached dot + 8pt spacing.
-    private static let metaIndent: CGFloat = 15
+    /// 11pt state-dot slot + 8pt spacing.
+    private static let metaIndent: CGFloat = 19
     private static let metaFont = Font.system(size: 11)
+    /// Warm gold for the starred state — pretty in dark mode, not neon.
+    static let starGold = Color(red: 0.95, green: 0.72, blue: 0.25)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
-                cachedDot
+                stateDot
                 Text(file.filename ?? "(untitled)")
                     .font(.system(size: 13.5, weight: .semibold))
                     .lineLimit(1)
@@ -1237,18 +1317,33 @@ private struct FileRow: View {
         return Color.clear
     }
 
-    /// Green dot = transcript/summary cached; hollow gray ring = not yet.
+    /// Read-state dot: gold star = starred, green dot = unseen (안 본 것),
+    /// muted gray dot = seen (본 것은 조용하게). Cached-state no longer lives
+    /// here — it stays visible via the Progress tile and the Cached counter.
+    /// Clicking the slot toggles the star.
     @ViewBuilder
-    private var cachedDot: some View {
+    private var stateDot: some View {
         Group {
-            if file.hasContent {
-                Circle().fill(Color.green)
+            if file.starred {
+                Image(systemName: "star.fill")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(Self.starGold)
+                    .help("Starred")
+            } else if file.seenAt == nil {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 7, height: 7)
+                    .help("New — not opened yet")
             } else {
-                Circle().strokeBorder(Color.gray.opacity(0.55), lineWidth: 1)
+                Circle()
+                    .fill(Color.gray.opacity(0.32))
+                    .frame(width: 5, height: 5)
+                    .help("Opened")
             }
         }
-        .frame(width: 7, height: 7)
-        .help(file.hasContent ? "Cached" : "Not cached yet")
+        .frame(width: 11, height: 11)
+        .contentShape(Rectangle())
+        .onTapGesture { onToggleStar() }
     }
 
     @ViewBuilder
@@ -2000,7 +2095,9 @@ private struct DetailView: View {
                         AIInspectorPanel(store: store) {
                             showRightWorkSidebar = false
                         }
-                        .frame(minWidth: 300, idealWidth: 360, maxWidth: 460)
+                        // Wide enough by default that slot cards and the
+                        // source tab row never squish.
+                        .frame(minWidth: 360, idealWidth: 400, maxWidth: 520)
                     }
                 } else {
                     mainContent(file: file)
@@ -2303,9 +2400,9 @@ private struct MetadataBar: View {
     private var tags: [NoteTagVM] { metadata?.tags ?? [] }
     private var isGenerating: Bool { store.metadataGeneratingIDs.contains(file.id) }
     private var isWritingMeeting: Bool { store.meetingNoteGeneratingIDs.contains(file.id) }
-    /// Provider + configured model id for the default AI backend, so metadata /
-    /// meeting-note generation uses the user's chosen model instead of the
-    /// hardcoded `claude` default.
+    /// Provider + configured model id for meeting-note generation. Metadata
+    /// generation deliberately passes no model — the CLI resolves the
+    /// configured classify model (`plaud config-classify`) itself.
     private var aiModelChoice: (provider: String, modelID: String) {
         defaultAIModelChoice()
     }
@@ -2372,12 +2469,9 @@ private struct MetadataBar: View {
                 .help("Add local tag")
 
                 Button {
-                    let choice = aiModelChoice
-                    Task {
-                        await store.generateMetadata(
-                            file.id, model: choice.provider, modelID: choice.modelID
-                        )
-                    }
+                    // No explicit model: the CLI resolves the configured
+                    // classify model (Settings > Auto-classify).
+                    Task { await store.generateMetadata(file.id) }
                 } label: {
                     if isGenerating {
                         ProgressView().controlSize(.small)
@@ -2586,6 +2680,8 @@ private struct PlaudPanel: View {
                                          ? .primary : .secondary)
                         .fontWeight(tab == .summary && summaryIndex == idx
                                     ? .semibold : .regular)
+                        .lineLimit(1)
+                        .fixedSize()
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 6)
@@ -2635,6 +2731,9 @@ private struct PlaudPanel: View {
                 .font(AppUI.controlFont)
                 .foregroundStyle(tab == k ? .primary : .secondary)
                 .fontWeight(tab == k ? .semibold : .regular)
+                // Segment labels never wrap mid-word when the pane narrows.
+                .lineLimit(1)
+                .fixedSize()
         }
         .buttonStyle(.plain)
         .padding(.horizontal, 6)
@@ -3292,12 +3391,9 @@ private struct AIInspectorPanel: View {
                 .disabled(fid.isEmpty)
 
                 Button {
-                    let choice = defaultAIModelChoice()
-                    Task {
-                        await store.generateMetadata(
-                            fid, model: choice.provider, modelID: choice.modelID
-                        )
-                    }
+                    // No explicit model: the CLI resolves the configured
+                    // classify model (Settings > Auto-classify).
+                    Task { await store.generateMetadata(fid) }
                 } label: {
                     if metadataRunning {
                         HStack(spacing: 4) {

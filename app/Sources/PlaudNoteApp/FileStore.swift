@@ -110,7 +110,7 @@ final class FileStore: ObservableObject {
     private var masterFiles: [Database.MasterFile] = []
     @Published var files: [PlaudFileVM] = []
     @Published var folders: [FolderVM] = []
-    @Published var categoryCounts: (all: Int, unfiled: Int, trash: Int) = (0, 0, 0)
+    @Published var categoryCounts: (all: Int, unfiled: Int, starred: Int, trash: Int) = (0, 0, 0, 0)
     @Published var cacheStatus: (total: Int, cached: Int) = (0, 0)
     @Published var sidebar: SidebarItem = .allFiles
     @Published var search: String = ""
@@ -258,7 +258,12 @@ final class FileStore: ObservableObject {
 
         $selectedID
             .removeDuplicates()
-            .sink { [weak self] id in self?.loadContent(for: id) }
+            .sink { [weak self] id in
+                self?.loadContent(for: id)
+                // Opening a recording marks it seen (read-state dot flips
+                // green -> gray without waiting for a DB-watcher reload).
+                if let id { self?.markSeen(id) }
+            }
             .store(in: &cancellables)
 
         registerLifecycleObservers()
@@ -352,6 +357,9 @@ final class FileStore: ObservableObject {
                     strongSelf.loadContent(for: id)
                     strongSelf.noteMetadata = metadata
                     strongSelf.cmdsTranscript = transcript
+                    // Covers the launch race where a file is selected before
+                    // the first master load lands (no-op once seen).
+                    strongSelf.markSeen(id)
                 }
             }
         }
@@ -371,6 +379,8 @@ final class FileStore: ObservableObject {
                 matchesSidebar = !item.file.isTrash
             case .unfiled:
                 matchesSidebar = !item.file.isTrash && item.folderIDs.isEmpty
+            case .starred:
+                matchesSidebar = !item.file.isTrash && item.file.starred
             case .trash:
                 matchesSidebar = item.file.isTrash
             case .folder(let id):
@@ -584,11 +594,17 @@ final class FileStore: ObservableObject {
     @Published var metadataGeneratingIDs: Set<String> = []
     @Published var meetingNoteGeneratingIDs: Set<String> = []
 
-    func generateMetadata(_ fileID: String, model: String = "claude",
+    /// Generate metadata + auto tags. By default no `--model` is passed so the
+    /// CLI resolves the configured classify model (`plaud config-classify`) —
+    /// single source of truth. Pass `model` only for a deliberate UI override.
+    func generateMetadata(_ fileID: String, model: String = "",
                           modelID: String = "") async {
         metadataGeneratingIDs.insert(fileID)
         defer { metadataGeneratingIDs.remove(fileID) }
-        var args = ["metadata-generate", fileID, "--model", model]
+        var args = ["metadata-generate", fileID]
+        if !model.isEmpty {
+            args += ["--model", model]
+        }
         if !modelID.isEmpty {
             args += ["--model-id", modelID]
         }
@@ -689,6 +705,36 @@ final class FileStore: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             await self?.runPlaud(args: ["rename", fileID, trimmed])
         }
+    }
+
+    /// Mark a recording as seen on open. Optimistic: writes `seen_at` locally
+    /// (LOCAL-ONLY column, no server call) and flips the in-memory row so the
+    /// unread dot goes green -> gray in the same render pass; the DB-watcher
+    /// reload then converges on the same state.
+    func markSeen(_ fileID: String) {
+        guard let idx = masterFiles.firstIndex(where: { $0.id == fileID }),
+              masterFiles[idx].file.seenAt == nil else { return }
+        guard Database.shared.markSeen(fileID: fileID) == nil else { return }
+        masterFiles[idx].file.seenAt = Int64(Date().timeIntervalSince1970)
+        applyFilter(sidebar: sidebar, search: search)
+    }
+
+    /// Toggle the LOCAL-ONLY star flag. Optimistic: writes locally and flips
+    /// the in-memory row + starred count immediately; no server call needed
+    /// (mirrors `plaud star <id> [--off]` on the same SQLite rows).
+    func toggleStar(_ fileID: String) {
+        guard let idx = masterFiles.firstIndex(where: { $0.id == fileID }) else { return }
+        let newValue = !masterFiles[idx].file.starred
+        if let error = Database.shared.setStarred(fileID: fileID, starred: newValue) {
+            lastCommandError = "Could not update star locally: \(error.localizedDescription)"
+            reload()
+            return
+        }
+        masterFiles[idx].file.starred = newValue
+        if !masterFiles[idx].file.isTrash {
+            categoryCounts.starred = max(0, categoryCounts.starred + (newValue ? 1 : -1))
+        }
+        applyFilter(sidebar: sidebar, search: search)
     }
 
     func plaudWebURL(_ fileID: String) -> URL? {
@@ -835,6 +881,13 @@ final class FileStore: ObservableObject {
 
     func setPath(_ kind: String, _ path: String) async {
         await runPlaud(args: ["config-path", kind, path])
+    }
+
+    /// Set the default auto-classify / metadata-generate model. Routed through
+    /// the CLI (`plaud config-classify`) so `data/config.json` is rewritten by
+    /// the Python side, preserving unknown keys.
+    func setClassifyModel(_ model: String) async {
+        await runPlaud(args: ["config-classify", model])
     }
 
     /// Resolve a fresh signed audio URL via the CLI and stash it for AVPlayer.

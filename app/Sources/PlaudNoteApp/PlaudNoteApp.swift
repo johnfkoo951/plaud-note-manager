@@ -26,16 +26,21 @@ struct PlaudNoteApp: App {
     var body: some Scene {
         WindowGroup("Plaud Note Manager") {
             ContentView()
-                .frame(minWidth: 900, minHeight: 600)
+                .frame(minWidth: 1280, minHeight: 800)
         }
+        // Wider-detail default: enough room for the detail tab row and the
+        // Work Sidebar without squishing.
+        .defaultSize(width: 1480, height: 920)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("Settings...") {
+                // Standard macOS Settings shortcut. ⌘. also still works via
+                // the toolbar gear button in ContentView.
+                Button("Settings…") {
                     NotificationCenter.default.post(name: .openPlaudSettings,
                                                     object: nil)
                 }
-                .keyboardShortcut(".", modifiers: .command)
+                .keyboardShortcut(",", modifiers: .command)
             }
             CommandGroup(after: .textEditing) {
                 Button("Command Palette…") {

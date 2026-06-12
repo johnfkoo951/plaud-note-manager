@@ -45,6 +45,9 @@ DEFAULT_CONFIG: dict = {
     "obsidian_vault": "",
     "author": "",
     "api_info_dir": "",
+    # Which model runs auto-classify / metadata-generate (its backend — cli
+    # subscription vs api key — follows the per-model "backends" entry above).
+    "classify_model": "claude",
 }
 
 
@@ -110,6 +113,17 @@ def api_info_dir() -> Path | None:
     if vault:
         return vault / "40. Docs/49. API Information"
     return None
+
+
+def classify_model() -> str:
+    """Model used by auto-classify / metadata-generate when no --model given."""
+    return load().get("classify_model") or "claude"
+
+
+def set_classify_model(model: str) -> None:
+    cfg = load()
+    cfg["classify_model"] = model
+    save(cfg)
 
 
 def set_backend(model: str, backend: Backend) -> None:

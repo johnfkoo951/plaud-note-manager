@@ -1031,7 +1031,9 @@ def tag_remove(
 @safe_command(name="metadata-generate")
 def metadata_generate(
     file_id: str,
-    model: str = typer.Option("claude", help=MODEL_HELP),
+    model: str = typer.Option(
+        "", help=MODEL_HELP + " Empty = configured classify model (plaud config-classify)."
+    ),
     model_id: str = typer.Option("", help="Optional provider API model id override."),
     vault: Path | None = None,
     no_ai: bool = typer.Option(False, help="Use deterministic keyword fallback only."),
@@ -1044,6 +1046,7 @@ def metadata_generate(
 
     storage = Storage()
     ensure_content_cached(storage, file_id)
+    model = model or app_config.classify_model()
     metadata = generate_note_metadata(
         storage,
         file_id,
@@ -1810,6 +1813,7 @@ def config_show() -> None:
     console.print("\n[bold]API model ids[/bold] (used when backend=api)")
     for k, v in cfg["models"].items():
         console.print(f"  {k:>8}: {v}")
+    console.print(f"\n[bold]Auto-classify model[/bold]: {app_config.classify_model()}")
     console.print("\n[bold]Path overrides[/bold] (empty = default)")
     for k, v in cfg["paths"].items():
         console.print(f"  {k:>11}: {v or '(default)'}")
@@ -1819,6 +1823,27 @@ def config_show() -> None:
     console.print(f"  {'obsidian_vault':>14}: {vault or '(unset)'}")
     console.print(f"  {'author':>14}: {app_config.author() or '(unset)'}")
     console.print(f"  {'api_info_dir':>14}: {api_info or '(unset)'}")
+
+
+@safe_command(name="config-classify")
+def config_classify(model: str) -> None:
+    """Set which model auto-classify / metadata-generate uses by default."""
+    valid = ("claude", "codex", "gemini", "grok")
+    if model not in valid:
+        raise typer.BadParameter(f"model must be one of: {', '.join(valid)}")
+    app_config.set_classify_model(model)
+    backend = app_config.backend_for(model)
+    console.print(f"[green]ok[/green] classify model -> {model} (backend: {backend})")
+
+
+@safe_command(name="star")
+def star_cmd(
+    file_id: str,
+    off: bool = typer.Option(False, "--off", help="Remove the star."),
+) -> None:
+    """Star / unstar a recording (local-only flag, shown in the app list)."""
+    Storage().set_starred(file_id, not off)
+    console.print(f"[green]{'unstarred' if off else 'starred'}[/green] {file_id}")
 
 
 @safe_command(name="config-vault")
