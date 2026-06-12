@@ -37,6 +37,14 @@ struct PlaudNoteApp: App {
                 }
                 .keyboardShortcut(".", modifiers: .command)
             }
+            CommandGroup(after: .textEditing) {
+                Button("Command Palette…") {
+                    NotificationCenter.default.post(
+                        name: .togglePlaudCommandPalette, object: nil
+                    )
+                }
+                .keyboardShortcut("k", modifiers: .command)
+            }
         }
     }
 }

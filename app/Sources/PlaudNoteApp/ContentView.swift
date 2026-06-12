@@ -69,7 +69,7 @@ private func formatRecordingDurationMs(_ ms: Double?) -> String {
 }
 
 @MainActor
-private func promptForFilename(current: String) -> String? {
+func promptForFilename(current: String) -> String? {
     let alert = NSAlert()
     alert.messageText = "Rename session"
     alert.informativeText = "Enter a new name for this Plaud recording."
@@ -374,10 +374,33 @@ func defaultAIModelChoice(provider: String = "claude") -> (provider: String, mod
 struct ContentView: View {
     @StateObject private var store = FileStore()
     @State private var showSettings: Bool = false
+    @State private var showCommandPalette: Bool = false
     @AppStorage("appearanceMode") private var appearanceModeRaw: String =
         AppearanceMode.system.rawValue
 
     var body: some View {
+        ZStack {
+            mainSplitView
+
+            // ⌘K command palette, floating above the whole split view.
+            if showCommandPalette {
+                CommandPaletteOverlay(store: store, isPresented: $showCommandPalette)
+            }
+        }
+        .preferredColorScheme(
+            (AppearanceMode(rawValue: appearanceModeRaw) ?? .system).colorScheme
+        )
+        .onReceive(
+            NotificationCenter.default.publisher(for: .togglePlaudCommandPalette)
+        ) { _ in
+            showCommandPalette.toggle()
+        }
+    }
+
+    /// The original split view with its toolbar/sheets/alerts attached, kept
+    /// on the NavigationSplitView itself so toolbar placement is unchanged by
+    /// the palette's ZStack wrapper.
+    private var mainSplitView: some View {
         NavigationSplitView {
             SidebarView(store: store)
                 .navigationSplitViewColumnWidth(min: 150, ideal: 180, max: 240)
@@ -387,9 +410,6 @@ struct ContentView: View {
         } detail: {
             DetailView(store: store)
         }
-        .preferredColorScheme(
-            (AppearanceMode(rawValue: appearanceModeRaw) ?? .system).colorScheme
-        )
         .toolbar {
             ToolbarItemGroup {
                 Button { showSettings = true } label: {
@@ -879,8 +899,16 @@ private struct FolderRadioMenuItems: View {
 
 // MARK: - File List
 
+/// Identifiable wrapper so a plain file-id string can drive `.sheet(item:)`.
+private struct MoveSheetTarget: Identifiable {
+    let id: String
+}
+
 private struct FileListView: View {
     @ObservedObject var store: FileStore
+    /// File currently picking a destination folder via the swipe "Move…"
+    /// action (nil = sheet closed).
+    @State private var moveTarget: MoveSheetTarget?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -905,12 +933,16 @@ private struct FileListView: View {
                 ForEach(store.files) { file in
                     FileRow(file: file, isSelected: store.selectedID == file.id)
                         .tag(Optional(file.id))
-                        .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
+                        // Flat rows own their padding; zero insets keep the
+                        // accent bar + hover fill flush with the list edges.
+                        .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                         // Drag onto a sidebar folder (or Unfiled) to re-file.
                         // Payload is the plain file id string; click-to-select
                         // is untouched because the drag only starts on movement.
+                        // Drag and swipeActions coexist in List — the swipe
+                        // only triggers on a horizontal two-finger gesture.
                         .draggable(file.id)
                         .contextMenu {
                             Button("Rename…") {
@@ -938,11 +970,120 @@ private struct FileListView: View {
                             Button("Transcribe with ElevenLabs") {
                                 Task { await store.transcribeWithElevenLabs(file.id) }
                             }
-                    }
+                        }
+                        .swipeActions(edge: .leading, allowsFullSwipe: true) {
+                            // Toggle archived <-> unused via the existing
+                            // usage-status path. No delete swipe: Plaud has
+                            // no server delete API.
+                            let isArchived = file.usageStatus == "archived"
+                            Button {
+                                Task {
+                                    await store.setUsageStatus(
+                                        file.id,
+                                        status: isArchived ? "unused" : "archived"
+                                    )
+                                }
+                            } label: {
+                                Label(isArchived ? "Unarchive" : "Archive",
+                                      systemImage: isArchived
+                                          ? "tray.and.arrow.up" : "archivebox")
+                            }
+                            .tint(.gray)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button {
+                                moveTarget = MoveSheetTarget(id: file.id)
+                            } label: {
+                                Label("Move…", systemImage: "folder")
+                            }
+                            .tint(.indigo)
+                            if !file.folderNames.isEmpty {
+                                Button {
+                                    store.assignFolder(file.id, folderID: nil)
+                                } label: {
+                                    Label("Unfile", systemImage: "folder.badge.minus")
+                                }
+                                .tint(.orange)
+                            }
+                        }
                 }
             }
             .listStyle(.plain)
         }
+        .sheet(item: $moveTarget) { target in
+            MoveToFolderSheet(store: store, fileID: target.id) { moveTarget = nil }
+        }
+    }
+}
+
+/// Compact destination picker for the swipe "Move…" action: Unfiled + every
+/// folder, single-folder radio semantics (same write path as the menus).
+private struct MoveToFolderSheet: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Text("Move to folder").font(.headline)
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, AppUI.spacingL)
+            .padding(.vertical, AppUI.spacingM)
+
+            Divider()
+
+            ScrollView {
+                VStack(spacing: 2) {
+                    destinationRow(folder: nil)
+                    ForEach(store.folders) { folder in
+                        destinationRow(folder: folder)
+                    }
+                }
+                .padding(AppUI.spacingS)
+            }
+            .frame(maxHeight: 340)
+        }
+        .frame(width: 300)
+    }
+
+    private func destinationRow(folder: FolderVM?) -> some View {
+        let assigned = store.folderIDs(for: fileID)
+        let isCurrent = folder.map { assigned.contains($0.id) } ?? assigned.isEmpty
+        return Button {
+            store.assignFolder(fileID, folderID: folder?.id)
+            dismiss()
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: folder?.sfSymbol ?? "tray")
+                    .foregroundStyle(
+                        folder?.color.flatMap { Color(hex: $0) } ?? .secondary
+                    )
+                    .frame(width: 18)
+                Text(folder?.name ?? "Unfiled")
+                    .font(AppUI.bodyFont)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                if isCurrent {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .contentShape(RoundedRectangle(cornerRadius: AppUI.tightRadius))
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -1040,106 +1181,128 @@ private struct MiniMetricCard: View {
     }
 }
 
+/// Flat, dense, Superhuman-flavored row: no card chrome, full-width fill,
+/// selection shown by a 3pt accent bar on the left edge + a soft neutral
+/// fill. Two lines only — title + date on top, metadata chips below.
 private struct FileRow: View {
     let file: PlaudFileVM
     let isSelected: Bool
+    @State private var hovering = false
+
+    /// Leading inset for line 2 so it aligns with the title after the
+    /// 7pt cached dot + 8pt spacing.
+    private static let metaIndent: CGFloat = 15
+    private static let metaFont = Font.system(size: 11)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 8) {
-                Circle()
-                    .fill(file.hasContent ? Color.green : Color.gray.opacity(0.42))
-                    .frame(width: 7, height: 7)
-                    .padding(.top, 7)
-                    .help(file.hasContent ? "Cached" : "Not cached yet")
-                Text(file.filename ?? "(untitled)")
-                    .font(.system(size: 14.5, weight: .bold))
-                    .lineLimit(2)
-                    .foregroundStyle(Color.primary)
-                Spacer(minLength: 0)
-            }
-
+        VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 8) {
+                cachedDot
+                Text(file.filename ?? "(untitled)")
+                    .font(.system(size: 13.5, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .foregroundStyle(Color.primary)
+                Spacer(minLength: 8)
                 if let date = file.createdAt {
-                    Text(date, format: .dateTime.month().day().hour().minute())
-                        .font(AppUI.metaFont)
-                        .foregroundStyle(metaColor)
-                }
-                if file.durationMs != nil {
-                    Text(formatRecordingDurationMs(file.durationMs))
-                        .font(AppUI.metaFont)
-                        .foregroundStyle(metaColor)
+                    Text(Self.formatRowDate(date))
+                        .font(Self.metaFont)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
-            .padding(.leading, 15)
-
-            if folderLabel != nil || usageOption != nil {
-                HStack(spacing: 6) {
-                    if let folderLabel {
-                        HStack(spacing: 4) {
-                            Image(systemName: "folder.fill")
-                                .font(AppUI.metaFont)
-                                .imageScale(.small)
-                            Text(folderLabel)
-                                .font(AppUI.metaFont)
-                                .lineLimit(1)
-                                .truncationMode(.tail)
-                        }
-                        .foregroundStyle(folderTint)
-                        .help(folderHelpText)
-                    }
-                    if let usageOption {
-                        HStack(spacing: 3) {
-                            Image(systemName: usageOption.symbolName)
-                                .font(.system(size: 10.5, weight: .semibold))
-                                .symbolRenderingMode(.hierarchical)
-                                .frame(width: 12)
-                            Text(usageOption.title)
-                                .font(AppUI.metaFont)
-                        }
-                        .foregroundStyle(usageOption.color)
-                        .help(usageOption.dbValue)
-                    }
-                }
-                .padding(.leading, 15)
-                .lineLimit(1)
-            }
-
-            if !file.primaryTags.isEmpty {
-                HStack(spacing: 5) {
-                    ForEach(Array(file.primaryTags.prefix(3)), id: \.self) { tag in
-                        tagBadge(tagLabel(tag))
-                    }
-                }
-                .padding(.leading, 15)
-                .lineLimit(1)
+            metaLine
+        }
+        .padding(.horizontal, AppUI.spacingM)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .background(rowFill)
+        .overlay(alignment: .leading) {
+            // Superhuman-style selection: a slim accent bar hugging the left
+            // edge instead of a loud filled card. Text colors stay unchanged.
+            if isSelected {
+                RoundedRectangle(cornerRadius: 1.5)
+                    .fill(Color.accentColor)
+                    .frame(width: 3)
+                    .padding(.vertical, 3)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 9)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            // Calm selection: elevated neutral fill + accent ring; text colors
-            // stay unchanged so the row never "shouts" (old style flipped the
-            // whole card to saturated pink with white text).
-            isSelected ? AppUI.selectedFill : AppUI.cardFill,
-            in: RoundedRectangle(cornerRadius: AppUI.radius)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppUI.radius)
-                .stroke(isSelected ? Color.accentColor.opacity(0.65) : AppUI.cardStroke,
-                        lineWidth: isSelected ? 1.5 : 1)
-        )
+        .onHover { hovering = $0 }
+    }
+
+    private var rowFill: Color {
+        if isSelected { return Color.primary.opacity(0.07) }
+        if hovering { return Color.primary.opacity(0.05) }
+        return Color.clear
+    }
+
+    /// Green dot = transcript/summary cached; hollow gray ring = not yet.
+    @ViewBuilder
+    private var cachedDot: some View {
+        Group {
+            if file.hasContent {
+                Circle().fill(Color.green)
+            } else {
+                Circle().strokeBorder(Color.gray.opacity(0.55), lineWidth: 1)
+            }
+        }
+        .frame(width: 7, height: 7)
+        .help(file.hasContent ? "Cached" : "Not cached yet")
+    }
+
+    @ViewBuilder
+    private var metaLine: some View {
+        if file.durationMs != nil || folderLabel != nil
+            || usageOption != nil || !file.primaryTags.isEmpty {
+            HStack(spacing: 6) {
+                if file.durationMs != nil {
+                    Text(formatRecordingDurationMs(file.durationMs))
+                        .font(Self.metaFont)
+                        .foregroundStyle(.secondary)
+                }
+                if let folderLabel {
+                    if file.durationMs != nil { dotSeparator }
+                    folderChip(folderLabel)
+                }
+                if let usageOption {
+                    Image(systemName: usageOption.symbolName)
+                        .font(.system(size: 10, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                        .foregroundStyle(usageOption.color)
+                        .help(usageOption.title)
+                }
+                ForEach(Array(file.primaryTags.prefix(2)), id: \.self) { tag in
+                    tagChip(tagLabel(tag))
+                }
+            }
+            .padding(.leading, Self.metaIndent)
+            .lineLimit(1)
+        }
+    }
+
+    private var dotSeparator: some View {
+        Text("·")
+            .font(Self.metaFont)
+            .foregroundStyle(.tertiary)
+    }
+
+    /// "Jun 11" for past days, just the time for today, year added when older.
+    private static func formatRowDate(_ date: Date) -> String {
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
+            return date.formatted(.dateTime.month(.abbreviated).day())
+        }
+        return date.formatted(.dateTime.year().month(.abbreviated).day())
     }
 
     private var folderLabel: String? {
         guard let first = file.folderNames.first else { return nil }
         let extraCount = file.folderNames.count - 1
         return extraCount > 0 ? "\(first) +\(extraCount)" : first
-    }
-
-    private var folderHelpText: String {
-        file.folderNames.joined(separator: ", ")
     }
 
     private var folderTint: Color {
@@ -1150,8 +1313,20 @@ private struct FileRow: View {
         UsageStatusOption.resolve(file.usageStatus)
     }
 
-    private var metaColor: Color {
-        Color.secondary
+    private func folderChip(_ text: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: "folder.fill")
+                .font(.system(size: 8.5))
+            Text(text)
+                .font(Self.metaFont)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .foregroundStyle(folderTint)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(folderTint.opacity(0.13), in: Capsule())
+        .help(file.folderNames.joined(separator: ", "))
     }
 
     private func tagLabel(_ tag: String) -> String {
@@ -1159,18 +1334,15 @@ private struct FileRow: View {
         return trimmed.hasPrefix("#") ? trimmed : "#\(trimmed)"
     }
 
-    private func tagBadge(_ text: String) -> some View {
+    private func tagChip(_ text: String) -> some View {
         Text(text)
-            .font(AppUI.metaFont)
+            .font(Self.metaFont)
             .lineLimit(1)
             .truncationMode(.tail)
             .foregroundStyle(Color.secondary)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2.5)
-            .background(
-                Color.primary.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
-            )
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1.5)
+            .background(Color.primary.opacity(0.07), in: Capsule())
     }
 }
 
