@@ -1055,7 +1055,7 @@ private struct FileRow: View {
                 Text(file.filename ?? "(untitled)")
                     .font(.system(size: 14.5, weight: .bold))
                     .lineLimit(2)
-                    .foregroundStyle(isSelected ? Color.white : Color.primary)
+                    .foregroundStyle(Color.primary)
                 Spacer(minLength: 0)
             }
 
@@ -1085,7 +1085,7 @@ private struct FileRow: View {
                                 .lineLimit(1)
                                 .truncationMode(.tail)
                         }
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.86) : folderTint)
+                        .foregroundStyle(folderTint)
                         .help(folderHelpText)
                     }
                     if let usageOption {
@@ -1097,7 +1097,7 @@ private struct FileRow: View {
                             Text(usageOption.title)
                                 .font(AppUI.metaFont)
                         }
-                        .foregroundStyle(isSelected ? Color.white.opacity(0.86) : usageOption.color)
+                        .foregroundStyle(usageOption.color)
                         .help(usageOption.dbValue)
                     }
                 }
@@ -1119,15 +1119,16 @@ private struct FileRow: View {
         .padding(.vertical, 9)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            isSelected
-                ? AppUI.accentPink.opacity(0.88)
-                : AppUI.cardFill,
+            // Calm selection: elevated neutral fill + accent ring; text colors
+            // stay unchanged so the row never "shouts" (old style flipped the
+            // whole card to saturated pink with white text).
+            isSelected ? AppUI.selectedFill : AppUI.cardFill,
             in: RoundedRectangle(cornerRadius: AppUI.radius)
         )
         .overlay(
             RoundedRectangle(cornerRadius: AppUI.radius)
-                .stroke(isSelected ? Color.white.opacity(0.16) : AppUI.cardStroke,
-                        lineWidth: 1)
+                .stroke(isSelected ? Color.accentColor.opacity(0.65) : AppUI.cardStroke,
+                        lineWidth: isSelected ? 1.5 : 1)
         )
     }
 
@@ -1150,7 +1151,7 @@ private struct FileRow: View {
     }
 
     private var metaColor: Color {
-        isSelected ? Color.white.opacity(0.72) : Color.secondary
+        Color.secondary
     }
 
     private func tagLabel(_ tag: String) -> String {
@@ -1163,11 +1164,11 @@ private struct FileRow: View {
             .font(AppUI.metaFont)
             .lineLimit(1)
             .truncationMode(.tail)
-            .foregroundStyle(isSelected ? Color.white.opacity(0.78) : Color.secondary)
+            .foregroundStyle(Color.secondary)
             .padding(.horizontal, 7)
             .padding(.vertical, 2.5)
             .background(
-                isSelected ? Color.white.opacity(0.12) : Color.primary.opacity(0.08),
+                Color.primary.opacity(0.08),
                 in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
             )
     }
@@ -1369,7 +1370,7 @@ private struct MarkdownDocumentView: View {
                 .padding(.bottom, level == 2 ? 4 : 0)
             if level == 2 {
                 Rectangle()
-                    .fill(AnuPalette.teal.opacity(0.45))
+                    .fill(AnuPalette.teal.opacity(0.3))
                     .frame(height: 1)
                     .padding(.bottom, 4)
             }
@@ -1409,7 +1410,6 @@ private struct MarkdownDocumentView: View {
                             in: RoundedRectangle(cornerRadius: AppUI.tightRadius))
         case .rule:
             Divider()
-                .overlay(AnuPalette.red.opacity(0.38))
                 .padding(.vertical, 6)
         case .blank:
             Spacer().frame(height: 4)
@@ -1427,12 +1427,12 @@ private struct MarkdownDocumentView: View {
     }
 
     private func headingColor(_ level: Int) -> Color {
+        // Headings are large surfaces — keep them neutral and let the type
+        // scale carry the hierarchy; pastel accents stay on small details
+        // (bullets, the H2 underline, quote bars).
         switch level {
-        case 1: return AnuPalette.red
-        case 2: return AnuPalette.teal
-        case 3: return AnuPalette.sky
-        case 4: return AnuPalette.flamingo
-        default: return AnuPalette.rosewater
+        case 1, 2, 3: return .primary
+        default: return .secondary
         }
     }
 
