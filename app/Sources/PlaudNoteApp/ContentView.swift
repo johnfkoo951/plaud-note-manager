@@ -709,6 +709,10 @@ private struct SidebarView: View {
     @State private var editing: FolderVM?
     @State private var creating: Bool = false
     @State private var createName: String = ""
+    /// Folder id currently hovered by a file drag (nil = none). Drives the
+    /// subtle drop highlight on the targeted folder row.
+    @State private var dropTargetID: String?
+    @State private var unfiledTargeted: Bool = false
 
     var body: some View {
         List(selection: Binding(
@@ -717,7 +721,17 @@ private struct SidebarView: View {
         )) {
             Section {
                 row(.allFiles, "tray.full", "All files", store.categoryCounts.all)
+                // Dropping a file on Unfiled clears its folder assignment.
                 row(.unfiled, "tray", "Unfiled", store.categoryCounts.unfiled)
+                    .background(
+                        unfiledTargeted ? Color.accentColor.opacity(0.18) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
+                    )
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let fileID = items.first, !fileID.isEmpty else { return false }
+                        store.assignFolder(fileID, folderID: nil)
+                        return true
+                    } isTargeted: { unfiledTargeted = $0 }
                 row(.trash, "trash", "Trash", store.categoryCounts.trash)
             }
             Section {
@@ -736,11 +750,30 @@ private struct SidebarView: View {
                             .frame(width: 34, alignment: .trailing)
                     }
                     .padding(.vertical, 2)
+                    .background(
+                        dropTargetID == folder.id
+                            ? Color.accentColor.opacity(0.18)
+                            : Color.clear,
+                        in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
+                    )
                     .tag(SidebarItem.folder(folder.id))
                     .contextMenu {
                         Button("Edit folder") { editing = folder }
                         Button("Delete", role: .destructive) {
                             Task { await store.deleteFolder(folder.id) }
+                        }
+                    }
+                    // Drop a dragged file row here to re-file it (single-folder
+                    // replace semantics, same as the radio menus).
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let fileID = items.first, !fileID.isEmpty else { return false }
+                        store.assignFolder(fileID, folderID: folder.id)
+                        return true
+                    } isTargeted: { targeted in
+                        if targeted {
+                            dropTargetID = folder.id
+                        } else if dropTargetID == folder.id {
+                            dropTargetID = nil
                         }
                     }
                 }
@@ -875,6 +908,10 @@ private struct FileListView: View {
                         .listRowInsets(EdgeInsets(top: 4, leading: 8, bottom: 4, trailing: 8))
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
+                        // Drag onto a sidebar folder (or Unfiled) to re-file.
+                        // Payload is the plain file id string; click-to-select
+                        // is untouched because the drag only starts on movement.
+                        .draggable(file.id)
                         .contextMenu {
                             Button("Rename…") {
                                 if let newName = promptForFilename(current: file.filename ?? "") {
@@ -1662,8 +1699,51 @@ private struct SidebarTogglePill: View {
     }
 }
 
+/// Derived pipeline stage for the Progress tile. Stage = highest reached:
+/// Integrated (any integrated .md on disk) > Transcribed (cmds_transcripts
+/// row) > Cached (file_content row) > New. Computed for the *selected* file
+/// only — one directory scan + one EXISTS query — never per list row.
+private enum PipelineStage {
+    case integrated, transcribed, cached, new
+
+    static func derive(for file: PlaudFileVM) -> PipelineStage {
+        if Database.shared.integratedAnyExists(fileID: file.id) { return .integrated }
+        if Database.shared.cmdsTranscriptExists(for: file.id) { return .transcribed }
+        if file.hasContent { return .cached }
+        return .new
+    }
+
+    var title: String {
+        switch self {
+        case .integrated: return "Integrated"
+        case .transcribed: return "Transcribed"
+        case .cached: return "Cached"
+        case .new: return "New"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .integrated: return "checkmark.seal"
+        case .transcribed: return "waveform"
+        case .cached: return "internaldrive"
+        case .new: return "circle.dashed"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .integrated: return AnuPalette.green
+        case .transcribed: return AnuPalette.teal
+        case .cached: return AnuPalette.sky
+        case .new: return Color.secondary
+        }
+    }
+}
+
 private struct DetailMetricStrip: View {
     let file: PlaudFileVM
+    let stage: PipelineStage
 
     var body: some View {
         HStack(spacing: 7) {
@@ -1680,10 +1760,10 @@ private struct DetailMetricStrip: View {
                 color: file.folderColor.flatMap { Color(hex: $0) } ?? AppUI.brandGreen
             )
             MiniMetricCard(
-                label: "Cache",
-                value: file.hasContent ? "Ready" : "Pending",
-                systemName: file.hasContent ? "checkmark.circle.fill" : "circle.dashed",
-                color: file.hasContent ? AnuPalette.green : Color.secondary
+                label: "Progress",
+                value: stage.title,
+                systemName: stage.symbolName,
+                color: stage.color
             )
             MiniMetricCard(
                 label: "Status",
@@ -1903,9 +1983,11 @@ private struct DetailView: View {
                     HStack(spacing: 8) {
                         Text(file.id).font(.caption2).foregroundStyle(.tertiary)
                         if let kw = store.content?.keywords, !kw.isEmpty {
-                            Text(kw.prefix(5).joined(separator: " · "))
-                                .font(AppUI.metaFont).foregroundStyle(.secondary)
-                                .lineLimit(1)
+                            HStack(spacing: 4) {
+                                ForEach(Array(kw.prefix(5)), id: \.self) { keyword in
+                                    keywordChip(keyword)
+                                }
+                            }
                         }
                     }
                 }
@@ -1920,7 +2002,10 @@ private struct DetailView: View {
                     .help("Show AI summaries and Obsidian actions")
                 }
             }
-            DetailMetricStrip(file: file)
+            // Stage is derived here (not inside the strip) so it recomputes on
+            // every store publish — e.g. right after a transcription or
+            // integration finishes — instead of only when the file row changes.
+            DetailMetricStrip(file: file, stage: .derive(for: file))
             MetadataBar(store: store, file: file)
         }
         .padding(14)
@@ -1937,6 +2022,24 @@ private struct DetailView: View {
         )
     }
 
+
+    /// Clickable keyword chip: clicking filters the file list by routing the
+    /// keyword through the same search field a user would type into.
+    private func keywordChip(_ keyword: String) -> some View {
+        Button {
+            store.search = keyword
+        } label: {
+            Text(keyword)
+                .font(AppUI.metaFont)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2.5)
+                .background(Color.primary.opacity(0.07), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .help("이 키워드로 검색")
+    }
 
     // MARK: Inline title editing
 
@@ -2859,9 +2962,10 @@ private struct CmdsPanel: View {
         }
     }
 
+    /// Section labels share the app-wide M:SS convention (H:MM:SS ≥ 1 hour)
+    /// via `Database.formatMinSec` instead of a hand-rolled format.
     private func formatTime(_ sec: Double) -> String {
-        let s = Int(sec)
-        return String(format: "%02d:%02d", s / 60, s % 60)
+        Database.formatMinSec(Int(sec))
     }
 }
 
@@ -2888,6 +2992,8 @@ private struct AIInspectorPanel: View {
     /// the slot's template is "integrated", else .summary.
     @State private var modeMap: [String: SlotMode] = [:]
     @State private var expanded: Set<String> = []
+    /// Slot whose output is shown in the large expand sheet (nil = closed).
+    @State private var expandedSlot: Database.Slot?
     /// Per-slot view: which integrated subsection to show (all / transcript / summary).
     @State private var viewMap: [String: Database.IntegratedKind] = [:]
     @State private var refreshTick: Int = 0
@@ -2942,6 +3048,7 @@ private struct AIInspectorPanel: View {
         .onChange(of: store.selectedID) { _, _ in
             reload()
             expanded.removeAll()
+            expandedSlot = nil
         }
         .onChange(of: store.summarizingKeys.count) { _, _ in
             refreshTick &+= 1
@@ -2951,6 +3058,9 @@ private struct AIInspectorPanel: View {
                 addingSlot = false
                 reload()
             }
+        }
+        .sheet(item: $expandedSlot) { slot in
+            slotOutputSheet(slot)
         }
     }
 
@@ -3149,6 +3259,14 @@ private struct AIInspectorPanel: View {
                 Spacer()
                 if hasOutput {
                     copyMenu(slot: slot, mode: m)
+                    Button {
+                        expandedSlot = slot
+                    } label: {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Expand output in a larger window")
                     Button(isOpen ? "Hide" : "Show") {
                         if isOpen { expanded.remove(slot.id) }
                         else { expanded.insert(slot.id) }
@@ -3248,6 +3366,34 @@ private struct AIInspectorPanel: View {
                 }
             }
         }
+    }
+
+    /// Large resizable sheet showing a slot's output. Reuses the exact inline
+    /// pieces: `outputBody` (same rendered markdown view, and for integrated
+    /// mode the same All / Transcript / Summary picker backed by the shared
+    /// `viewMap`, so the card and sheet stay in sync) and `copyMenu` (same raw
+    /// markdown copy logic).
+    @ViewBuilder
+    private func slotOutputSheet(_ slot: Database.Slot) -> some View {
+        let m = mode(for: slot)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("\(slot.name) — \(m.label)")
+                    .font(.headline)
+                Spacer()
+                copyMenu(slot: slot, mode: m)
+                Button("Done") { expandedSlot = nil }
+                    .keyboardShortcut(.defaultAction)
+            }
+            Divider()
+            ScrollView {
+                outputBody(slot: slot, mode: m)
+                    .padding(.bottom, 8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .padding(16)
+        .frame(minWidth: 720, minHeight: 560)
     }
 
     private func integratedKindControl(_ slot: Database.Slot) -> some View {

@@ -858,6 +858,17 @@ final class Database: @unchecked Sendable {
                        template: template, kind: .all) != nil
     }
 
+    /// True if *any* integrated output markdown exists for this file,
+    /// regardless of slot (model/template). One directory scan of
+    /// `data/integrated/<fileID>/` — used by the Progress tile.
+    func integratedAnyExists(fileID: String) -> Bool {
+        guard !fileID.isEmpty else { return false }
+        let dir = "\(outputBaseDir(kind: "integrated"))/\(fileID)"
+        guard let items = try? FileManager.default.contentsOfDirectory(atPath: dir)
+        else { return false }
+        return items.contains { $0.hasSuffix(".md") }
+    }
+
     /// Compact MM:SS for short recordings, H:MM:SS only when ≥ 1 hour.
     /// Drops the noisy seconds resolution baseline (`00:00:00`) the user
     /// found cluttered.
@@ -959,9 +970,7 @@ final class Database: @unchecked Sendable {
                 if bufPreview.count < 80 {
                     bufPreview += " " + seg.content
                 }
-                let s = max(0, seg.start_ms / 1000)
-                let ts = String(format: "%02d:%02d:%02d",
-                                s / 3600, (s % 3600) / 60, s % 60)
+                let ts = Self.formatMinSec(seg.start_ms / 1000)
                 bufLines.append("[\(ts)] \(seg.speaker ?? ""): \(seg.content)")
             }
             flush(id: sections.count)
@@ -990,6 +999,16 @@ final class Database: @unchecked Sendable {
         return (result ?? nil) ?? []
     }
 
+    /// Cheap EXISTS probe for a cached CMDS transcript — avoids decoding the
+    /// full `segments` JSON just to learn whether a row exists.
+    func cmdsTranscriptExists(for fileID: String) -> Bool {
+        read { db in
+            try Bool.fetchOne(db, sql:
+                "SELECT EXISTS(SELECT 1 FROM cmds_transcripts WHERE file_id = ?)",
+                arguments: [fileID]) ?? false
+        } ?? false
+    }
+
     /// Returns the CMDS-side ElevenLabs transcript if cached, formatted with
     /// timestamps + speaker labels.
     func cmdsTranscript(for fileID: String) -> String? {
@@ -1006,9 +1025,7 @@ final class Database: @unchecked Sendable {
             guard let arr = try? JSONDecoder().decode([Seg].self,
                 from: Data(json.utf8)) else { return nil }
             return arr.map { s in
-                let secs = max(0, s.start_ms / 1000)
-                let ts = String(format: "%02d:%02d:%02d",
-                                secs / 3600, (secs % 3600) / 60, secs % 60)
+                let ts = Self.formatMinSec(s.start_ms / 1000)
                 return "[\(ts)] \(s.speaker ?? ""): \(s.content)"
             }.joined(separator: "\n")
         }

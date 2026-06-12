@@ -1,6 +1,6 @@
 # Plaud Note Manager — Development Status
 
-마지막 업데이트: 2026-06-11
+마지막 업데이트: 2026-06-12
 
 Plaud Cloud 녹음을 native macOS 앱 + Python CLI 한 쌍으로 관리하고,
 CMDS 자체 전사(ElevenLabs Scribe) + 다중 모델(Claude/Codex/Gemini/Grok)
@@ -74,9 +74,10 @@ swift build --package-path app
      (`plaud folder-plan` → `plaud classify --apply`).
    - 앱 Metadata bar에서 `usage_status` 변경이 즉시 DB와 UI에 반영되는지 한 번
      end-to-end 확인.
-3. `plaud status` 컬럼 의미 재정의 — 현재 대부분 `new`라 실제 진행률(캐시/전사/통합)을
-   반영하지 못함. agent 자동 루프 만들기 전에 선행.
-4. P0 UX 항목 중 keyword chip 클릭화 / AI Inspector 결과 별도 sheet 옵션 정리.
+3. `improve/v0.3-ux` 브랜치 — status 재정의 + P0 UX 4종 완료. 리뷰 후
+   codex/web-login-auth(또는 main)로 머지.
+4. agent 자동 루프 — 선행 조건이었던 진행률 데이터(`plaud status --json`)가
+   준비됨. launchd/cron 루프 설계 가능.
 
 ### 세션 충돌 방지 규칙
 - 작업 전 항상 `git status --short --branch`와 `git pull --ff-only` 확인.
@@ -169,6 +170,23 @@ markdown files   Swift app (GRDB)
 ---
 
 ## 2. 완료된 기능
+
+### 2026-06-12 v0.3 업그레이드 — 파생 진행률 + P0 UX (branch improve/v0.3-ux)
+- [x] **`plaud status` 재정의** — 정적 `files.status`(대부분 'new') 대신
+      아티팩트에서 파생: `new`(메타만) → `cached`(detail 캐시) →
+      `transcribed`(CMDS 전사) → `integrated`(통합 결과 on disk).
+      `core/progress.py` SSOT, CLI `plaud status [--json] [--stage S] [--limit N]`.
+      실데이터 검증: 1182개 = new 142 / cached 1025 / transcribed 7 / integrated 8.
+      agent 자동 루프의 선행 조건 해소.
+- [x] **Progress 타일** — 디테일 Metadata bar의 Cache 타일을 파생 단계 표시로
+      교체 (Integrated/Transcribed/Cached/New, 아이콘+색상, 선택 파일만 계산).
+- [x] **키워드 chip 클릭화** — 디테일 헤더 키워드 → 캡슐 버튼, 클릭 시 검색 필터.
+- [x] **슬롯 결과 확대 sheet** — 슬롯 카드에 expand 버튼 → 720×560 sheet에서
+      동일 렌더링 + Copy, Integrated 모드는 All/Transcript/Summary picker 공유.
+- [x] **Sidebar drag-and-drop** — 파일 행 드래그 → 폴더/Unfiled 드롭
+      (단일-폴더 교체 의미론, 라디오 메뉴와 같은 쓰기 경로, 타겟 하이라이트).
+- [x] **시간 포맷 통일** — CMDS transcript/sections의 수기 HH:MM:SS를
+      `formatMinSec`(M:SS, ≥1h H:MM:SS)으로 일원화.
 
 ### 2026-06-11 v0.2.0 업그레이드 — 폴더 단일화 · Grok CLI · 스피커/제목 편집 · 성능
 - [x] **폴더 단일화** — Plaud 웹은 파일당 폴더 1개만 지원 (복수 지정 시 웹 UI 깨짐).
@@ -399,11 +417,7 @@ audio-url / export / obsidian / web / onboard / auth / refresh-auth / web-auth
 ## 4. 우선순위 To-do
 
 ### P0 (UX 다듬기)
-- [ ] Time format을 모든 곳에서 `MM:SS` 통일 (Database.swift:`formatMinSec`은 적용
-      됐지만 transcript display / outline 일부 아직 HH:MM:SS 가능성)
-- [ ] Detail 헤더에서 keyword tags를 클릭 가능한 chip으로 (현재 단순 텍스트)
-- [ ] AI Inspector Panel: 슬롯 결과가 길어지면 별도 sheet/window에서 보기 옵션
-- [ ] Sidebar drag-and-drop으로 파일 → 폴더 이동 (현재 우클릭만)
+(2026-06-12 v0.3에서 전부 완료 — §2 참고)
 
 ### P1 (기능 확장)
 - [ ] **Audio playback synced with transcript** — 현재 시간 위치 highlight,

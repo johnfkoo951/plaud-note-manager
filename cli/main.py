@@ -23,7 +23,6 @@ from core.classification import FOLDER_TAXONOMY, classify_snapshot
 from core.client import PlaudAPIError
 from core.config import ConfigError
 from core.model_registry import PROVIDER_LABELS
-from core.models import FileStatus
 from core.storage import DEFAULT_DB, Storage
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -623,12 +622,56 @@ def download(file_id: str, output_dir: Path = Path("downloads"), force: bool = F
 
 
 @safe_command()
-def status() -> None:
-    """Show local DB summary by status."""
+def status(
+    json_out: bool = typer.Option(False, "--json"),
+    stage: str = typer.Option(
+        None, "--stage", help="list files in one stage (new/cached/transcribed/integrated)"
+    ),
+    limit: int = typer.Option(20, "--limit", help="max files listed with --stage"),
+) -> None:
+    """Library progress — derived from cached/transcribed/integrated artifacts.
+
+    Stages: new (metadata only) → cached (Plaud detail cached) → transcribed
+    (CMDS STT exists) → integrated (integrated output on disk). Derived live
+    from artifacts, so it cannot go stale like the old files.status column.
+    """
+    from core.progress import STAGES, derive_progress
+
+    if stage is not None and stage not in STAGES:
+        raise typer.BadParameter(f"stage must be one of: {', '.join(STAGES)}")
+
     storage = Storage()
-    for s in FileStatus:
-        rows = storage.files_by_status(s)
-        console.print(f"{s.value:>12}: {len(rows)}")
+    prog = derive_progress(storage)
+    total = len(prog.stages)
+
+    def stage_files(name: str) -> list[str]:
+        ids = [fid for fid, s in prog.stages.items() if s == name]
+        rows = [storage.get_file_row(fid) for fid in ids]
+        rows = [r for r in rows if r is not None]
+        rows.sort(key=lambda r: r["edit_time"] or 0, reverse=True)
+        return [r["id"] for r in rows]
+
+    if json_out:
+        payload: dict = {"counts": prog.counts, "total": total}
+        if stage:
+            payload["stage"] = stage
+            payload["files"] = stage_files(stage)[:limit]
+        _emit_json(payload)
+        return
+
+    console.print("[bold]Library progress[/bold] (derived)")
+    width = 24
+    for s in reversed(STAGES):
+        n = prog.counts.get(s, 0)
+        bar = "█" * (round(width * n / total) if total else 0)
+        console.print(f"  {s:>11}: {n:>5}  [dim]{bar}[/dim]")
+    console.print(f"  {'total':>11}: {total:>5}")
+    if stage:
+        ids = stage_files(stage)
+        console.print(f"\n[bold]{stage}[/bold] ({len(ids)} files, showing {min(limit, len(ids))})")
+        for fid in ids[:limit]:
+            row = storage.get_file_row(fid)
+            console.print(f"  {fid}  {(row['filename'] or '') if row else ''}")
 
 
 _AUTH_ICON = {

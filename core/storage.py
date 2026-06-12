@@ -220,6 +220,20 @@ class Storage:
         with self._connect() as conn:
             return conn.execute("SELECT * FROM files WHERE id = ?", (file_id,)).fetchone()
 
+    # Cheap id-set accessors for derived progress (core/progress.py).
+
+    def active_file_ids(self) -> set[str]:
+        with self._connect() as conn:
+            return {r[0] for r in conn.execute("SELECT id FROM files WHERE is_trash = 0")}
+
+    def cached_file_ids(self) -> set[str]:
+        with self._connect() as conn:
+            return {r[0] for r in conn.execute("SELECT file_id FROM file_content")}
+
+    def cmds_transcribed_file_ids(self) -> set[str]:
+        with self._connect() as conn:
+            return {r[0] for r in conn.execute("SELECT DISTINCT file_id FROM cmds_transcripts")}
+
     def counts(self) -> dict[str, Any]:
         """Library summary counts for the status dashboard."""
         with self._connect() as conn:
