@@ -43,8 +43,16 @@ class AuthStatus:
     expires_at: int | None = None  # epoch seconds
     seconds_remaining: int | None = None
     remaining_human: str | None = None
-    live_ok: bool | None = None  # None = not checked
+    live_state: str | None = None  # ok | rejected | unreachable | None = not checked
+    live_ok: bool | None = None  # derived from live_state — never set directly
     detail: str = ""
+
+    def __post_init__(self) -> None:
+        # Keep live_ok derived so it can never disagree with live_state:
+        # True only on a confirmed probe, False only on a genuine rejection.
+        self.live_ok = (
+            True if self.live_state == "ok" else False if self.live_state == "rejected" else None
+        )
 
 
 def _decode_jwt_payload(token: str) -> dict | None:
@@ -85,7 +93,7 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
         return AuthStatus(
             configured=False,
             state="unconfigured",
-            detail=f"{exc}  — use the app Auth button and Sign in with Plaud",
+            detail=f"{exc}  — use the app Auth button > Authenticate with Plaud",
         )
 
     token = cfg.authorization
@@ -96,12 +104,12 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
     token = token.strip()
 
     claims = _decode_jwt_payload(token)
+    detail = ""
     if claims is None:
-        return AuthStatus(
-            configured=True,
-            state="unknown",
-            detail="authorization is not a decodable JWT (can't read expiry)",
-        )
+        # Opaque token: expiry can't be read offline, but the live probe below
+        # still works — treat the claims as empty instead of bailing out.
+        detail = "authorization is not a decodable JWT (can't read expiry)"
+        claims = {}
 
     exp = claims.get("exp")
     iat = claims.get("iat")
@@ -115,7 +123,7 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
     else:
         state = "valid"
 
-    live_ok: bool | None = None
+    live_state: str | None = None
     if live and state != "expired":
         # lazy import to avoid import cost when only decoding offline
         from .client import PlaudAPIError, PlaudClient
@@ -123,9 +131,12 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
         try:
             with PlaudClient(cfg) as client:
                 client.list_files(limit=1)
-            live_ok = True
-        except PlaudAPIError:
-            live_ok = False
+            live_state = "ok"
+        except PlaudAPIError as exc:
+            # Only an explicit 401/403 means the token was rejected. The Plaud
+            # backend returns spurious 500s, and network errors carry no status
+            # code at all — both just mean we couldn't verify.
+            live_state = "rejected" if exc.status_code in (401, 403) else "unreachable"
 
     return AuthStatus(
         configured=True,
@@ -139,6 +150,6 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
         expires_at=int(exp) if isinstance(exp, (int, float)) else None,
         seconds_remaining=remaining,
         remaining_human=_human_duration(remaining) if remaining is not None else None,
-        live_ok=live_ok,
-        detail="",
+        live_state=live_state,
+        detail=detail,
     )

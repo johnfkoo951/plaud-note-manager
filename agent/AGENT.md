@@ -23,12 +23,17 @@ description: Autonomous agent that periodically syncs Plaud Cloud, downloads new
 
 ```bash
 cd ~/DEV/plaud-note-manager
+uv run plaud auth --json                       # 1) 자격증명 상태 게이트 (아래 규칙)
 uv run plaud sync
 uv run plaud sync-content
 # 진행 보고: status(coarse count) 대신 변경분 위주로
 uv run plaud query -n 10                       # 최근 들어온 녹음 L1 brief
 uv run plaud resources --since "$LAST_RUN_MTIME" --json   # 직전 실행 이후 갱신 리소스 diff
 ```
+
+- `auth --json`의 `state`가 `expired` 또는 `unconfigured`면 API 명령을 시도하지
+  말고 "재인증 필요 (브라우저 로그인, 자동화 불가)"를 보고하고 종료한다.
+- `expiring`이면 계속 진행하되 남은 만료 시간(`remaining_human`)을 보고에 포함한다.
 
 ## Future Work
 

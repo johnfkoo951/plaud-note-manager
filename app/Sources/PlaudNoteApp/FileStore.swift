@@ -133,7 +133,9 @@ final class FileStore: ObservableObject {
     private var cloudSyncInterval: TimeInterval = 30
     private var cancellables: Set<AnyCancellable> = []
     private var lifecycleObservers: [NSObjectProtocol] = []
-    private var pendingDetailFetch: Set<String> = []
+    /// File IDs with an in-flight `detail` fetch. Published so the detail
+    /// pane can distinguish "loading" from "fetch finished with nothing".
+    @Published private(set) var pendingDetailFetch: Set<String> = []
     /// Generation counter to coalesce bursts of reload requests: only the
     /// latest off-main fetch is allowed to publish its results.
     private var reloadGeneration: UInt64 = 0
@@ -223,8 +225,11 @@ final class FileStore: ObservableObject {
         DatabaseWatcher.shared.start()
         reload()
 
+        // Debounce DB-change ticks so a burst of rapid CLI writes (sync,
+        // relabel, classify…) coalesces into a single reload instead of one
+        // full re-query per WAL touch.
         NotificationCenter.default.publisher(for: .plaudDBChanged)
-            .receive(on: RunLoop.main)
+            .debounce(for: .milliseconds(300), scheduler: RunLoop.main)
             .sink { [weak self] _ in self?.reload() }
             .store(in: &cancellables)
 
@@ -315,7 +320,7 @@ final class FileStore: ObservableObject {
     /// only the most recent fetch is allowed to publish, collapsing a flurry of
     /// `.plaudDBChanged` ticks into one visible update.
     ///
-    /// Ordering note: callers that mutate SQLite first (e.g. `moveFile` ->
+    /// Ordering note: callers that mutate SQLite first (e.g. `assignFolder` ->
     /// `writeFileFolders`) complete their synchronous write before invoking
     /// `reload()`, so the off-main read launched here always observes that
     /// committed write — the optimistic update is never raced away.
@@ -637,10 +642,14 @@ final class FileStore: ObservableObject {
         await sync(showError: false)
     }
 
-    /// Move a file into one or more folders (empty list = unfiled).
+    /// Assign a file to at most one folder, replacing any existing assignment
+    /// (`nil` = clear → Unfiled). Plaud Web supports only a single folder per
+    /// file — multiple assignments break their UI — so the UI exposes radio
+    /// semantics and this method is the only write path.
     /// Optimistic: writes locally + reloads UI immediately, then fires the
     /// API call in the background so the user never waits on the network.
-    func moveFile(_ fileID: String, toFolders folderIDs: [String]) {
+    func assignFolder(_ fileID: String, folderID: String?) {
+        let folderIDs = folderID.map { [$0] } ?? []
         if let error = Database.shared.writeFileFolders(fileID, folderIDs: folderIDs) {
             // Local write failed — surface it and reconcile the UI back to the
             // last persisted state instead of showing a phantom optimistic move.
@@ -651,36 +660,35 @@ final class FileStore: ObservableObject {
         reload()
         Task.detached(priority: .userInitiated) { [weak self] in
             var args = ["move", fileID]
-            args.append(contentsOf: folderIDs)
+            if let folderID {
+                args.append(folderID)
+            }
             await self?.runPlaud(args: args)
         }
     }
 
     /// Folder ids the file currently belongs to, from the in-memory master
-    /// list. Used by the multi-select "Move to folder" menu to seed checkmarks.
+    /// list. Used by the "Move to folder" menus to place the radio checkmark.
+    /// Files carry at most one folder going forward, but old data may briefly
+    /// still hold several — hence a set.
     func folderIDs(for fileID: String) -> Set<String> {
         masterFiles.first { $0.id == fileID }?.folderIDs ?? []
     }
 
-    /// Toggle one folder's membership for a file and persist the full set.
-    /// A file may live in multiple folders (Plaud's `filetag_id_list` is an
-    /// array), so we add/remove the single id from the current set and write
-    /// the whole array back via `moveFile`.
-    func toggleFolder(_ fileID: String, folderID: String) {
-        var ids = folderIDs(for: fileID)
-        if ids.contains(folderID) {
-            ids.remove(folderID)
-        } else {
-            ids.insert(folderID)
-        }
-        moveFile(fileID, toFolders: Array(ids))
-    }
-
-    func renameFile(_ fileID: String, to name: String) async {
+    /// Rename a recording. Optimistic: writes the new name locally + reloads
+    /// the UI immediately, then fires `plaud rename` in the background.
+    func renameFile(_ fileID: String, to name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        await runPlaud(args: ["rename", fileID, trimmed])
-        await sync(showError: false)
+        if let error = Database.shared.writeFileName(fileID, name: trimmed) {
+            lastCommandError = "Could not rename locally: \(error.localizedDescription)"
+            reload()
+            return
+        }
+        reload()
+        Task.detached(priority: .userInitiated) { [weak self] in
+            await self?.runPlaud(args: ["rename", fileID, trimmed])
+        }
     }
 
     func plaudWebURL(_ fileID: String) -> URL? {
@@ -728,6 +736,26 @@ final class FileStore: ObservableObject {
         if let e = endSec { args += ["--end", String(e)] }
         await runPlaud(args: args)
         reloadCmdsTranscript()
+    }
+
+    /// File IDs with an in-flight Plaud *server* speaker relabel. Drives the
+    /// progress state in the rename-speakers sheet.
+    @Published var plaudRelabelingIDs: Set<String> = []
+
+    /// Rename speakers in the Plaud SERVER transcript via
+    /// `plaud plaud-relabel <id> OLD=NEW …` (the CLI refreshes the local
+    /// cache), then re-fetch detail so the UI shows the renamed labels.
+    func relabelPlaudSpeakers(_ fileID: String, mapping: [String: String]) async {
+        let pairs = mapping.compactMap { old, new -> String? in
+            let trimmed = new.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed != old else { return nil }
+            return "\(old)=\(trimmed)"
+        }
+        guard !pairs.isEmpty else { return }
+        plaudRelabelingIDs.insert(fileID)
+        defer { plaudRelabelingIDs.remove(fileID) }
+        await runPlaud(args: ["plaud-relabel", fileID] + pairs.sorted())
+        await refetchDetail(fileID)
     }
 
     func addSpeaker(name: String, isSelf: Bool) async {
@@ -917,6 +945,12 @@ final class FileStore: ObservableObject {
         panel.nameFieldStringValue = "\(fileID)-\(kind).md"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         await runPlaud(args: ["export", fileID, kind, "--out", url.path])
+    }
+
+    /// Re-trigger the content load for the current selection — used by the
+    /// detail pane's Retry button after a background `detail` fetch failed.
+    func retryContentFetch() {
+        loadContent(for: selectedID)
     }
 
     private func loadContent(for id: String?) {

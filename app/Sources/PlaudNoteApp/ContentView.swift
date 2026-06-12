@@ -547,9 +547,11 @@ private struct SettingsSheet: View {
                                 backendRow(m)
                             }
                         }
-                        Text("CLI mode uses `claude` / `codex` / `gemini` shell commands "
-                             + "(OAuth or whatever the CLI is logged in with). "
-                             + "Grok uses xAI API. Presets are read from the CMDS API Information folder.")
+                        Text("CLI mode uses `claude` / `codex` / `gemini` / `grok` shell "
+                             + "commands (OAuth or whatever the CLI is logged in with — "
+                             + "Grok via Grok Build `grok -p` with a SuperGrok subscription, "
+                             + "no API cost). API mode uses the env key shown next to each "
+                             + "row. Presets are read from the CMDS API Information folder.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -804,6 +806,44 @@ private struct SidebarView: View {
     }
 }
 
+// MARK: - Folder radio menu
+
+/// Shared menu body for assigning a file's single Plaud folder. Radio
+/// behavior: a checkmark marks the current folder only; picking a folder
+/// replaces the assignment, and picking the current folder again (or the
+/// explicit "Unfiled" item at the top) clears it.
+private struct FolderRadioMenuItems: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+
+    var body: some View {
+        let assigned = store.folderIDs(for: fileID)
+        Button {
+            store.assignFolder(fileID, folderID: nil)
+        } label: {
+            if assigned.isEmpty {
+                Label("Unfiled", systemImage: "checkmark")
+            } else {
+                Label("Unfiled", systemImage: "tray")
+            }
+        }
+        Divider()
+        ForEach(store.folders) { folder in
+            let isCurrent = assigned.contains(folder.id)
+            Button {
+                // Re-clicking the current folder clears the assignment.
+                store.assignFolder(fileID, folderID: isCurrent ? nil : folder.id)
+            } label: {
+                if isCurrent {
+                    Label(folder.name, systemImage: "checkmark")
+                } else {
+                    Text(folder.name)
+                }
+            }
+        }
+    }
+}
+
 // MARK: - File List
 
 private struct FileListView: View {
@@ -838,7 +878,7 @@ private struct FileListView: View {
                         .contextMenu {
                             Button("Rename…") {
                                 if let newName = promptForFilename(current: file.filename ?? "") {
-                                    Task { await store.renameFile(file.id, to: newName) }
+                                    store.renameFile(file.id, to: newName)
                                 }
                             }
                             Button("Open in Plaud Web") {
@@ -848,26 +888,12 @@ private struct FileListView: View {
                                 store.copyPlaudWebURL(file.id)
                             }
                             Divider()
+                            // Radio semantics: a file lives in at most ONE
+                            // folder (Plaud Web breaks with several). Clicking
+                            // a folder replaces the assignment; clicking the
+                            // current folder again (or Unfiled) clears it.
                             Menu("Move to folder") {
-                                let assigned = store.folderIDs(for: file.id)
-                                Button {
-                                    store.moveFile(file.id, toFolders: [])
-                                } label: {
-                                    Label("Unfiled (clear all)",
-                                          systemImage: assigned.isEmpty ? "checkmark" : "tray")
-                                }
-                                Divider()
-                                ForEach(store.folders) { folder in
-                                    Button {
-                                        store.toggleFolder(file.id, folderID: folder.id)
-                                    } label: {
-                                        if assigned.contains(folder.id) {
-                                            Label(folder.name, systemImage: "checkmark")
-                                        } else {
-                                            Text(folder.name)
-                                        }
-                                    }
-                                }
+                                FolderRadioMenuItems(store: store, fileID: file.id)
                             }
                             Button("Send to Obsidian") {
                                 Task { await store.sendToObsidian(file.id) }
@@ -1699,6 +1725,12 @@ private struct DetailView: View {
     @State private var statusObserver: NSKeyValueObservation?
     @State private var sourceTab: SourceTab = .plaud
     @AppStorage("showRightWorkSidebar") private var showRightWorkSidebar: Bool = true
+    /// Inline title editing (detail header). Click the title (or the hover
+    /// pencil) to edit; Enter commits, Esc/blur cancels.
+    @State private var editingTitle = false
+    @State private var titleDraft = ""
+    @State private var titleHovered = false
+    @FocusState private var titleFieldFocused: Bool
 
     var body: some View {
         if let file = store.selectedFile {
@@ -1733,6 +1765,7 @@ private struct DetailView: View {
                 player?.pause()
                 player = nil
                 store.audioURL = nil
+                editingTitle = false
             }
             .onChange(of: store.audioURL) { _, url in
                 statusObserver = nil
@@ -1815,9 +1848,36 @@ private struct DetailView: View {
                         .font(.system(size: 10, weight: .heavy))
                         .foregroundStyle(AppUI.brandGreen)
                     HStack(spacing: 8) {
-                        Text(file.filename ?? store.content?.title ?? "(untitled)")
-                            .font(.system(size: 21, weight: .bold))
-                            .lineLimit(2)
+                        if editingTitle {
+                            TextField("Recording title", text: $titleDraft)
+                                .textFieldStyle(.plain)
+                                .font(.system(size: 21, weight: .bold))
+                                .focused($titleFieldFocused)
+                                .onSubmit { commitTitleEdit(file: file) }
+                                .onExitCommand { cancelTitleEdit() }
+                                .onChange(of: titleFieldFocused) { _, focused in
+                                    // Losing focus without Enter cancels.
+                                    if !focused && editingTitle { cancelTitleEdit() }
+                                }
+                                .onAppear { titleFieldFocused = true }
+                                .frame(maxWidth: 480)
+                        } else {
+                            Text(file.filename ?? store.content?.title ?? "(untitled)")
+                                .font(.system(size: 21, weight: .bold))
+                                .lineLimit(2)
+                                .onTapGesture { beginTitleEdit(file: file) }
+                                .help("Click to rename")
+                            Button {
+                                beginTitleEdit(file: file)
+                            } label: {
+                                Image(systemName: "pencil")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .opacity(titleHovered ? 1 : 0)
+                            .help("Rename recording")
+                        }
                         Button {
                             if let id = store.selectedID {
                                 Task { await store.refetchDetail(id) }
@@ -1839,6 +1899,7 @@ private struct DetailView: View {
                         .buttonStyle(.plain)
                         .help("Open in Plaud Web (web.plaud.ai/file/\(file.id))")
                     }
+                    .onHover { titleHovered = $0 }
                     HStack(spacing: 8) {
                         Text(file.id).font(.caption2).foregroundStyle(.tertiary)
                         if let kw = store.content?.keywords, !kw.isEmpty {
@@ -1876,6 +1937,27 @@ private struct DetailView: View {
         )
     }
 
+
+    // MARK: Inline title editing
+
+    private func beginTitleEdit(file: PlaudFileVM) {
+        titleDraft = file.filename ?? store.content?.title ?? ""
+        editingTitle = true
+    }
+
+    private func commitTitleEdit(file: PlaudFileVM) {
+        guard editingTitle else { return }
+        editingTitle = false
+        let trimmed = titleDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        let current = file.filename ?? store.content?.title ?? ""
+        guard !trimmed.isEmpty, trimmed != current else { return }
+        // Optimistic local rename + background `plaud rename`.
+        store.renameFile(file.id, to: trimmed)
+    }
+
+    private func cancelTitleEdit() {
+        editingTitle = false
+    }
 
     @ViewBuilder
     private func audioBar(file: PlaudFileVM) -> some View {
@@ -1969,23 +2051,17 @@ private struct MetadataBar: View {
                 }
             }
 
-            // Read-only Plaud-synced data: note type + folder. Tertiary style
-            // signals "you don't edit this here — it comes from Plaud".
-            if (metadata?.noteType?.isEmpty == false)
-                || (metadata?.folderName?.isEmpty == false) {
-                HStack(spacing: AppUI.spacingS) {
-                    if let type = metadata?.noteType, !type.isEmpty {
-                        Label(type, systemImage: "doc.text")
-                            .font(AppUI.metaFont)
-                            .foregroundStyle(.tertiary)
-                    }
-                    if let folder = metadata?.folderName, !folder.isEmpty {
-                        Label(folder, systemImage: "folder")
-                            .font(AppUI.metaFont)
-                            .foregroundStyle(.tertiary)
-                    }
-                    Spacer(minLength: 0)
+            // Plaud-synced data: note type (read-only) + folder. The folder
+            // is an interactive radio menu — picking a folder replaces the
+            // single assignment, picking the current one (or Unfiled) clears.
+            HStack(spacing: AppUI.spacingS) {
+                if let type = metadata?.noteType, !type.isEmpty {
+                    Label(type, systemImage: "doc.text")
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(.tertiary)
                 }
+                folderMenu
+                Spacer(minLength: 0)
             }
 
             // Locally-owned editable controls: usage status, tag input, AI
@@ -2079,6 +2155,27 @@ private struct MetadataBar: View {
         .onChange(of: file.id) { _, _ in newTag = "" }
     }
 
+    /// Name of the file's single assigned folder, preferring the live folder
+    /// sync over the (lagging) note_metadata copy.
+    private var currentFolderName: String {
+        if let name = file.folderNames.first, !name.isEmpty { return name }
+        if let name = metadata?.folderName, !name.isEmpty { return name }
+        return "Unfiled"
+    }
+
+    private var folderMenu: some View {
+        Menu {
+            FolderRadioMenuItems(store: store, fileID: file.id)
+        } label: {
+            Label(currentFolderName, systemImage: "folder")
+                .font(AppUI.metaFont)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .foregroundStyle(.secondary)
+        .help("Assign Plaud folder (one folder per file)")
+    }
+
     private func addTag() {
         let tag = newTag.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !tag.isEmpty else { return }
@@ -2158,6 +2255,7 @@ private struct PlaudPanel: View {
     @ObservedObject var store: FileStore
     @State private var tab: Tab = .summary
     @State private var summaryIndex: Int = 0
+    @State private var renamingSpeakers: Bool = false
     @AppStorage("defaultContentViewMode") private var viewModeRaw: String =
         ContentViewMode.rendered.rawValue
 
@@ -2180,6 +2278,17 @@ private struct PlaudPanel: View {
             // Summaries can be appended/replaced after generation; reset the
             // selected tab index so it never points past the new array bounds.
             summaryIndex = 0
+        }
+        .sheet(isPresented: $renamingSpeakers) {
+            if let fid = store.selectedID {
+                PlaudSpeakerRenameSheet(
+                    store: store,
+                    fileID: fid,
+                    speakers: Self.distinctSpeakers(
+                        in: store.content?.transcript ?? ""
+                    )
+                ) { renamingSpeakers = false }
+            }
         }
     }
 
@@ -2210,10 +2319,39 @@ private struct PlaudPanel: View {
 
             Spacer()
             ViewModeSegment(rawValue: $viewModeRaw)
+            Button {
+                renamingSpeakers = true
+            } label: {
+                Image(systemName: "person.2")
+                    .help("Rename speakers in the Plaud transcript (applies on the Plaud server)")
+            }
+            .buttonStyle(.borderless)
+            .frame(width: 28)
+            .disabled(store.selectedID == nil
+                      || (store.content?.transcript.isEmpty ?? true))
             copyMenu
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    /// Distinct speaker labels in the formatted Plaud transcript
+    /// (`[ts] Speaker: content` lines), in first-seen order.
+    private static func distinctSpeakers(in transcript: String) -> [String] {
+        var seen: [String] = []
+        for line in transcript.components(separatedBy: .newlines) {
+            guard line.first == "[",
+                  let close = line.firstIndex(of: "]") else { continue }
+            let rest = line[line.index(after: close)...]
+                .trimmingCharacters(in: .whitespaces)
+            guard let colon = rest.firstIndex(of: ":") else { continue }
+            let speaker = String(rest[..<colon])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !speaker.isEmpty, !seen.contains(speaker) {
+                seen.append(speaker)
+            }
+        }
+        return seen
     }
 
     private func tabButton(_ title: String, _ k: Tab) -> some View {
@@ -2334,8 +2472,129 @@ private struct PlaudPanel: View {
                     systemImage: "questionmark.folder.fill"
                 )
             case .valid, .expiring:
-                CenteredStateView(message: "Loading content…", loading: true)
+                // Only spin while a detail fetch is actually in flight;
+                // otherwise the fetch already failed and a retry is needed.
+                if store.selectedID.map({ store.pendingDetailFetch.contains($0) }) == true {
+                    CenteredStateView(message: "Loading content…", loading: true)
+                } else {
+                    VStack(spacing: AppUI.spacingS) {
+                        CenteredStateView(
+                            message: "Couldn't load content for this recording.",
+                            systemImage: "exclamationmark.triangle.fill",
+                            tint: .orange
+                        )
+                        Button {
+                            store.retryContentFetch()
+                        } label: {
+                            Label("Retry", systemImage: "arrow.clockwise")
+                        }
+                    }
+                }
             }
+        }
+    }
+}
+
+// MARK: - Plaud Speaker Rename Sheet
+
+/// Rename speakers in the **Plaud server** transcript. Lists the distinct
+/// speaker labels of the currently displayed transcript, each with a field
+/// prefilled with the current name. Apply runs
+/// `plaud plaud-relabel <id> OLD=NEW …` and then re-fetches detail so the
+/// UI reflects the server-side rename.
+private struct PlaudSpeakerRenameSheet: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+    let speakers: [String]
+    let dismiss: () -> Void
+
+    /// Target name per raw speaker label, prefilled with the current name.
+    @State private var names: [String: String] = [:]
+
+    private var isRunning: Bool { store.plaudRelabelingIDs.contains(fileID) }
+
+    /// Mapping of only the names the user actually changed.
+    private var changedMapping: [String: String] {
+        var mapping: [String: String] = [:]
+        for raw in speakers {
+            let new = (names[raw] ?? raw)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !new.isEmpty, new != raw {
+                mapping[raw] = new
+            }
+        }
+        return mapping
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Rename speakers").font(.headline)
+            Text("Renames the speakers on the Plaud server transcript, then refreshes the local copy.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if speakers.isEmpty {
+                Text("No speaker labels found in this transcript.")
+                    .font(AppUI.bodyFont)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(speakers, id: \.self) { raw in
+                    HStack(spacing: 8) {
+                        Text(raw)
+                            .font(AppUI.bodyFont)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(width: 140, alignment: .leading)
+                        Image(systemName: "arrow.right")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        TextField("New name", text: binding(for: raw))
+                            .textFieldStyle(.roundedBorder)
+                            .disabled(isRunning)
+                    }
+                }
+            }
+
+            HStack {
+                if isRunning {
+                    ProgressView().controlSize(.small)
+                    Text("Renaming on Plaud…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .disabled(isRunning)
+                Button("Apply") { apply() }
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isRunning || changedMapping.isEmpty)
+            }
+        }
+        .padding(20)
+        .frame(minWidth: 440)
+        .onAppear {
+            for raw in speakers where names[raw] == nil {
+                names[raw] = raw
+            }
+        }
+    }
+
+    private func binding(for raw: String) -> Binding<String> {
+        Binding(
+            get: { names[raw] ?? raw },
+            set: { names[raw] = $0 }
+        )
+    }
+
+    private func apply() {
+        let mapping = changedMapping
+        guard !mapping.isEmpty else { return }
+        Task {
+            // Failure surfaces via store.lastCommandError (alert in
+            // ContentView); the sheet closes either way after the run.
+            await store.relabelPlaudSpeakers(fileID, mapping: mapping)
+            dismiss()
         }
     }
 }
@@ -2639,6 +2898,20 @@ private struct AIInspectorPanel: View {
         case summary, integrated
         var id: String { rawValue }
         var label: String { self == .summary ? "Summary" : "Integrated" }
+        /// Segment icon: plain doc for the single-summary path, merge arrows
+        /// for the integrated (Plaud + CMDS) pipeline.
+        var icon: String {
+            self == .summary ? "doc.text" : "arrow.triangle.merge"
+        }
+        /// Accent tint so the two modes are distinct at a glance:
+        /// Summary = blue, Integrated = green.
+        var tint: Color { self == .summary ? .blue : .green }
+        /// One-line explanation of what generating in this mode produces.
+        var caption: String {
+            self == .summary
+                ? "Plaud 전사·요약만 사용해 단일 요약 생성"
+                : "Plaud + CMDS 전사를 통합해 최종 전사본 + 요약 생성"
+        }
     }
 
     var body: some View {
@@ -2827,10 +3100,13 @@ private struct AIInspectorPanel: View {
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: hasOutput ? "checkmark.circle.fill" : "circle.dashed")
                     .foregroundColor(hasOutput ? .green : .secondary)
-                VStack(alignment: .leading, spacing: 2) {
+                VStack(alignment: .leading, spacing: 3) {
                     Text(slot.name).font(AppUI.rowTitleFont)
-                    Text("\(slot.model) · \(slot.outputModel) · \(slot.template)")
-                        .font(AppUI.metaFont).foregroundStyle(.secondary)
+                    HStack(spacing: 4) {
+                        slotChip("\(slot.model) · \(slot.outputModel)",
+                                 icon: "cpu")
+                        slotChip(slot.template, icon: "doc.plaintext")
+                    }
                 }
                 Spacer()
                 Button(role: .destructive) {
@@ -2891,28 +3167,66 @@ private struct AIInspectorPanel: View {
         .cornerRadius(AppUI.radius)
     }
 
+    /// Small rounded chip for slot metadata (model id, template).
+    private func slotChip(_ text: String, icon: String) -> some View {
+        HStack(spacing: 3) {
+            Image(systemName: icon)
+                .font(.system(size: 9, weight: .semibold))
+            Text(text)
+        }
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .lineLimit(1)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2.5)
+        .background(Color.primary.opacity(0.07), in: Capsule())
+    }
+
+    /// Mode picker: icon + label segments, tinted per mode (Summary = blue,
+    /// Integrated = green), with a one-line caption explaining what the
+    /// selected mode generates.
     private func slotModeControl(_ slot: Database.Slot) -> some View {
-        HStack(spacing: 2) {
-            ForEach(SlotMode.allCases) { option in
-                let selected = mode(for: slot) == option
-                Button {
-                    modeMap[slot.id] = option
-                } label: {
-                    Text(option.label)
+        let current = mode(for: slot)
+        return VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 2) {
+                ForEach(SlotMode.allCases) { option in
+                    let selected = current == option
+                    Button {
+                        modeMap[slot.id] = option
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: option.icon)
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .symbolRenderingMode(.hierarchical)
+                            Text(option.label)
+                        }
                         .font(AppUI.controlFont)
-                        .foregroundStyle(selected ? .primary : .secondary)
+                        .foregroundStyle(selected ? option.tint : .secondary)
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 5)
                         .background(
-                            selected ? AppUI.selectedFill : Color.clear,
+                            selected ? option.tint.opacity(0.14) : Color.clear,
                             in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
                         )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: AppUI.tightRadius)
+                                .stroke(selected ? option.tint.opacity(0.45)
+                                                 : Color.clear,
+                                        lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
+            .padding(3)
+            .background(AppUI.subtleFill,
+                        in: RoundedRectangle(cornerRadius: AppUI.radius))
+
+            Text(current.caption)
+                .font(.caption2)
+                .foregroundStyle(current.tint)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(3)
-        .background(AppUI.subtleFill, in: RoundedRectangle(cornerRadius: AppUI.radius))
     }
 
     @ViewBuilder

@@ -311,6 +311,33 @@ final class Database: @unchecked Sendable {
         }
     }
 
+    /// Optimistic rename — Swift writes the new filename directly so the UI
+    /// updates instantly, then the Python CLI PATCHes the server in the
+    /// background; both paths converge on the same SQLite row.
+    @discardableResult
+    func writeFileName(_ fileID: String, name: String) -> Error? {
+        lock.lock(); defer { lock.unlock() }
+        tryOpen()
+        guard let pool else {
+            return DatabaseError(message: "Database pool unavailable")
+        }
+        do {
+            try pool.write { db in
+                try db.execute(
+                    sql: """
+                    UPDATE files
+                       SET filename = ?, updated_at = strftime('%s','now')
+                     WHERE id = ?
+                    """,
+                    arguments: [name, fileID]
+                )
+            }
+            return nil
+        } catch {
+            return error
+        }
+    }
+
     private func read<T>(_ block: (GRDB.Database) throws -> T) -> T? {
         lock.lock(); defer { lock.unlock() }
         tryOpen()
@@ -331,27 +358,21 @@ final class Database: @unchecked Sendable {
     /// Load the entire library (trash included) in one pass, each row carrying
     /// its folder membership so the four sidebar cases can be reproduced
     /// in-memory exactly as `files(for:)` does in SQL.
+    ///
+    /// Folder names/colors/ids come from two grouped LEFT JOINs instead of
+    /// per-row correlated subqueries (one scan of `file_folders` each instead
+    /// of N). `fids` deliberately skips the `folders` join so dangling
+    /// folder ids still surface in `folder_ids`, matching the old subquery.
     func masterFiles() -> [MasterFile] {
         let sql = """
         SELECT f.*,
                EXISTS(SELECT 1 FROM file_content fc WHERE fc.file_id = f.id) AS has_content,
                COALESCE(
-                   NULLIF((
-                       SELECT GROUP_CONCAT(fo.name, char(31))
-                         FROM file_folders ff
-                         JOIN folders fo ON fo.id = ff.folder_id
-                        WHERE ff.file_id = f.id
-                   ), ''),
+                   NULLIF(fnames.agg_folder_names, ''),
                    nm.folder_name
                ) AS folder_names,
                COALESCE(
-                   (
-                       SELECT fo.color
-                         FROM file_folders ff
-                         JOIN folders fo ON fo.id = ff.folder_id
-                        WHERE ff.file_id = f.id
-                        LIMIT 1
-                   ),
+                   fnames.agg_folder_color,
                    (
                        SELECT fo.color
                          FROM folders fo
@@ -360,11 +381,7 @@ final class Database: @unchecked Sendable {
                    )
                ) AS folder_color,
                nm.usage_status AS usage_status,
-               (
-                   SELECT GROUP_CONCAT(folder_id, char(31))
-                     FROM file_folders ff
-                    WHERE ff.file_id = f.id
-               ) AS folder_ids,
+               fids.agg_folder_ids AS folder_ids,
                (
                    SELECT GROUP_CONCAT(tag, char(31))
                      FROM (
@@ -383,6 +400,20 @@ final class Database: @unchecked Sendable {
                ) AS primary_tags
           FROM files f
           LEFT JOIN note_metadata nm ON nm.file_id = f.id
+          LEFT JOIN (
+              SELECT file_id,
+                     GROUP_CONCAT(folder_id, char(31)) AS agg_folder_ids
+                FROM file_folders
+               GROUP BY file_id
+          ) fids ON fids.file_id = f.id
+          LEFT JOIN (
+              SELECT ff.file_id,
+                     GROUP_CONCAT(fo.name, char(31)) AS agg_folder_names,
+                     MIN(fo.color) AS agg_folder_color
+                FROM file_folders ff
+                JOIN folders fo ON fo.id = ff.folder_id
+               GROUP BY ff.file_id
+          ) fnames ON fnames.file_id = f.id
          ORDER BY COALESCE(f.start_time, f.edit_time * 1000) DESC LIMIT 5000
         """
         return read { db in
@@ -471,28 +502,40 @@ final class Database: @unchecked Sendable {
     }
 
     func folders() -> [FolderVM] {
+        // One grouped scan of file_folders instead of a correlated COUNT(*)
+        // re-executed per folder row.
         read { db in
             try Row.fetchAll(db, sql: """
-                SELECT f.id, f.name, f.color,
-                       (SELECT COUNT(*) FROM file_folders ff
-                          JOIN files fi ON fi.id = ff.file_id
-                         WHERE ff.folder_id = f.id AND fi.is_trash = 0) AS count
+                SELECT f.id, f.name, f.color, COALESCE(c.cnt, 0) AS count
                   FROM folders f
+                  LEFT JOIN (
+                      SELECT ff.folder_id AS folder_id, COUNT(*) AS cnt
+                        FROM file_folders ff
+                        JOIN files fi ON fi.id = ff.file_id AND fi.is_trash = 0
+                       GROUP BY ff.folder_id
+                  ) c ON c.folder_id = f.id
                  ORDER BY f.name COLLATE NOCASE
             """).map(FolderVM.init(row:))
         } ?? []
     }
 
     func categoryCounts() -> (all: Int, unfiled: Int, trash: Int) {
+        // Single pass over `files` instead of three separate COUNT queries.
+        // NOT EXISTS (not NOT IN) so a NULL file_id row can never poison the
+        // unfiled predicate.
         read { db in
-            let all = try Int.fetchOne(db,
-                sql: "SELECT COUNT(*) FROM files WHERE is_trash = 0") ?? 0
-            let unfiled = try Int.fetchOne(db, sql: """
-                SELECT COUNT(*) FROM files
-                 WHERE is_trash = 0 AND id NOT IN (SELECT file_id FROM file_folders)
-            """) ?? 0
-            let trash = try Int.fetchOne(db,
-                sql: "SELECT COUNT(*) FROM files WHERE is_trash = 1") ?? 0
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT COALESCE(SUM(is_trash = 0), 0) AS all_count,
+                       COALESCE(SUM(is_trash = 0 AND NOT EXISTS(
+                           SELECT 1 FROM file_folders ff
+                            WHERE ff.file_id = files.id
+                       )), 0) AS unfiled_count,
+                       COALESCE(SUM(is_trash = 1), 0) AS trash_count
+                  FROM files
+            """) else { return (0, 0, 0) }
+            let all: Int = row["all_count"] ?? 0
+            let unfiled: Int = row["unfiled_count"] ?? 0
+            let trash: Int = row["trash_count"] ?? 0
             return (all, unfiled, trash)
         } ?? (0, 0, 0)
     }

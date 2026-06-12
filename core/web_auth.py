@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import os
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -9,7 +9,9 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from cli.onboard import DEFAULTS
 
-from .config import DEFAULT_ENV
+from .auth_status import _decode_jwt_payload
+from .client import PlaudAPIError, PlaudClient
+from .config import PlaudConfig, resolve_env_path, write_env_file
 
 
 class WebAuthCapture(BaseModel):
@@ -55,7 +57,8 @@ class WebAuthResult:
 
 
 CaptureInput = WebAuthCapture | Mapping[str, str | None]
-LiveValidator = Callable[[], bool]
+# Probes the assembled candidate values; returns "ok" | "rejected" | "unreachable".
+LiveValidator = Callable[[Mapping[str, str]], str]
 
 
 def _clean(value: str | None) -> str | None:
@@ -74,11 +77,6 @@ def _parse_capture(capture: CaptureInput) -> WebAuthCapture | WebAuthResult:
         return WebAuthResult("invalid_payload", exc.errors()[0]["msg"])
 
 
-def _env_quote(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
-    return f"'{escaped}'"
-
-
 def _write_env(values: Mapping[str, str], env_path: Path) -> None:
     order = (
         "PLAUD_BASE_URL",
@@ -94,23 +92,49 @@ def _write_env(values: Mapping[str, str], env_path: Path) -> None:
         "PLAUD_REFERER",
         "PLAUD_TIMEZONE",
     )
-    lines = [f"{key}={_env_quote(values[key])}" for key in order if values.get(key)]
-    env_path.parent.mkdir(parents=True, exist_ok=True)
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    write_env_file({key: values[key] for key in order if values.get(key)}, env_path)
 
 
-def _restore_env(env_path: Path, previous: str | None) -> None:
-    if previous is None:
-        env_path.unlink(missing_ok=True)
-    else:
-        env_path.write_text(previous, encoding="utf-8")
+def _token_expired(authorization: str, *, now: int | None = None) -> bool:
+    """True only when the captured JWT decodes AND its exp is in the past."""
+    token = authorization
+    for prefix in ("bearer ", "Bearer "):
+        if token.startswith(prefix):
+            token = token[len(prefix) :]
+            break
+    claims = _decode_jwt_payload(token.strip())
+    if not claims:
+        return False  # opaque token — let the live probe decide
+    exp = claims.get("exp")
+    now = int(time.time()) if now is None else now
+    return isinstance(exp, (int, float)) and int(exp) <= now
 
 
-def _default_live_validator() -> bool:
-    from .auth_status import auth_status
-
-    status = auth_status(live=True)
-    return status.live_ok is True
+def _default_live_validator(values: Mapping[str, str]) -> str:
+    """Probe the candidate credentials in memory — .env is never read here."""
+    cfg = PlaudConfig(
+        base_url=values.get("PLAUD_BASE_URL", "https://api-apne1.plaud.ai"),
+        authorization=values["PLAUD_AUTHORIZATION"],
+        x_device_id=values["PLAUD_X_DEVICE_ID"],
+        x_pld_user=values["PLAUD_X_PLD_USER"],
+        x_pld_tag=values.get("PLAUD_X_PLD_TAG", ""),
+        app_language=values.get("PLAUD_APP_LANGUAGE", "en"),
+        app_platform=values.get("PLAUD_APP_PLATFORM", "web"),
+        edit_from=values.get("PLAUD_EDIT_FROM", "web"),
+        origin=values.get("PLAUD_ORIGIN", "https://web.plaud.ai"),
+        referer=values.get("PLAUD_REFERER", "https://web.plaud.ai/"),
+        timezone=values.get("PLAUD_TIMEZONE", "Asia/Seoul"),
+        cookie=values.get("PLAUD_COOKIE", ""),
+    )
+    try:
+        # 10s timeout keeps the app's 40s watchdog comfortable.
+        with PlaudClient(cfg, timeout=10.0) as client:
+            client.list_files(limit=1)
+    except PlaudAPIError as exc:
+        # Only 401/403 is a genuine rejection; spurious 500s from the Plaud
+        # backend and status-less network errors mean "could not verify".
+        return "rejected" if exc.status_code in (401, 403) else "unreachable"
+    return "ok"
 
 
 def import_web_auth(
@@ -120,7 +144,9 @@ def import_web_auth(
     live_validator: LiveValidator | None = None,
     validate_live: bool = True,
 ) -> WebAuthResult:
-    env_path = env_path or Path(os.environ.get("PLAUD_ENV_FILE", DEFAULT_ENV))
+    """Validate-before-write: probe the candidate credentials in memory and only
+    touch .env once they look usable — no rollback path needed."""
+    env_path = resolve_env_path(env_path)
     parsed = _parse_capture(capture)
     if isinstance(parsed, WebAuthResult):
         return parsed
@@ -161,27 +187,33 @@ def import_web_auth(
         if clean := _clean(value):
             values[key] = clean
 
-    try:
-        previous = env_path.read_text(encoding="utf-8") if env_path.exists() else None
-        _write_env(values, env_path)
-    except OSError as exc:
-        return WebAuthResult("write_failed", str(exc), cookie_captured=True)
+    # Local expiry pre-check: an already-expired capture is a known rejection —
+    # no network call, .env untouched.
+    if _token_expired(values["PLAUD_AUTHORIZATION"]):
+        return WebAuthResult(
+            "live_auth_failed",
+            "captured token is already expired — log in again",
+            cookie_captured=cookie is not None,
+        )
 
+    status = "ok"
+    detail = "credentials refreshed from Plaud Web Login"
     if validate_live:
-        validator = live_validator or _default_live_validator
-        if not validator():
-            try:
-                _restore_env(env_path, previous)
-            except OSError as exc:
-                return WebAuthResult("rollback_failed", str(exc), cookie_captured=True)
+        verdict = (live_validator or _default_live_validator)(values)
+        if verdict == "rejected":
             return WebAuthResult(
                 "live_auth_failed",
-                "captured Plaud credentials were rejected; restored previous .env",
+                "Plaud rejected the captured credentials; .env unchanged",
                 cookie_captured=cookie is not None,
             )
+        if verdict == "unreachable":
+            # Non-destructive: save the capture anyway, but flag it unverified.
+            status = "live_check_unavailable"
+            detail = "credentials saved but could not be verified — check your network connection"
 
-    return WebAuthResult(
-        "ok",
-        "credentials refreshed from Plaud Web Login",
-        cookie_captured=cookie is not None,
-    )
+    try:
+        _write_env(values, env_path)
+    except OSError as exc:
+        return WebAuthResult("write_failed", str(exc), cookie_captured=cookie is not None)
+
+    return WebAuthResult(status, detail, cookie_captured=cookie is not None)

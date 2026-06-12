@@ -29,7 +29,11 @@ logger = logging.getLogger(__name__)
 
 
 class PlaudAPIError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        # HTTP status when the server answered (e.g. 401/403); None for
+        # network-level failures so callers can tell rejection from outage.
+        self.status_code = status_code
 
 
 def _safe_json(resp: httpx.Response, label: str) -> dict[str, Any]:
@@ -69,7 +73,7 @@ class PlaudClient:
         except httpx.HTTPStatusError as exc:
             label = _request_label(exc.request)
             status = exc.response.status_code
-            raise PlaudAPIError(f"Plaud HTTP {status} for {label}") from None
+            raise PlaudAPIError(f"Plaud HTTP {status} for {label}", status_code=status) from None
         except httpx.RequestError as exc:
             label = _request_label(exc.request)
             detail = str(exc) or exc.__class__.__name__
@@ -86,7 +90,9 @@ class PlaudClient:
         except httpx.HTTPStatusError as exc:
             label = _request_label(exc.request)
             status = exc.response.status_code
-            raise PlaudAPIError(f"Plaud content HTTP {status} for {label}") from None
+            raise PlaudAPIError(
+                f"Plaud content HTTP {status} for {label}", status_code=status
+            ) from None
         except httpx.RequestError as exc:
             label = _request_label(exc.request)
             detail = str(exc) or exc.__class__.__name__
@@ -117,7 +123,9 @@ class PlaudClient:
             except httpx.HTTPStatusError as exc:
                 label = _request_label(exc.request)
                 status = exc.response.status_code
-                raise PlaudAPIError(f"Plaud HTTP {status} for {label}") from None
+                raise PlaudAPIError(
+                    f"Plaud HTTP {status} for {label}", status_code=status
+                ) from None
             except httpx.RequestError as exc:
                 last_exc = exc
                 if attempt == 2:
@@ -284,11 +292,68 @@ class PlaudClient:
             raise PlaudAPIError(data.get("msg") or "delete_folder failed")
 
     def set_file_folders(self, file_id: str, folder_ids: list[str]) -> None:
-        """Assign / unassign folders for a file via PATCH /file/{id}."""
+        """Assign / unassign folders for a file via PATCH /file/{id}.
+
+        Plaud web renders at most ONE folder per file — pushing multiple
+        filetag ids corrupts the web UI, so we hard-reject it here.
+        """
+        if len(folder_ids) > 1:
+            raise ValueError(
+                "Plaud supports a single folder per file; got "
+                f"{len(folder_ids)}: {', '.join(folder_ids)}"
+            )
         self._patch_json(f"/file/{file_id}", {"filetag_id_list": folder_ids})
 
     def rename_file(self, file_id: str, name: str) -> None:
         self._patch_json(f"/file/{file_id}", {"filename": name})
+
+    # ---------- server transcript speaker edits (web parity) ----------
+    # web.plaud.ai renames transcript speakers by PATCHing the FULL segment
+    # list back as `trans_result` (captured 2026-06-11). Segments carry extra
+    # fields we must round-trip verbatim (original_speaker, embeddingKey, …),
+    # so these helpers work on the raw dicts, not TranscriptSegment models.
+
+    def raw_transcript(self, file_id: str) -> list[dict[str, Any]]:
+        """The server transcript as raw segment dicts (all fields preserved)."""
+        detail = self.file_detail(file_id).get("data") or {}
+        for item in detail.get("content_list") or []:
+            if item.get("data_type") != "transaction" or not item.get("data_link"):
+                continue
+            payload = self._fetch_link_json(item["data_link"])
+            if isinstance(payload, list):
+                return payload
+        return []
+
+    def update_transcript(self, file_id: str, segments: list[dict[str, Any]]) -> None:
+        """Replace the server transcript via PATCH /file/{id} trans_result."""
+        self._patch_json(
+            f"/file/{file_id}",
+            {"trans_result": segments, "support_mul_summ": True},
+        )
+
+    def rename_transcript_speakers(self, file_id: str, mapping: dict[str, str]) -> int:
+        """Rename speakers in the Plaud SERVER transcript of one file.
+
+        `mapping` maps the currently displayed speaker name to the new name.
+        The STT label is preserved in `original_speaker` (set once, never
+        overwritten) so renames stay reversible on the web. Returns the
+        number of segments changed; 0 means nothing was pushed.
+        """
+        segments = self.raw_transcript(file_id)
+        if not segments:
+            raise PlaudAPIError(f"no server transcript for {file_id}")
+        changed = 0
+        for seg in segments:
+            old = seg.get("speaker")
+            new = mapping.get(old) if isinstance(old, str) else None
+            if not new or new == old:
+                continue
+            seg.setdefault("original_speaker", old)
+            seg["speaker"] = new
+            changed += 1
+        if changed:
+            self.update_transcript(file_id, segments)
+        return changed
 
     # ---------- server-side note + speaker edits (web parity) ----------
     # Reverse-engineered from web.plaud.ai (captured 2026-05-31).
@@ -381,7 +446,9 @@ class PlaudClient:
         except httpx.HTTPStatusError as exc:
             label = _request_label(exc.request)
             status = exc.response.status_code
-            raise PlaudAPIError(f"Plaud audio HTTP {status} for {label}") from None
+            raise PlaudAPIError(
+                f"Plaud audio HTTP {status} for {label}", status_code=status
+            ) from None
         except httpx.RequestError as exc:
             label = _request_label(exc.request)
             detail = str(exc) or exc.__class__.__name__

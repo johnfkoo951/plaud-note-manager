@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import re
 import sys
-import time
 from pathlib import Path
+
+from core.config import write_env_file
 
 REQUIRED_HEADERS = {
     "authorization": "PLAUD_AUTHORIZATION",
@@ -75,12 +76,9 @@ def parse_curl(curl: str) -> dict[str, str]:
 
 
 def write_env(values: dict[str, str], env_path: Path) -> None:
-    if env_path.exists():
-        backup = env_path.with_name(env_path.name + f".bak-{int(time.time())}")
-        env_path.rename(backup)
-        print(f"backed up existing .env -> {backup}")
-    lines = [f"{k}='{v}'" for k, v in values.items()]
-    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # No .env backup on purpose: stale copies would keep live credentials on
+    # disk forever, and the shared writer locks the file down to 0600.
+    write_env_file(values, env_path)
     print(f"wrote {env_path}")
 
 

@@ -20,12 +20,12 @@ from pathlib import Path
 
 from cli.onboard import parse_curl, write_env
 
-from .config import DEFAULT_ENV
+from .config import resolve_env_path
 
 
 @dataclass
 class RefreshResult:
-    status: str  # ok | clipboard_empty | invalid_curl | pbpaste_missing
+    status: str  # ok | clipboard_empty | invalid_curl | pbpaste_missing | write_failed
     detail: str = ""
     cookie_captured: bool = False
 
@@ -46,7 +46,7 @@ def _read_pasteboard() -> str:
 
 def refresh_auth(*, env_path: Path | None = None, curl_text: str | None = None) -> RefreshResult:
     """Parse a copied Plaud cURL and write fresh credentials to `.env`."""
-    env_path = env_path or DEFAULT_ENV
+    env_path = resolve_env_path(env_path)  # honor PLAUD_ENV_FILE like every reader
     if curl_text is None:
         try:
             curl_text = _read_pasteboard()
@@ -67,8 +67,11 @@ def refresh_auth(*, env_path: Path | None = None, curl_text: str | None = None) 
     # `write_env()` is intentionally chatty for terminal onboarding, but this
     # helper is consumed by the app as JSON. Keep stdout clean so the Swift UI
     # can decode `plaud refresh-auth --json` reliably.
-    with redirect_stdout(StringIO()):
-        write_env(values, env_path)
+    try:
+        with redirect_stdout(StringIO()):
+            write_env(values, env_path)
+    except OSError as exc:
+        return RefreshResult("write_failed", f"could not write {env_path.name}: {exc}")
     return RefreshResult(
         "ok",
         "credentials refreshed from copied cURL",

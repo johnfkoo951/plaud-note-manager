@@ -36,11 +36,14 @@ def test_unavailable_message_cli_known_model(monkeypatch) -> None:
     assert "Switch claude to api" in msg
 
 
-def test_unavailable_message_cli_grok_is_api_only(monkeypatch) -> None:
-    # POST-FIX: grok has no CLI backend, so the cli message routes it to api.
+def test_unavailable_message_cli_grok_points_to_install(monkeypatch) -> None:
+    # Grok now HAS a CLI backend (Grok Build, SuperGrok OAuth); when the binary
+    # is missing the message offers install-or-switch like the other CLIs.
     _patch_backend(monkeypatch, "cli")
+    monkeypatch.setattr(summarize, "_resolve_binary", lambda model, name: None)
     msg = summarize.model_unavailable_message("grok")
-    assert msg == "grok has no CLI backend — set grok to api."
+    assert "`grok` CLI not installed" in msg
+    assert "Switch grok to api" in msg
 
 
 def test_unavailable_message_cli_unknown_model(monkeypatch) -> None:

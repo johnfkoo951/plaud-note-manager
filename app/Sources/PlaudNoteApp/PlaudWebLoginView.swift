@@ -5,35 +5,15 @@ private let plaudAuthMessageName = "plaudAuthCapture"
 
 enum PlaudWebSession {
     static func clear(completion: @escaping () -> Void) {
+        // Wipe everything, not just *.plaud.ai — Google SSO cookies otherwise
+        // survive and the live page silently stays logged in. Safe because
+        // this is the app's only WKWebView.
         let store = WKWebsiteDataStore.default()
-        store.fetchDataRecords(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes()) { records in
-            let plaudRecords = records.filter {
-                $0.displayName.localizedCaseInsensitiveContains("plaud")
-            }
-            store.removeData(
-                ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
-                for: plaudRecords
-            ) {
-                store.httpCookieStore.getAllCookies { cookies in
-                    let plaudCookies = cookies.filter {
-                        $0.domain.lowercased().contains("plaud.ai")
-                    }
-                    guard !plaudCookies.isEmpty else {
-                        DispatchQueue.main.async { completion() }
-                        return
-                    }
-                    let group = DispatchGroup()
-                    for cookie in plaudCookies {
-                        group.enter()
-                        store.httpCookieStore.delete(cookie) {
-                            group.leave()
-                        }
-                    }
-                    group.notify(queue: .main) {
-                        completion()
-                    }
-                }
-            }
+        store.removeData(
+            ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(),
+            modifiedSince: .distantPast
+        ) {
+            DispatchQueue.main.async { completion() }
         }
     }
 }
@@ -41,6 +21,10 @@ enum PlaudWebSession {
 struct PlaudWebLoginView: NSViewRepresentable {
     var onCapture: (PlaudWebAuthCapture) -> Void
     var onStatus: (String) -> Void
+    /// Bumped by the owner after a failed capture or a session clear. Each
+    /// change resets the coordinator's one-shot capture latch and reloads the
+    /// login page so a fresh attempt is possible.
+    var captureGeneration: Int = 0
 
     func makeCoordinator() -> Coordinator {
         Coordinator(onCapture: onCapture, onStatus: onStatus)
@@ -64,11 +48,17 @@ struct PlaudWebLoginView: NSViewRepresentable {
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
         context.coordinator.webView = webView
+        context.coordinator.lastSeenGeneration = captureGeneration
         webView.load(URLRequest(url: URL(string: "https://web.plaud.ai/")!))
         return webView
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {}
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.lastSeenGeneration != captureGeneration else { return }
+        context.coordinator.lastSeenGeneration = captureGeneration
+        context.coordinator.resetCaptureState()
+        webView.load(URLRequest(url: URL(string: "https://web.plaud.ai/")!))
+    }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var latestHeaders: [String: String] = [:]
@@ -76,6 +66,7 @@ struct PlaudWebLoginView: NSViewRepresentable {
         var isEmitting = false
         var didCapture = false
         var cookieReadAttempts = 0
+        var lastSeenGeneration = 0
         weak var webView: WKWebView?
 
         private let onCapture: (PlaudWebAuthCapture) -> Void
@@ -100,6 +91,26 @@ struct PlaudWebLoginView: NSViewRepresentable {
 
         func webView(
             _ webView: WKWebView,
+            didFailProvisionalNavigation navigation: WKNavigation!,
+            withError error: Error
+        ) {
+            let nsError = error as NSError
+            if nsError.domain == NSURLErrorDomain, nsError.code == NSURLErrorCancelled { return }
+            onStatus("Plaud Web failed to load: \(error.localizedDescription)")
+        }
+
+        /// Clears the one-shot capture latch so the embedded login can emit
+        /// again after a rejected capture or a session reset.
+        func resetCaptureState() {
+            didCapture = false
+            isEmitting = false
+            cookieReadAttempts = 0
+            latestHeaders.removeAll()
+            latestURL = nil
+        }
+
+        func webView(
+            _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
             for navigationAction: WKNavigationAction,
             windowFeatures: WKWindowFeatures
@@ -114,6 +125,10 @@ struct PlaudWebLoginView: NSViewRepresentable {
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
+            // Only trust messages posted from Plaud's own origin — the user
+            // script runs in every frame (Google SSO included).
+            let host = message.frameInfo.securityOrigin.host
+            guard host == "web.plaud.ai" || host.hasSuffix(".plaud.ai") else { return }
             guard message.name == plaudAuthMessageName,
                   let body = message.body as? [String: Any],
                   let headers = body["headers"] as? [String: Any]

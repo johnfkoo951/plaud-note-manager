@@ -6,7 +6,9 @@ import base64
 import json
 
 import core.auth_status as auth_mod
+import core.client as client_mod
 from core.auth_status import _decode_jwt_payload, _human_duration, auth_status, mask_id
+from core.client import PlaudAPIError
 from core.config import ConfigError, PlaudConfig
 
 
@@ -103,3 +105,57 @@ def test_non_jwt_token_is_unknown(monkeypatch):
     st = auth_status(now=1000)
     assert st.configured is True
     assert st.state == "unknown"
+
+
+def _stub_client(monkeypatch, *, error: Exception | None = None) -> dict:
+    """Patch PlaudClient at its import site (core.client) with a recording stub."""
+    record: dict = {"calls": 0}
+
+    class FakeClient:
+        def __init__(self, cfg, *, timeout=30.0):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return None
+
+        def list_files(self, *, limit):
+            record["calls"] += 1
+            if error is not None:
+                raise error
+            return None
+
+    monkeypatch.setattr(client_mod, "PlaudClient", FakeClient)
+    return record
+
+
+def test_live_probe_401_is_rejected(monkeypatch):
+    now = 1_000_000
+    token = _make_jwt({"exp": now + 50_000, "iat": now - 100})
+    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
+    _stub_client(monkeypatch, error=PlaudAPIError("Plaud HTTP 401", status_code=401))
+    st = auth_status(live=True, now=now)
+    assert st.live_state == "rejected"
+    assert st.live_ok is False
+
+
+def test_live_probe_network_error_is_unreachable(monkeypatch):
+    now = 1_000_000
+    token = _make_jwt({"exp": now + 50_000, "iat": now - 100})
+    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
+    _stub_client(monkeypatch, error=PlaudAPIError("network down"))  # no status_code
+    st = auth_status(live=True, now=now)
+    assert st.live_state == "unreachable"
+    assert st.live_ok is None  # can't verify ≠ rejected
+
+
+def test_undecodable_jwt_still_runs_live_probe(monkeypatch):
+    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config("opaque-token"))
+    record = _stub_client(monkeypatch)
+    st = auth_status(live=True, now=1000)
+    assert record["calls"] == 1  # probe ran despite the opaque token
+    assert st.state == "unknown"
+    assert st.live_state == "ok"
+    assert st.live_ok is True

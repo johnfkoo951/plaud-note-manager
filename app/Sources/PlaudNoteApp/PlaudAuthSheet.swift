@@ -12,6 +12,12 @@ struct PlaudAuthSheet: View {
     @State private var showEmbeddedLogin = false
     @State private var webStatus = "Embedded login is available if browser import is not enough."
     @State private var clearingSession = false
+    /// Failure surfaced inline in the sheet. The root ContentView alert is
+    /// queued behind this sheet on macOS, so errors must be shown here.
+    @State private var importError: String?
+    /// Bumped after every failed capture or session clear so the embedded
+    /// web view resets its one-shot capture latch and reloads.
+    @State private var captureGeneration = 0
 
     private var trimmedCurl: String {
         curlText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -82,6 +88,13 @@ struct PlaudAuthSheet: View {
                 .disabled(isBusy)
             }
 
+            if let importError {
+                Label(importError, systemImage: "exclamationmark.triangle.fill")
+                    .font(AppUI.metaFont)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             Text("A URL alone is not enough. In DevTools > Network, find the `api-apne1.plaud.ai/file/simple/web?...` request, right-click it, then Copy > Copy as cURL. The copied text must start with `curl` and include headers.")
                 .font(AppUI.metaFont)
                 .foregroundStyle(.secondary)
@@ -139,6 +152,7 @@ struct PlaudAuthSheet: View {
                         clearingSession = true
                         PlaudWebSession.clear {
                             clearingSession = false
+                            captureGeneration += 1
                             webStatus = "Plaud Web session cleared. Sign in again."
                         }
                     } label: {
@@ -170,7 +184,8 @@ struct PlaudAuthSheet: View {
             },
             onStatus: { status in
                 webStatus = status
-            }
+            },
+            captureGeneration: captureGeneration
         )
         .frame(minHeight: 420)
         .clipShape(RoundedRectangle(cornerRadius: AppUI.radius))
@@ -236,15 +251,16 @@ struct PlaudAuthSheet: View {
     }
 
     private func importClipboardCurl() {
+        importError = nil
         let text = NSPasteboard.general.string(forType: .string) ?? ""
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            store.lastCommandError = "클립보드에 Plaud cURL 텍스트가 없습니다."
+            importError = "클립보드에 Plaud cURL 텍스트가 없습니다."
             return
         }
         guard looksLikePlaudCurl(trimmed) else {
             curlText = trimmed
-            store.lastCommandError = "URL만으로는 부족합니다. DevTools > Network에서 Plaud 요청을 우클릭한 뒤 Copy > Copy as cURL로 복사해 주세요."
+            importError = "URL만으로는 부족합니다. DevTools > Network에서 Plaud 요청을 우클릭한 뒤 Copy > Copy as cURL로 복사해 주세요."
             return
         }
         curlText = trimmed
@@ -252,9 +268,10 @@ struct PlaudAuthSheet: View {
     }
 
     private func pasteClipboardIntoEditor() {
+        importError = nil
         let text = NSPasteboard.general.string(forType: .string) ?? ""
         if text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            store.lastCommandError = "클립보드에 Plaud cURL 텍스트가 없습니다."
+            importError = "클립보드에 Plaud cURL 텍스트가 없습니다."
         } else {
             curlText = text
         }
@@ -291,8 +308,13 @@ struct PlaudAuthSheet: View {
     }
 
     private func authenticateWithWebCapture(_ capture: PlaudWebAuthCapture) {
-        guard !isBusy else { return }
+        guard !isBusy else {
+            // Dropped capture — re-arm the web view so the next attempt fires.
+            captureGeneration += 1
+            return
+        }
         clipboardWatching = false
+        importError = nil
         authenticating = true
         Task {
             let ok = await store.refreshAuthFromWebLogin(capture)
@@ -301,7 +323,12 @@ struct PlaudAuthSheet: View {
                 if ok {
                     onDone()
                 } else {
-                    webStatus = "Capture received, but Plaud rejected it. Try browser import."
+                    let message = store.lastCommandError
+                        ?? "Capture received, but Plaud rejected it. Try browser import."
+                    store.lastCommandError = nil
+                    importError = message
+                    webStatus = message
+                    captureGeneration += 1
                 }
             }
         }
@@ -311,6 +338,7 @@ struct PlaudAuthSheet: View {
         let curl = (curlOverride ?? trimmedCurl).trimmingCharacters(in: .whitespacesAndNewlines)
         guard !curl.isEmpty, !isBusy else { return }
         clipboardWatching = false
+        importError = nil
         authenticating = true
         Task {
             let ok = await store.refreshAuthCredentials(curlText: curl)
@@ -319,6 +347,11 @@ struct PlaudAuthSheet: View {
                 if ok {
                     curlText = ""
                     onDone()
+                } else {
+                    let message = store.lastCommandError
+                        ?? "인증 갱신에 실패했습니다. Plaud cURL을 다시 복사해 주세요."
+                    store.lastCommandError = nil
+                    importError = message
                 }
             }
         }

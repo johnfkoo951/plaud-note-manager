@@ -28,6 +28,8 @@ data/
 # defense-in-depth: credential backups, OMC state, SQLite sidecars
 .env.bak-*
 .omc/
+.omo/
 *.db-wal
 *.db-shm
 **/.omc/
+**/.omo/
