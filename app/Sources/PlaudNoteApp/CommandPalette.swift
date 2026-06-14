@@ -432,6 +432,16 @@ struct CommandPaletteOverlay: View {
             return true
         })
 
+        items.append(PaletteAction(
+            id: "classify-undo",
+            title: "Undo Auto-Classify",
+            systemImage: "arrow.uturn.backward",
+            isEnabled: store.lastClassifyApply != nil && !store.classifyRunning
+        ) {
+            Task { await store.classifyUndo() }
+            return true
+        })
+
         // Navigation: jump the sidebar selection.
         items.append(navItem(id: "nav-all", title: "Go to: All Files",
                              systemImage: "tray.full", target: .allFiles))

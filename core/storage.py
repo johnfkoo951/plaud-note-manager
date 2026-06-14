@@ -524,6 +524,27 @@ class Storage:
                 "SELECT * FROM note_metadata WHERE file_id = ?", (file_id,)
             ).fetchone()
 
+    def tag_counts(self, *, include_trash: bool = False) -> list[tuple[str, int]]:
+        """All tags with how many (non-trash) files carry each, busiest first."""
+        trash = "" if include_trash else "JOIN files f ON f.id = nt.file_id AND f.is_trash = 0"
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT nt.tag AS tag, COUNT(DISTINCT nt.file_id) AS n
+                  FROM note_tags nt
+                  {trash}
+                 GROUP BY nt.tag
+                 ORDER BY n DESC, nt.tag COLLATE NOCASE
+                """
+            ).fetchall()
+        return [(r["tag"], int(r["n"])) for r in rows]
+
+    def file_ids_with_tag(self, tag: str) -> set[str]:
+        with self._connect() as conn:
+            return {
+                r[0] for r in conn.execute("SELECT file_id FROM note_tags WHERE tag = ?", (tag,))
+            }
+
     def list_note_tags(self, file_id: str) -> list[sqlite3.Row]:
         with self._connect() as conn:
             return list(

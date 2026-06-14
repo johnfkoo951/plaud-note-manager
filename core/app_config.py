@@ -48,6 +48,8 @@ DEFAULT_CONFIG: dict = {
     # Which model runs auto-classify / metadata-generate (its backend — cli
     # subscription vs api key — follows the per-model "backends" entry above).
     "classify_model": "claude",
+    # Tags the user pinned to the top of the app's Tags sidebar.
+    "pinned_tags": [],
 }
 
 
@@ -124,6 +126,32 @@ def set_classify_model(model: str) -> None:
     cfg = load()
     cfg["classify_model"] = model
     save(cfg)
+
+
+def pinned_tags() -> list[str]:
+    raw = load().get("pinned_tags") or []
+    return [t for t in raw if isinstance(t, str)]
+
+
+def set_pinned_tags(tags: list[str]) -> None:
+    cfg = load()
+    # De-dupe, preserve order.
+    seen: set[str] = set()
+    cleaned = [t for t in tags if t and not (t in seen or seen.add(t))]
+    cfg["pinned_tags"] = cleaned
+    save(cfg)
+
+
+def toggle_pinned_tag(tag: str) -> bool:
+    """Pin/unpin one tag. Returns True if now pinned."""
+    tags = pinned_tags()
+    if tag in tags:
+        tags.remove(tag)
+        set_pinned_tags(tags)
+        return False
+    tags.append(tag)
+    set_pinned_tags(tags)
+    return True
 
 
 def set_backend(model: str, backend: Backend) -> None:

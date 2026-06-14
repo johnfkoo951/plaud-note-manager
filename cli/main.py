@@ -24,6 +24,7 @@ from core.client import PlaudAPIError
 from core.config import ConfigError
 from core.model_registry import PROVIDER_LABELS
 from core.storage import DEFAULT_DB, Storage
+from core.tags import normalize_tags
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
 console = Console()
@@ -1014,6 +1015,49 @@ def tag_add(
     console.print("[green]added[/green] " + ", ".join(f"#{tag}" for tag in added))
 
 
+@safe_command(name="tags-all")
+def tags_all(json_out: bool = typer.Option(False, "--json")) -> None:
+    """List every tag with its file count, busiest first. Pinned tags marked."""
+    storage = Storage()
+    counts = storage.tag_counts()
+    pinned = set(app_config.pinned_tags())
+    if json_out:
+        _emit_json(
+            {
+                "pinned": app_config.pinned_tags(),
+                "tags": [{"tag": t, "count": n, "pinned": t in pinned} for t, n in counts],
+            }
+        )
+        return
+    if not counts:
+        console.print("[yellow]no tags yet[/yellow]")
+        return
+    for tag, n in counts:
+        mark = "📌 " if tag in pinned else "   "
+        console.print(f"{mark}#{tag}  [dim]{n}[/dim]")
+
+
+@safe_command(name="tag-pin")
+def tag_pin(
+    tag: str,
+    off: bool = typer.Option(False, "--off", help="Unpin instead of pin."),
+) -> None:
+    """Pin (or --off to unpin) a tag to the top of the app's Tags sidebar."""
+    normalized = normalize_tags([tag])
+    if not normalized:
+        raise typer.BadParameter(f"invalid tag: {tag}")
+    clean = normalized[0]
+    current = app_config.pinned_tags()
+    if off:
+        app_config.set_pinned_tags([t for t in current if t != clean])
+        console.print(f"[green]unpinned[/green] #{clean}")
+    elif clean not in current:
+        app_config.set_pinned_tags([*current, clean])
+        console.print(f"[green]pinned[/green] #{clean}")
+    else:
+        console.print(f"[dim]already pinned[/dim] #{clean}")
+
+
 @safe_command(name="tag-remove")
 def tag_remove(
     file_id: str,
@@ -1087,6 +1131,9 @@ def classify_recordings(
     limit: int = typer.Option(0, help="Max files to inspect. 0 = no limit."),
     min_confidence: float = typer.Option(0.5, help="Minimum confidence required for --apply."),
     json_output: bool = typer.Option(False, "--json", help="Print JSON rows."),
+    only: list[str] = typer.Option(
+        None, "--only", help="Restrict to these file ids (repeatable). Used by the app preview."
+    ),
 ) -> None:
     """Classify recordings into the Plaud folder taxonomy."""
     import json as _json
@@ -1097,7 +1144,11 @@ def classify_recordings(
         include_filed=include_filed,
         limit=limit or None,
     )
+    if only:
+        wanted = set(only)
+        rows = [r for r in rows if r["id"] in wanted]
     results = []
+    moved_manifest: list[dict[str, str]] = []
     for row in rows:
         snapshot = build_recording_snapshot(storage, row["id"])
         classification = classify_snapshot(snapshot)
@@ -1133,6 +1184,16 @@ def classify_recordings(
                     source="auto",
                     now=now,
                 )
+                # All classify sources are Unfiled by default, so the exact
+                # undo of a move is "put it back to Unfiled".
+                moved_manifest.append(
+                    {
+                        "file_id": row["id"],
+                        "folder_id": moved_to,
+                        "folder_name": classification.folder_name,
+                        "title": snapshot["title"],
+                    }
+                )
             except Exception as exc:
                 error = str(exc)
                 console.print(f"[yellow]classify apply skipped[/yellow] {row['id']}: {error}")
@@ -1149,6 +1210,16 @@ def classify_recordings(
         }
         results.append(payload)
 
+    # Persist a manifest of this run's moves so the app (and `classify-undo`)
+    # can revert exactly what was just applied.
+    if apply and moved_manifest:
+        from core.paths import DATA_DIR
+
+        manifest = {"at": int(time.time()), "moved": moved_manifest}
+        (DATA_DIR / "last_classify.json").write_text(
+            _json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
     if json_output:
         console.print_json(json=_json.dumps(results, ensure_ascii=False))
         return
@@ -1160,6 +1231,48 @@ def classify_recordings(
             f"{item['confidence']:.2f}  [bold]{item['folder_name']}[/bold]{action}  "
             f"[dim]{item['title']}[/dim]{error}"
         )
+    if apply:
+        console.print(
+            f"[green]moved {len(moved_manifest)}[/green] — undo with `plaud classify-undo`"
+        )
+
+
+@safe_command(name="classify-undo")
+def classify_undo(
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Revert the most recent `classify --apply` — put those files back to Unfiled."""
+    import json as _json
+    from core.paths import DATA_DIR
+
+    manifest_path = DATA_DIR / "last_classify.json"
+    if not manifest_path.exists():
+        msg = "no classify run to undo (no manifest found)"
+        if json_out:
+            _emit_json({"status": "nothing", "detail": msg, "reverted": 0})
+        else:
+            console.print(f"[yellow]{msg}[/yellow]")
+        return
+    manifest = _json.loads(manifest_path.read_text(encoding="utf-8"))
+    moved = manifest.get("moved", [])
+    cfg = load_config()
+    storage = Storage()
+    reverted = 0
+    with PlaudClient(cfg) as client:
+        for entry in moved:
+            fid = entry["file_id"]
+            try:
+                client.set_file_folders(fid, [])  # back to Unfiled
+                storage.set_file_folders(fid, [])
+                storage.update_note_folder(fid, folder_id=None, folder_name=None)
+                reverted += 1
+            except Exception as exc:  # noqa: BLE001 — report, keep going
+                console.print(f"[yellow]skip[/yellow] {fid}: {exc}")
+    manifest_path.unlink(missing_ok=True)
+    if json_out:
+        _emit_json({"status": "ok", "reverted": reverted})
+    else:
+        console.print(f"[green]reverted {reverted}[/green] files back to Unfiled")
 
 
 def move_to_named_folder(storage: Storage, file_id: str, folder_name: str) -> str:

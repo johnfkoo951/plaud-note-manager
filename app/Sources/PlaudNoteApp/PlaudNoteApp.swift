@@ -28,9 +28,9 @@ struct PlaudNoteApp: App {
             ContentView()
                 .frame(minWidth: 1280, minHeight: 800)
         }
-        // Wider-detail default: enough room for the detail tab row and the
-        // Work Sidebar without squishing.
-        .defaultSize(width: 1480, height: 920)
+        // Wide default matching the reference layout — sidebar + list +
+        // detail + Work Sidebar all comfortable (~1.63:1 aspect).
+        .defaultSize(width: 1920, height: 1180)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appSettings) {

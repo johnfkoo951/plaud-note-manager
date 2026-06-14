@@ -1,6 +1,6 @@
 [project]
 name = "plaud-note-manager"
-version = "0.3.0"
+version = "0.4.0"
 description = "Plaud Cloud sync, management, and processing workspace"
 requires-python = ">=3.11"
 dependencies = [

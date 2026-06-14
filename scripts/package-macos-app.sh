@@ -8,6 +8,10 @@ IDENTIFIER="com.cmdspace.PlaudNoteManager"
 # Single source of truth: pyproject.toml [project] version.
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT_DIR/pyproject.toml" | head -1)"
 VERSION="${VERSION:-0.0.0}"
+# Build number = total git commit count (monotonic, lets the user tell which
+# upgrade they are running). Falls back to a timestamp outside a git checkout.
+BUILD="$(git -C "$ROOT_DIR" rev-list --count HEAD 2>/dev/null || date +%y%m%d%H%M)"
+GIT_SHA="$(git -C "$ROOT_DIR" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 ICON_SOURCE="${ICON_SOURCE:-$ROOT_DIR/app/Resources/AppIcon.png}"
 BUILD_CONFIG="${BUILD_CONFIG:-release}"
 DIST_DIR="$ROOT_DIR/dist"
@@ -66,9 +70,11 @@ cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <key>CFBundleIdentifier</key>
   <string>$IDENTIFIER</string>
   <key>CFBundleVersion</key>
-  <string>$VERSION</string>
+  <string>$BUILD</string>
   <key>CFBundleShortVersionString</key>
   <string>$VERSION</string>
+  <key>PlaudGitSHA</key>
+  <string>$GIT_SHA</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleIconFile</key>
