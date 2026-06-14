@@ -977,6 +977,18 @@ private struct SettingsSheet: View {
 
 // MARK: - Sidebar
 
+/// File-list row density. Compact keeps every recording on two tight lines;
+/// comfortable spreads it over three with a larger title for easier scanning.
+enum RowDensity: String, CaseIterable, Identifiable {
+    case compact
+    case comfortable
+    var id: String { rawValue }
+    var title: String { self == .compact ? "2줄 (조밀)" : "3줄 (여유)" }
+    var symbol: String {
+        self == .compact ? "list.dash" : "list.bullet.below.rectangle"
+    }
+}
+
 /// Plaud's folder palette (matches the web app's Edit folder swatches).
 let PLAUD_COLORS: [String] = [
     "#4f4f4f", "#4c8eff", "#5dc967", "#f5a93c",
@@ -1425,6 +1437,9 @@ private struct FileListView: View {
     /// Persisted search scope: false = 파일명, true = 전체내용. Mirrored into the
     /// store so the filter/debounce logic can read it off the main actor.
     @AppStorage("searchScope") private var searchScopeContent: Bool = false
+    /// Row density — compact (2-line) or comfortable (3-line, larger title).
+    @AppStorage("rowDensity") private var rowDensityRaw: String = RowDensity.compact.rawValue
+    private var rowDensity: RowDensity { RowDensity(rawValue: rowDensityRaw) ?? .compact }
 
     /// Trimmed query for the empty-state check.
     private var trimmedQuery: String {
@@ -1485,6 +1500,23 @@ private struct FileListView: View {
                         .controlSize(.small)
                         .frame(width: 14, height: 14)
                 }
+
+                // Row density picker (2줄 ⇄ 3줄) — choose list compactness.
+                Menu {
+                    Picker("행 밀도", selection: $rowDensityRaw) {
+                        ForEach(RowDensity.allCases) { d in
+                            Label(d.title, systemImage: d.symbol).tag(d.rawValue)
+                        }
+                    }
+                    .pickerStyle(.inline)
+                } label: {
+                    Image(systemName: rowDensity.symbol)
+                        .foregroundStyle(.secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("행 밀도: 2줄(조밀) 또는 3줄(여유)")
             }
             .padding(.horizontal, AppUI.spacingM)
             .padding(.vertical, 8)
@@ -1501,6 +1533,7 @@ private struct FileListView: View {
                 ForEach(store.files) { file in
                     FileRow(file: file,
                             isSelected: store.selectedID == file.id,
+                            density: rowDensity,
                             snippet: searchScopeContent
                                 ? store.contentSnippets[file.id] : nil,
                             onToggleStar: { store.toggleStar(file.id) })
@@ -1865,6 +1898,8 @@ private struct MiniMetricCard: View {
 private struct FileRow: View {
     let file: PlaudFileVM
     let isSelected: Bool
+    /// 2-line (compact) or 3-line (comfortable) layout.
+    var density: RowDensity = .compact
     /// FTS snippet (with « » around the matched span) shown only in
     /// content-search mode; nil otherwise.
     var snippet: String? = nil
@@ -1872,6 +1907,8 @@ private struct FileRow: View {
     /// so row selection elsewhere is untouched).
     let onToggleStar: () -> Void
     @State private var hovering = false
+
+    private var comfortable: Bool { density == .comfortable }
 
     /// Leading inset for line 2 so it aligns with the title after the
     /// 11pt state-dot slot + 8pt spacing.
@@ -1881,12 +1918,12 @@ private struct FileRow: View {
     static let starGold = Color(red: 0.95, green: 0.72, blue: 0.25)
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        VStack(alignment: .leading, spacing: comfortable ? 4 : 3) {
             HStack(spacing: 8) {
                 stateDot
                 Text(file.filename ?? "(untitled)")
-                    .font(.system(size: 13.5, weight: .semibold))
-                    .lineLimit(1)
+                    .font(.system(size: comfortable ? 15 : 13.5, weight: .semibold))
+                    .lineLimit(comfortable ? 2 : 1)
                     .truncationMode(.tail)
                     .foregroundStyle(Color.primary)
                 Spacer(minLength: 8)
@@ -1898,13 +1935,20 @@ private struct FileRow: View {
                         .help(formatRecordingTimestampFull(date))
                 }
             }
-            metaLine
+            if comfortable {
+                // 3-line: structural metadata on line 2, tags on their own line 3.
+                structuralLine
+                tagsLine
+            } else {
+                // 2-line: everything packed on a single metadata line.
+                metaLine
+            }
             if let snippet, !snippet.isEmpty {
                 snippetLine(snippet)
             }
         }
         .padding(.horizontal, AppUI.spacingM)
-        .padding(.vertical, 7)
+        .padding(.vertical, comfortable ? 10 : 7)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .background(rowFill)
@@ -1993,6 +2037,43 @@ private struct FileRow: View {
                     usageChip(usage)
                 }
                 ForEach(Array(file.primaryTags.prefix(2)), id: \.self) { tag in
+                    tagChip(tagLabel(tag))
+                }
+            }
+            .padding(.leading, Self.metaIndent)
+            .lineLimit(1)
+        }
+    }
+
+    /// 3-line mode, line 2: structural metadata only (duration · folder · status).
+    @ViewBuilder
+    private var structuralLine: some View {
+        if file.durationMs != nil || folderLabel != nil || meaningfulUsage != nil {
+            HStack(spacing: 6) {
+                if file.durationMs != nil {
+                    Text(formatRecordingDurationFull(file.durationMs))
+                        .font(Self.metaFont)
+                        .foregroundStyle(.secondary)
+                }
+                if let folderLabel {
+                    if file.durationMs != nil { dotSeparator }
+                    folderChip(folderLabel)
+                }
+                if let usage = meaningfulUsage {
+                    usageChip(usage)
+                }
+            }
+            .padding(.leading, Self.metaIndent)
+            .lineLimit(1)
+        }
+    }
+
+    /// 3-line mode, line 3: tag chips (room for 3, vs 2 in compact mode).
+    @ViewBuilder
+    private var tagsLine: some View {
+        if !file.primaryTags.isEmpty {
+            HStack(spacing: 5) {
+                ForEach(Array(file.primaryTags.prefix(3)), id: \.self) { tag in
                     tagChip(tagLabel(tag))
                 }
             }
