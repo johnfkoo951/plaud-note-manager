@@ -1700,21 +1700,23 @@ private struct FileRow: View {
     }
 
     /// Pipeline + review state folded into the dot color (replaces the loud
-    /// "Generated" badge): 녹음→전송→(Plaud)전사·분석→앱 리뷰.
+    /// "Generated" badge): 녹음→전송→(Plaud)전사→앱 리뷰. "전사됨" = the recording's
+    /// detail (incl. transcript) is cached locally — a transcript-without-Plaud-
+    /// summary file still counts as analyzed (that was the red-when-cached bug).
     private var dotColor: Color {
-        if !file.hasSummary { return Self.pendingRed }   // 전송됨, 분석 대기
-        if file.seenAt == nil { return Self.unreadGreen } // 분석 완료, 안 읽음
+        if !file.hasContent { return Self.pendingRed }    // 데이터 미수신
+        if file.seenAt == nil { return Self.unreadGreen } // 전사 완료, 안 읽음
         return Color.gray.opacity(0.34)                   // 읽음
     }
 
     private var dotSize: CGFloat {
         // Seen (done) is intentionally smaller/quieter than the active states.
-        (file.hasSummary && file.seenAt != nil) ? 5 : 7
+        (file.hasContent && file.seenAt != nil) ? 5 : 7
     }
 
     private var dotHelp: String {
-        if !file.hasSummary { return "전송됨 · 분석 대기 (Plaud 요약 없음)" }
-        if file.seenAt == nil { return "분석 완료 · 아직 안 읽음" }
+        if !file.hasContent { return "데이터 미수신 · 클릭하면 Plaud에서 받아옴" }
+        if file.seenAt == nil { return "전사 완료 · 아직 안 읽음" }
         return "읽음 (리뷰 완료)"
     }
 
