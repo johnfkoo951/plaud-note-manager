@@ -68,6 +68,39 @@ private func formatRecordingDurationMs(_ ms: Double?) -> String {
     return "\(s)s"
 }
 
+/// Recording start as a compact, locale-aware "Jun 14 · 12:20" for tiles.
+private func formatRecordingStart(_ date: Date?) -> String {
+    guard let date else { return "—" }
+    let day = date.formatted(.dateTime.month(.abbreviated).day())
+    let time = date.formatted(.dateTime.hour().minute())
+    return "\(day) · \(time)"
+}
+
+/// Human-friendly relative age, e.g. "오늘", "어제", "3일 전", "2주 전".
+private func relativeAge(_ date: Date?, now: Date = Date()) -> String? {
+    guard let date else { return nil }
+    let cal = Calendar.current
+    if cal.isDateInToday(date) { return "오늘" }
+    if cal.isDateInYesterday(date) { return "어제" }
+    let days = cal.dateComponents([.day], from: cal.startOfDay(for: date),
+                                  to: cal.startOfDay(for: now)).day ?? 0
+    if days < 0 { return nil }
+    if days < 7 { return "\(days)일 전" }
+    if days < 30 { return "\(days / 7)주 전" }
+    if days < 365 { return "\(days / 30)개월 전" }
+    return "\(days / 365)년 전"
+}
+
+/// Full, readable recording start for the header caption — weekday included.
+private func formatRecordingStartLong(_ date: Date?) -> String? {
+    guard let date else { return nil }
+    let base = date.formatted(
+        .dateTime.year().month(.abbreviated).day().weekday(.abbreviated).hour().minute()
+    )
+    if let age = relativeAge(date) { return "\(base) · \(age)" }
+    return base
+}
+
 @MainActor
 func promptForFilename(current: String) -> String? {
     let alert = NSAlert()
@@ -2015,6 +2048,13 @@ private struct DetailMetricStrip: View {
     var body: some View {
         HStack(spacing: 7) {
             MiniMetricCard(
+                label: "Recorded",
+                value: formatRecordingStart(file.createdAt),
+                systemName: "calendar",
+                color: AnuPalette.flamingo
+            )
+            .help(recordedHelp)
+            MiniMetricCard(
                 label: "Duration",
                 value: formatRecordingDurationMs(file.durationMs),
                 systemName: "timer",
@@ -2039,6 +2079,10 @@ private struct DetailMetricStrip: View {
                 color: statusColor
             )
         }
+    }
+
+    private var recordedHelp: String {
+        formatRecordingStartLong(file.createdAt) ?? "Recording start time unknown"
     }
 
     private var folderValue: String {
@@ -2249,8 +2293,23 @@ private struct DetailView: View {
                         .help("Open in Plaud Web (web.plaud.ai/file/\(file.id))")
                     }
                     .onHover { titleHovered = $0 }
+                    // Recording start time — the most important context for a
+                    // session, shown prominently right under the title.
+                    if let recorded = formatRecordingStartLong(file.createdAt) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "calendar.badge.clock")
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(AnuPalette.flamingo)
+                            Text(recorded)
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                        }
+                        .help("녹음 시작 시각")
+                    }
                     HStack(spacing: 8) {
                         Text(file.id).font(.caption2).foregroundStyle(.tertiary)
+                            .textSelection(.enabled)
                         if let kw = store.content?.keywords, !kw.isEmpty {
                             HStack(spacing: 4) {
                                 ForEach(Array(kw.prefix(5)), id: \.self) { keyword in
