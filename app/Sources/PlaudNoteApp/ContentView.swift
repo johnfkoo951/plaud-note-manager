@@ -1935,14 +1935,10 @@ private struct FileRow: View {
                         .help(formatRecordingTimestampFull(date))
                 }
             }
-            if comfortable {
-                // 3-line: structural metadata on line 2, tags on their own line 3.
-                structuralLine
-                tagsLine
-            } else {
-                // 2-line: everything packed on a single metadata line.
-                metaLine
-            }
+            // One packed metadata line in BOTH modes — comfortable just lets the
+            // title wrap to 2 lines and uses a larger font, so a row is at most
+            // 3 lines (title×2 + meta) instead of ballooning to 4.
+            metaLine
             if let snippet, !snippet.isEmpty {
                 snippetLine(snippet)
             }
@@ -2036,44 +2032,7 @@ private struct FileRow: View {
                 if let usage = meaningfulUsage {
                     usageChip(usage)
                 }
-                ForEach(Array(file.primaryTags.prefix(2)), id: \.self) { tag in
-                    tagChip(tagLabel(tag))
-                }
-            }
-            .padding(.leading, Self.metaIndent)
-            .lineLimit(1)
-        }
-    }
-
-    /// 3-line mode, line 2: structural metadata only (duration · folder · status).
-    @ViewBuilder
-    private var structuralLine: some View {
-        if file.durationMs != nil || folderLabel != nil || meaningfulUsage != nil {
-            HStack(spacing: 6) {
-                if file.durationMs != nil {
-                    Text(formatRecordingDurationFull(file.durationMs))
-                        .font(Self.metaFont)
-                        .foregroundStyle(.secondary)
-                }
-                if let folderLabel {
-                    if file.durationMs != nil { dotSeparator }
-                    folderChip(folderLabel)
-                }
-                if let usage = meaningfulUsage {
-                    usageChip(usage)
-                }
-            }
-            .padding(.leading, Self.metaIndent)
-            .lineLimit(1)
-        }
-    }
-
-    /// 3-line mode, line 3: tag chips (room for 3, vs 2 in compact mode).
-    @ViewBuilder
-    private var tagsLine: some View {
-        if !file.primaryTags.isEmpty {
-            HStack(spacing: 5) {
-                ForEach(Array(file.primaryTags.prefix(3)), id: \.self) { tag in
+                ForEach(Array(file.primaryTags.prefix(comfortable ? 3 : 2)), id: \.self) { tag in
                     tagChip(tagLabel(tag))
                 }
             }
