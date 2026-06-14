@@ -1237,6 +1237,46 @@ def classify_recordings(
         )
 
 
+@safe_command(name="search")
+def search_cmd(
+    query: str = typer.Argument(..., help="Free text — matches title, transcript, summary."),
+    limit: int = typer.Option(50, "--limit"),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Full-content search across cached recordings (FTS5, Korean substring OK)."""
+    storage = Storage()
+    hits = storage.search_recordings(query, limit=limit)
+    if json_out:
+        out = []
+        for h in hits:
+            row = storage.get_file_row(h["file_id"])
+            out.append(
+                {
+                    "file_id": h["file_id"],
+                    "filename": (row["filename"] if row else None),
+                    "snippet": h["snippet"],
+                }
+            )
+        _emit_json({"query": query, "count": len(out), "hits": out})
+        return
+    if not hits:
+        console.print(f"[yellow]no matches[/yellow] for {query!r}")
+        return
+    for h in hits:
+        row = storage.get_file_row(h["file_id"])
+        name = (row["filename"] if row else None) or h["file_id"]
+        console.print(f"[bold]{name}[/bold]  [dim]{h['file_id']}[/dim]")
+        if h["snippet"]:
+            console.print(f"  {h['snippet']}")
+
+
+@safe_command(name="search-reindex")
+def search_reindex() -> None:
+    """Rebuild the full-content search index from cached recordings."""
+    n = Storage().rebuild_search_index()
+    console.print(f"[green]indexed {n}[/green] recordings for search")
+
+
 @safe_command(name="classify-undo")
 def classify_undo(
     json_out: bool = typer.Option(False, "--json"),

@@ -119,6 +119,23 @@ final class FileStore: ObservableObject {
     @Published var cacheStatus: (total: Int, cached: Int) = (0, 0)
     @Published var sidebar: SidebarItem = .allFiles
     @Published var search: String = ""
+    /// Search scope: filename substring (fast, local) vs. full content
+    /// (FTS5 via `plaud search`). Persisted by the UI in
+    /// @AppStorage("searchScope") and mirrored here on change.
+    @Published var contentSearchScope: Bool = false
+    /// FTS hit file ids in RELEVANCE order (best match first). Empty when not
+    /// in content-search mode or the query is blank. Drives both the filter
+    /// (which rows are visible) and the order (rank, not date).
+    @Published var contentSearchHits: [String] = []
+    /// file_id -> snippet (with « » around the matched span) for the matched
+    /// rows. Only populated in content-search mode.
+    @Published var contentSnippets: [String: String] = [:]
+    /// True while a content search subprocess is in flight (drives the field
+    /// spinner).
+    @Published var contentSearchRunning: Bool = false
+    /// The query the current `contentSearchHits` correspond to — used by the
+    /// empty-state copy so it shows the term that returned nothing.
+    @Published var contentSearchQuery: String = ""
     @Published var selectedID: String?
     @Published var content: FileContentVM?
     @Published var noteMetadata: NoteMetadataVM?
@@ -144,6 +161,11 @@ final class FileStore: ObservableObject {
     /// Generation counter to coalesce bursts of reload requests: only the
     /// latest off-main fetch is allowed to publish its results.
     private var reloadGeneration: UInt64 = 0
+    /// Generation token guarding content search: a slow earlier query can't
+    /// overwrite a newer one's results.
+    private var contentSearchGeneration: UInt64 = 0
+    /// Pending debounce task for content search (cancelled on each keystroke).
+    private var contentSearchDebounce: Task<Void, Never>?
 
     var selectedFile: PlaudFileVM? { files.first { $0.id == selectedID } }
 
@@ -257,7 +279,20 @@ final class FileStore: ObservableObject {
         $search
             .removeDuplicates()
             .sink { [weak self] newSearch in
-                self?.applyFilter(sidebar: self?.sidebar ?? .allFiles, search: newSearch)
+                guard let self else { return }
+                self.applyFilter(sidebar: self.sidebar, search: newSearch)
+                self.onSearchInputsChanged(search: newSearch, scope: self.contentSearchScope)
+            }
+            .store(in: &cancellables)
+
+        // Flipping the scope toggle re-runs (or tears down) content search and
+        // re-derives the visible list.
+        $contentSearchScope
+            .removeDuplicates()
+            .sink { [weak self] newScope in
+                guard let self else { return }
+                self.onSearchInputsChanged(search: self.search, scope: newScope)
+                self.applyFilter(sidebar: self.sidebar, search: self.search)
             }
             .store(in: &cancellables)
 
@@ -381,23 +416,31 @@ final class FileStore: ObservableObject {
     func applyFilter(sidebar: SidebarItem, search: String) {
         let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines)
         let needle = trimmed.lowercased()
-        let result = masterFiles.compactMap { item -> PlaudFileVM? in
-            let matchesSidebar: Bool
-            switch sidebar {
-            case .allFiles:
-                matchesSidebar = !item.file.isTrash
-            case .unfiled:
-                matchesSidebar = !item.file.isTrash && item.folderIDs.isEmpty
-            case .starred:
-                matchesSidebar = !item.file.isTrash && item.file.starred
-            case .trash:
-                matchesSidebar = item.file.isTrash
-            case .folder(let id):
-                matchesSidebar = !item.file.isTrash && item.folderIDs.contains(id)
-            case .tag(let tag):
-                matchesSidebar = !item.file.isTrash && item.file.allTags.contains(tag)
+
+        // Content-search mode: when scope = 전체내용 and there's a non-empty
+        // query, the visible set + ORDER come from the FTS hit list (relevance
+        // ranked) — NOT the filename substring + date sort. The sidebar
+        // selection still narrows the result (search-within-selection).
+        let contentMode = contentSearchScope && !trimmed.isEmpty
+        if contentMode {
+            // Order by FTS relevance (hit order), narrowing within the current
+            // sidebar selection. Files not in the local master set (uncached /
+            // unindexed) are skipped — they can't be shown.
+            let byID = Dictionary(masterFiles.map { ($0.id, $0) },
+                                  uniquingKeysWith: { a, _ in a })
+            files = contentSearchHits.compactMap { id -> PlaudFileVM? in
+                guard let item = byID[id],
+                      matchesSidebar(item.file, folderIDs: item.folderIDs,
+                                     sidebar: sidebar)
+                else { return nil }
+                return item.file
             }
-            guard matchesSidebar else { return nil }
+            return
+        }
+
+        let result = masterFiles.compactMap { item -> PlaudFileVM? in
+            guard matchesSidebar(item.file, folderIDs: item.folderIDs,
+                                 sidebar: sidebar) else { return nil }
             if !needle.isEmpty {
                 guard (item.file.filename ?? "").lowercased().contains(needle)
                 else { return nil }
@@ -405,6 +448,109 @@ final class FileStore: ObservableObject {
             return item.file
         }
         files = result
+    }
+
+    /// Whether a file matches the sidebar selection. Shared by the normal and
+    /// content-search filter paths.
+    private func matchesSidebar(_ file: PlaudFileVM, folderIDs: Set<String>,
+                                sidebar: SidebarItem) -> Bool {
+        switch sidebar {
+        case .allFiles:
+            return !file.isTrash
+        case .unfiled:
+            return !file.isTrash && folderIDs.isEmpty
+        case .starred:
+            return !file.isTrash && file.starred
+        case .trash:
+            return file.isTrash
+        case .folder(let id):
+            return !file.isTrash && folderIDs.contains(id)
+        case .tag(let tag):
+            return !file.isTrash && file.allTags.contains(tag)
+        case .tagPrefix(let prefix):
+            // Parent node: equal to the prefix OR a `prefix/...` descendant.
+            return !file.isTrash && file.allTags.contains {
+                $0 == prefix || $0.hasPrefix(prefix + "/")
+            }
+        }
+    }
+
+    /// One FTS hit decoded from `plaud search "<q>" --json`.
+    private struct ContentSearchHit: Decodable {
+        let fileID: String
+        let snippet: String?
+        enum CodingKeys: String, CodingKey {
+            case fileID = "file_id"
+            case snippet
+        }
+    }
+
+    private struct ContentSearchResponse: Decodable {
+        let hits: [ContentSearchHit]
+    }
+
+    /// React to a change in the search text OR the scope toggle. Filename mode
+    /// (or an empty query) tears down any content-search state and restores the
+    /// normal list immediately. Content mode debounces, then runs `plaud
+    /// search` off-main with a generation guard so stale responses are dropped.
+    private func onSearchInputsChanged(search: String, scope: Bool) {
+        contentSearchDebounce?.cancel()
+        let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard scope, !trimmed.isEmpty else {
+            // Filename mode or empty query: drop content state and re-derive.
+            contentSearchGeneration &+= 1  // invalidate any in-flight query
+            if !contentSearchHits.isEmpty || !contentSnippets.isEmpty
+                || contentSearchRunning || !contentSearchQuery.isEmpty {
+                contentSearchHits = []
+                contentSnippets = [:]
+                contentSearchQuery = ""
+                contentSearchRunning = false
+            }
+            applyFilter(sidebar: sidebar, search: search)
+            return
+        }
+
+        contentSearchRunning = true
+        contentSearchGeneration &+= 1
+        let generation = contentSearchGeneration
+        contentSearchDebounce = Task { [weak self] in
+            // Debounce ~250ms so we don't spawn a subprocess per keystroke.
+            try? await Task.sleep(nanoseconds: 250_000_000)
+            if Task.isCancelled { return }
+            await self?.runContentSearch(query: trimmed, generation: generation)
+        }
+    }
+
+    /// Execute `plaud search "<query>" --json`, decode the ranked hits, and —
+    /// if this is still the newest query — publish them and re-derive the list.
+    private func runContentSearch(query: String, generation: UInt64) async {
+        let output = await runPlaudOutput(
+            args: ["search", query, "--json"],
+            timeout: 15,
+            showError: false
+        )
+        // Drop stale responses: a newer keystroke/scope-change superseded us.
+        guard generation == contentSearchGeneration else { return }
+
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        var hits: [String] = []
+        var snippets: [String: String] = [:]
+        if let data = trimmed.data(using: .utf8), !data.isEmpty,
+           let decoded = try? JSONDecoder().decode(ContentSearchResponse.self, from: data) {
+            for hit in decoded.hits where !hit.fileID.isEmpty {
+                hits.append(hit.fileID)
+                if let snip = hit.snippet, !snip.isEmpty {
+                    snippets[hit.fileID] = snip
+                }
+            }
+        }
+
+        contentSearchHits = hits
+        contentSnippets = snippets
+        contentSearchQuery = query
+        contentSearchRunning = false
+        applyFilter(sidebar: sidebar, search: search)
     }
 
     func sync(showError: Bool = true) async {

@@ -213,6 +213,11 @@ enum SidebarItem: Hashable {
     case trash
     case folder(String)
     case tag(String)
+    /// Nested-tag PARENT node: matches every recording whose tag equals the
+    /// prefix OR starts with `prefix/` (e.g. selecting `AI` matches `AI`,
+    /// `AI/agent`, `AI/agent/tools`). Leaf clicks still use `.tag` for an
+    /// exact match.
+    case tagPrefix(String)
 }
 
 final class Database: @unchecked Sendable {
@@ -592,6 +597,11 @@ final class Database: @unchecked Sendable {
         case .tag(let tag):
             sql += " AND f.is_trash = 0 AND f.id IN (SELECT file_id FROM note_tags WHERE tag = ?)"
             args.append(tag)
+        case .tagPrefix(let prefix):
+            // Parent node: the bare tag OR any `prefix/...` descendant.
+            sql += " AND f.is_trash = 0 AND f.id IN (SELECT file_id FROM note_tags WHERE tag = ? OR tag LIKE ?)"
+            args.append(prefix)
+            args.append("\(prefix)/%")
         }
         if !search.isEmpty {
             sql += " AND f.filename LIKE ?"

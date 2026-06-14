@@ -983,6 +983,21 @@ let PLAUD_COLORS: [String] = [
     "#4fcfd0", "#ee6e72", "#b566f5",
 ]
 
+/// How the sidebar Tags section is ordered.
+private enum TagSortMode: String, CaseIterable {
+    case frequency  // count desc
+    case alphabetical  // A–Z, COLLATE NOCASE
+
+    var next: TagSortMode { self == .frequency ? .alphabetical : .frequency }
+    var symbolName: String {
+        self == .frequency ? "arrow.down.right.circle" : "textformat"
+    }
+    var help: String {
+        self == .frequency ? "정렬: 빈도순 (탭하여 가나다순으로)"
+                           : "정렬: 가나다순 (탭하여 빈도순으로)"
+    }
+}
+
 private struct SidebarView: View {
     @ObservedObject var store: FileStore
     @State private var editing: FolderVM?
@@ -992,6 +1007,15 @@ private struct SidebarView: View {
     /// subtle drop highlight on the targeted folder row.
     @State private var dropTargetID: String?
     @State private var unfiledTargeted: Bool = false
+    @AppStorage("tagSortMode") private var tagSortModeRaw: String =
+        TagSortMode.frequency.rawValue
+    @AppStorage("tagNestedView") private var tagNestedView: Bool = false
+    /// Collapsed parent prefixes in the nested tag tree (default: expanded).
+    @State private var collapsedTagParents: Set<String> = []
+
+    private var tagSortMode: TagSortMode {
+        TagSortMode(rawValue: tagSortModeRaw) ?? .frequency
+    }
 
     var body: some View {
         List(selection: Binding(
@@ -1077,14 +1101,45 @@ private struct SidebarView: View {
 
             if !store.tagCounts.isEmpty {
                 Section {
-                    ForEach(orderedTags, id: \.tag) { entry in
-                        tagRow(entry.tag, count: entry.count,
-                               pinned: store.pinnedTags.contains(entry.tag))
+                    // Pinned tags stay flat at the very top (no nesting).
+                    ForEach(pinnedTagEntries, id: \.tag) { entry in
+                        tagRow(entry.tag, count: entry.count, pinned: true)
+                    }
+                    if tagNestedView {
+                        ForEach(tagTree, id: \.id) { node in
+                            nestedTagRows(node)
+                        }
+                    } else {
+                        ForEach(unpinnedSortedTags, id: \.tag) { entry in
+                            tagRow(entry.tag, count: entry.count, pinned: false)
+                        }
                     }
                 } header: {
-                    Text("Tags")
-                        .font(AppUI.sectionFont)
-                        .padding(.vertical, 2)
+                    HStack(spacing: 6) {
+                        Text("Tags")
+                            .font(AppUI.sectionFont)
+                        Spacer()
+                        Button {
+                            tagSortModeRaw = tagSortMode.next.rawValue
+                        } label: {
+                            Image(systemName: tagSortMode.symbolName)
+                                .font(AppUI.sectionFont)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(tagSortMode.help)
+                        Button {
+                            tagNestedView.toggle()
+                        } label: {
+                            Image(systemName: tagNestedView
+                                  ? "list.bullet.indent" : "list.bullet")
+                                .font(AppUI.sectionFont)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(tagNestedView
+                              ? "중첩 보기 켜짐 (탭하여 평면 목록으로)"
+                              : "중첩 보기 꺼짐 (탭하여 parent/child 트리로)")
+                    }
+                    .padding(.vertical, 2)
                 }
             }
         }
@@ -1152,26 +1207,142 @@ private struct SidebarView: View {
         .tag(item)
     }
 
-    /// Pinned tags first (in config order), then the rest by count desc.
-    private var orderedTags: [(tag: String, count: Int)] {
+    /// Pinned tags in config order (each with its current count), shown flat at
+    /// the top of the section.
+    private var pinnedTagEntries: [(tag: String, count: Int)] {
         let counts = Dictionary(store.tagCounts.map { ($0.tag, $0.count) },
                                 uniquingKeysWith: { a, _ in a })
+        return store.pinnedTags.map { (tag: $0, count: counts[$0] ?? 0) }
+    }
+
+    /// Non-pinned tags, ordered by the active sort mode. The DB already returns
+    /// them count-desc / NOCASE-tie-broken, so frequency is the identity and
+    /// alphabetical is a NOCASE re-sort.
+    private var unpinnedSortedTags: [(tag: String, count: Int)] {
         let pinnedSet = Set(store.pinnedTags)
-        let pinned: [(tag: String, count: Int)] = store.pinnedTags.map {
-            (tag: $0, count: counts[$0] ?? 0)
-        }
         let rest = store.tagCounts.filter { !pinnedSet.contains($0.tag) }
-        return pinned + rest
+        switch tagSortMode {
+        case .frequency:
+            return rest
+        case .alphabetical:
+            return rest.sorted {
+                $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending
+            }
+        }
+    }
+
+    /// A node in the nested tag tree. A top-level segment (e.g. `AI`) with its
+    /// summed count (itself + all `AI/...` descendants) and the full child tag
+    /// strings under it. A tag with no `/` is a childless leaf at top level.
+    private struct TagNode {
+        let id: String          // top-level segment, also the parent prefix
+        let totalCount: Int     // self + descendants
+        let selfCount: Int      // exact-`id` tag count (0 if only descendants)
+        /// Full child tags (e.g. `AI/agent`), sorted per the active mode.
+        let children: [(tag: String, count: Int)]
+        var hasChildren: Bool { !children.isEmpty }
+    }
+
+    /// Build the parent/child tree from the non-pinned tags, ordered by the
+    /// active sort mode at both levels.
+    private var tagTree: [TagNode] {
+        let entries = unpinnedSortedTags
+        // Group by the first `/`-segment, preserving the (already-sorted)
+        // order of first appearance for parents.
+        var order: [String] = []
+        var groups: [String: [(tag: String, count: Int)]] = [:]
+        for entry in entries {
+            let parent = entry.tag.split(separator: "/", maxSplits: 1)
+                .first.map(String.init) ?? entry.tag
+            if groups[parent] == nil { order.append(parent) }
+            groups[parent, default: []].append(entry)
+        }
+
+        return order.map { parent in
+            let members = groups[parent] ?? []
+            let total = members.reduce(0) { $0 + $1.count }
+            let selfCount = members.first { $0.tag == parent }?.count ?? 0
+            // Children are every member that isn't the bare parent tag.
+            var children = members.filter { $0.tag != parent }
+            if tagSortMode == .alphabetical {
+                children.sort {
+                    $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending
+                }
+            }  // frequency: members already came in count-desc order
+            return TagNode(id: parent, totalCount: total, selfCount: selfCount,
+                           children: children)
+        }
+    }
+
+    /// Render one parent node and (when expanded) its children.
+    @ViewBuilder
+    private func nestedTagRows(_ node: TagNode) -> some View {
+        if node.hasChildren {
+            let collapsed = collapsedTagParents.contains(node.id)
+            parentTagRow(node, collapsed: collapsed)
+            if !collapsed {
+                ForEach(node.children, id: \.tag) { child in
+                    tagRow(child.tag, count: child.count, pinned: false,
+                           indent: 1, displayName: leafSegment(child.tag))
+                }
+            }
+        } else {
+            // Childless top-level tag: a plain leaf (exact match).
+            tagRow(node.id, count: node.totalCount, pinned: false)
+        }
+    }
+
+    /// A parent row: disclosure triangle + summed count, selecting the prefix
+    /// filter (`.tagPrefix`). The triangle toggles expand/collapse.
+    @ViewBuilder
+    private func parentTagRow(_ node: TagNode, collapsed: Bool) -> some View {
+        HStack(spacing: 4) {
+            Button {
+                if collapsed { collapsedTagParents.remove(node.id) }
+                else { collapsedTagParents.insert(node.id) }
+            } label: {
+                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 12)
+            }
+            .buttonStyle(.plain)
+            Image(systemName: "tag")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(Color.secondary)
+                .frame(width: 16)
+            Text("#\(node.id)")
+                .font(AppUI.rowTitleFont)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+            Text("\(node.totalCount)")
+                .font(AppUI.metaFont)
+                .foregroundStyle(.tertiary)
+                .frame(width: 34, alignment: .trailing)
+        }
+        .padding(.vertical, 2)
+        .tag(SidebarItem.tagPrefix(node.id))
+    }
+
+    /// Last `/`-segment of a tag, used as the indented child label.
+    private func leafSegment(_ tag: String) -> String {
+        tag.split(separator: "/").last.map(String.init) ?? tag
     }
 
     @ViewBuilder
-    private func tagRow(_ tag: String, count: Int, pinned: Bool) -> some View {
+    private func tagRow(_ tag: String, count: Int, pinned: Bool,
+                        indent: Int = 0, displayName: String? = nil) -> some View {
         HStack {
+            if indent > 0 {
+                // Align the child label under the parent's tag glyph.
+                Spacer().frame(width: CGFloat(indent) * 16 + 12)
+            }
             Image(systemName: pinned ? "pin.fill" : "tag")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(pinned ? FileRow.starGold : Color.secondary)
                 .frame(width: 18)
-            Text("#\(tag)")
+            Text("#\(displayName ?? tag)")
                 .font(AppUI.rowTitleFont)
                 .lineLimit(1)
                 .truncationMode(.tail)
@@ -1251,6 +1422,23 @@ private struct FileListView: View {
     /// File currently picking a destination folder via the swipe "Move…"
     /// action (nil = sheet closed).
     @State private var moveTarget: MoveSheetTarget?
+    /// Persisted search scope: false = 파일명, true = 전체내용. Mirrored into the
+    /// store so the filter/debounce logic can read it off the main actor.
+    @AppStorage("searchScope") private var searchScopeContent: Bool = false
+
+    /// Trimmed query for the empty-state check.
+    private var trimmedQuery: String {
+        store.search.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// True when content search is active, settled (not running), and produced
+    /// zero visible rows — drives the dedicated empty state.
+    private var contentSearchEmpty: Bool {
+        searchScopeContent && !trimmedQuery.isEmpty
+            && !store.contentSearchRunning
+            && store.contentSearchQuery == trimmedQuery
+            && store.files.isEmpty
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -1265,15 +1453,47 @@ private struct FileListView: View {
                     .padding(.bottom, 8)
             }
 
-            HStack {
-                Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search filename", text: $store.search)
+            HStack(spacing: 8) {
+                // Magnifier doubles as a scope menu (파일명 ⇄ 전체내용).
+                Menu {
+                    Picker("", selection: $searchScopeContent) {
+                        Label("파일명", systemImage: "textformat")
+                            .tag(false)
+                        Label("전체 내용", systemImage: "doc.text.magnifyingglass")
+                            .tag(true)
+                    }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } label: {
+                    Image(systemName: searchScopeContent
+                          ? "doc.text.magnifyingglass" : "magnifyingglass")
+                        .foregroundStyle(searchScopeContent
+                                         ? AppUI.accentPink : .secondary)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("검색 범위: 파일명 또는 전체 내용")
+
+                TextField(searchScopeContent ? "전체 내용 검색" : "파일명 검색",
+                          text: $store.search)
                     .textFieldStyle(.plain)
                     .font(AppUI.bodyFont)
+
+                if store.contentSearchRunning {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 14, height: 14)
+                }
             }
             .padding(.horizontal, AppUI.spacingM)
             .padding(.vertical, 8)
             .background(AppUI.subtleFill)
+            // Keep the store's scope mirror in sync with the persisted toggle.
+            .onAppear { store.contentSearchScope = searchScopeContent }
+            .onChange(of: searchScopeContent) { _, newValue in
+                store.contentSearchScope = newValue
+            }
 
             Divider()
 
@@ -1281,6 +1501,8 @@ private struct FileListView: View {
                 ForEach(store.files) { file in
                     FileRow(file: file,
                             isSelected: store.selectedID == file.id,
+                            snippet: searchScopeContent
+                                ? store.contentSnippets[file.id] : nil,
                             onToggleStar: { store.toggleStar(file.id) })
                         .tag(Optional(file.id))
                         // Flat rows own their padding; zero insets keep the
@@ -1376,6 +1598,11 @@ private struct FileListView: View {
                 }
             }
             .listStyle(.plain)
+            .overlay {
+                if contentSearchEmpty {
+                    contentSearchEmptyState
+                }
+            }
         }
         .sheet(item: $moveTarget) { target in
             MoveToFolderSheet(store: store, fileID: target.id) { moveTarget = nil }
@@ -1384,6 +1611,28 @@ private struct FileListView: View {
         .onChange(of: store.selectedID) { _, _ in
             store.lastClassifyApply = nil
         }
+    }
+
+    /// Shown when 전체내용 search settles with zero hits. Notes that only
+    /// cached recordings are indexed (uncached ones can't be searched yet).
+    private var contentSearchEmptyState: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 28, weight: .regular))
+                .symbolRenderingMode(.hierarchical)
+                .foregroundStyle(.secondary)
+            Text("전체 내용에서 '\(trimmedQuery)' 결과 없음")
+                .font(AppUI.rowTitleFont)
+                .multilineTextAlignment(.center)
+            Text("캐시된 녹음만 검색됩니다 — 아직 받아오지 않은 녹음은 색인되지 않아요.")
+                .font(AppUI.metaFont)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(AppUI.spacingXL)
+        .frame(maxWidth: 280)
+        .background(AppUI.cardFill, in: RoundedRectangle(cornerRadius: AppUI.radius))
     }
 }
 
@@ -1616,6 +1865,9 @@ private struct MiniMetricCard: View {
 private struct FileRow: View {
     let file: PlaudFileVM
     let isSelected: Bool
+    /// FTS snippet (with « » around the matched span) shown only in
+    /// content-search mode; nil otherwise.
+    var snippet: String? = nil
     /// Clicking the dot/star slot toggles the star (small tap target only,
     /// so row selection elsewhere is untouched).
     let onToggleStar: () -> Void
@@ -1647,6 +1899,9 @@ private struct FileRow: View {
                 }
             }
             metaLine
+            if let snippet, !snippet.isEmpty {
+                snippetLine(snippet)
+            }
         }
         .padding(.horizontal, AppUI.spacingM)
         .padding(.vertical, 7)
@@ -1744,6 +1999,54 @@ private struct FileRow: View {
             .padding(.leading, Self.metaIndent)
             .lineLimit(1)
         }
+    }
+
+    /// One-line FTS snippet. The CLI wraps the matched span in « », which we
+    /// render as an accent-colored, slightly heavier run; surrounding context
+    /// stays secondary. Newlines collapse to spaces so it stays single-line.
+    private func snippetLine(_ raw: String) -> some View {
+        let flat = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        return Text(Self.highlightedSnippet(flat))
+            .font(Self.metaFont)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .padding(.leading, Self.metaIndent)
+    }
+
+    /// Build an AttributedString from a `«…»`-marked snippet: matched spans get
+    /// the accent color + medium weight, everything else is secondary. The
+    /// markers themselves are stripped.
+    private static func highlightedSnippet(_ text: String) -> AttributedString {
+        var result = AttributedString()
+        var insideMatch = false
+        var buffer = ""
+
+        func flush() {
+            guard !buffer.isEmpty else { return }
+            var run = AttributedString(buffer)
+            if insideMatch {
+                run.foregroundColor = AppUI.accentPink
+                run.font = Self.metaFont.weight(.semibold)
+            } else {
+                run.foregroundColor = .secondary
+            }
+            result.append(run)
+            buffer = ""
+        }
+
+        for ch in text {
+            if ch == "«" {
+                flush(); insideMatch = true
+            } else if ch == "»" {
+                flush(); insideMatch = false
+            } else {
+                buffer.append(ch)
+            }
+        }
+        flush()
+        return result
     }
 
     private var dotSeparator: some View {

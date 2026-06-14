@@ -121,10 +121,125 @@ class Storage:
     def __init__(self, db_path: Path = DEFAULT_DB) -> None:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db_path = db_path
+        self._fts_ok = False
         with self._connect() as conn:
             conn.executescript(SCHEMA_TABLES)
             self._migrate(conn)
             conn.executescript(SCHEMA_INDEXES)
+            self._fts_ok = self._ensure_search_index(conn)
+
+    # ---------- full-content search (FTS5 trigram — Korean substring OK) ----------
+
+    def _ensure_search_index(self, conn: sqlite3.Connection) -> bool:
+        """Create the recording FTS table and backfill it once. Returns False
+        (search disabled) if this SQLite build lacks FTS5/trigram."""
+        try:
+            conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS recording_fts "
+                "USING fts5(file_id UNINDEXED, title, body, tokenize='trigram')"
+            )
+        except sqlite3.OperationalError:
+            return False
+        fts_n = conn.execute("SELECT COUNT(*) FROM recording_fts").fetchone()[0]
+        content_n = conn.execute("SELECT COUNT(*) FROM file_content").fetchone()[0]
+        if fts_n == 0 and content_n > 0:
+            self._backfill_search_index(conn)
+        return True
+
+    @staticmethod
+    def _transcript_text(transcript_json: str | None) -> str:
+        if not transcript_json:
+            return ""
+        try:
+            segs = json.loads(transcript_json)
+        except (TypeError, json.JSONDecodeError):
+            return ""
+        return " ".join(str(s.get("content", "")) for s in segs if isinstance(s, dict))
+
+    def _index_one(
+        self, conn: sqlite3.Connection, file_id: str, title, transcript, summary
+    ) -> None:
+        body = "\n".join(
+            part for part in (self._transcript_text(transcript), summary or "") if part
+        )
+        conn.execute("DELETE FROM recording_fts WHERE file_id = ?", (file_id,))
+        conn.execute(
+            "INSERT INTO recording_fts (file_id, title, body) VALUES (?, ?, ?)",
+            (file_id, title or "", body),
+        )
+
+    def _backfill_search_index(self, conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT file_id, title, transcript, summary_md FROM file_content"
+        ).fetchall()
+        for r in rows:
+            self._index_one(conn, r["file_id"], r["title"], r["transcript"], r["summary_md"])
+
+    def rebuild_search_index(self) -> int:
+        """Drop and rebuild the FTS index from scratch. Returns rows indexed."""
+        with self._connect() as conn:
+            if not self._ensure_search_index(conn):
+                return 0
+            conn.execute("DELETE FROM recording_fts")
+            self._backfill_search_index(conn)
+            return conn.execute("SELECT COUNT(*) FROM recording_fts").fetchone()[0]
+
+    def search_recordings(self, query: str, *, limit: int = 200) -> list[dict]:
+        """Full-content search over title + transcript + summary. Returns
+        [{file_id, snippet}] ordered by relevance. Uses trigram FTS5 when every
+        term is >=3 chars (fast); otherwise falls back to a LIKE scan so short
+        Korean terms (2 chars) still match."""
+        terms = [t for t in query.split() if t.strip()]
+        if not terms:
+            return []
+        with self._connect() as conn:
+            if self._fts_ok and all(len(t) >= 3 for t in terms):
+                hits = self._search_fts(conn, terms, limit)
+                if hits:
+                    return hits
+            return self._search_like(conn, terms, limit)
+
+    def _search_fts(self, conn, terms: list[str], limit: int) -> list[dict]:
+        match = " AND ".join('"' + t.replace('"', '""') + '"' for t in terms)
+        try:
+            rows = conn.execute(
+                """
+                SELECT file_id,
+                       snippet(recording_fts, 2, '«', '»', '…', 12) AS snippet
+                  FROM recording_fts
+                 WHERE recording_fts MATCH ?
+                 ORDER BY bm25(recording_fts, 10.0, 1.0)
+                 LIMIT ?
+                """,
+                (match, limit),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [{"file_id": r["file_id"], "snippet": r["snippet"] or ""} for r in rows]
+
+    def _search_like(self, conn, terms: list[str], limit: int) -> list[dict]:
+        where = " AND ".join(
+            "(title LIKE ? OR summary_md LIKE ? OR transcript LIKE ?)" for _ in terms
+        )
+        params: list = []
+        for t in terms:
+            like = f"%{t}%"
+            params += [like, like, like]
+        params.append(limit)
+        rows = conn.execute(
+            f"""
+            SELECT file_id, title, summary_md
+              FROM file_content
+             WHERE {where}
+             LIMIT ?
+            """,
+            params,
+        ).fetchall()
+        out = []
+        for r in rows:
+            text = r["summary_md"] or r["title"] or ""
+            out.append({"file_id": r["file_id"], "snippet": text[:120]})
+        return out
 
     def _migrate(self, conn: sqlite3.Connection) -> None:
         # Version-gate the (idempotent) migrations so an up-to-date DB skips the
@@ -366,6 +481,13 @@ class Storage:
                     now,
                 ),
             )
+            if self._fts_ok:
+                transcript_json = json.dumps(
+                    [s.model_dump() for s in content.transcript], ensure_ascii=False
+                )
+                self._index_one(
+                    conn, content.file_id, content.title, transcript_json, content.summary_md
+                )
         self.set_file_folders(content.file_id, content.folder_ids)
 
     def get_content_row(self, file_id: str) -> sqlite3.Row | None:
