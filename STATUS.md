@@ -171,6 +171,22 @@ markdown files   Swift app (GRDB)
 
 ## 2. 완료된 기능
 
+### 2026-06-14 v0.5 업그레이드 — 전체내용 검색 · 태그 뷰 · 상태 점 재설계
+- [x] **전체 내용 검색** — `recording_fts` FTS5(trigram) 인덱스로 제목·전사본·요약
+      전문 검색 (한국어 부분 일치 OK, <5ms). 2글자 등 짧은 검색어는 LIKE 폴백.
+      검색창에 **파일명 / 전체내용** 스코프 토글, 250ms 디바운스, FTS 관련도순
+      정렬 + 매치 스니펫(« » 하이라이트) 표시. 현재 사이드바 선택 내에서 검색.
+      `save_content`가 인덱스 자동 동기화. CLI `search` / `search-reindex`.
+- [x] **태그 뷰** — 좌측 Tags 섹션에 정렬(빈도 ⇄ 알파벳) + **중첩 토글**
+      (`parent/child` 트리, 부모는 하위 합산 카운트·접기/펴기). 핀 고정은 상단 유지.
+      Obsidian 태그 패널 방식 참고.
+- [x] **상태 점 재설계** — Generated 배지 제거, 왼쪽 점에 단계 표현: 빨강=데이터
+      미수신(전송만) · 초록=전사 완료·안읽음 · 회색=읽음 · 골드별=즐겨찾기.
+      `hasContent`(전사본 캐시) 기준이라 요약 없는 전사본도 올바르게 표시.
+- [x] **사용 상태 위계 컬러** — Not Used(회색)→Metadata Ready(파랑)→Vault
+      Linked(초록)→Used Elsewhere(보라)→Archived(브론즈). 행 칩(설정 시만) +
+      디테일 Status 타일 틴트로 잘 보이게.
+
 ### 2026-06-14 v0.4 업그레이드 — Plaud Web 패리티 · 안전한 자동분류 · 태그 사이드바
 - [x] **리스트 행 Plaud Web 패리티** — 생성 일시(시각 포함, full timestamp 툴팁),
       초 단위 길이(`1h 28m 48s`), **Generated 배지**(Plaud AI 노트 존재 시 초록 체크),
