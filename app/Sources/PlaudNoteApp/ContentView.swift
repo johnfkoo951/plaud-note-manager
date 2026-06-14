@@ -1575,6 +1575,9 @@ private struct MiniMetricCard: View {
     let value: String
     let systemName: String
     let color: Color
+    /// When true the whole tile is tinted with `color` — used for the Status
+    /// tile so an applied usage status is unmistakable.
+    var tinted: Bool = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -1589,16 +1592,20 @@ private struct MiniMetricCard: View {
             .foregroundStyle(color)
             Text(value)
                 .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(tinted ? color : .primary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.78)
         }
         .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
         .padding(.horizontal, 8)
         .padding(.vertical, 7)
-        .background(.background.opacity(0.42), in: RoundedRectangle(cornerRadius: 8))
+        .background(
+            tinted ? color.opacity(0.14) : Color(NSColor.controlBackgroundColor).opacity(0.42),
+            in: RoundedRectangle(cornerRadius: 8)
+        )
         .overlay(
             RoundedRectangle(cornerRadius: 8)
-                .stroke(AppUI.cardStroke.opacity(0.7), lineWidth: 1)
+                .stroke(tinted ? color.opacity(0.45) : AppUI.cardStroke.opacity(0.7), lineWidth: 1)
         )
     }
 }
@@ -1665,10 +1672,13 @@ private struct FileRow: View {
         return Color.clear
     }
 
-    /// Read-state dot: gold star = starred, green dot = unseen (안 본 것),
-    /// muted gray dot = seen (본 것은 조용하게). Cached-state no longer lives
-    /// here — it stays visible via the Progress tile and the Cached counter.
-    /// Clicking the slot toggles the star.
+    /// 분석 전(Plaud 요약 없음) → 빨강 · 분석됨+안읽음 → 초록 · 읽음 → 회색.
+    static let pendingRed = Color(red: 0.91, green: 0.43, blue: 0.41)
+    static let unreadGreen = Color(red: 0.29, green: 0.78, blue: 0.47)
+
+    /// State dot: gold star = starred; otherwise the pipeline/review color
+    /// from `dotColor` (red = transferred-only, green = analyzed-unread,
+    /// gray = read). Clicking the slot toggles the star.
     @ViewBuilder
     private var stateDot: some View {
         Group {
@@ -1676,17 +1686,12 @@ private struct FileRow: View {
                 Image(systemName: "star.fill")
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(Self.starGold)
-                    .help("Starred")
-            } else if file.seenAt == nil {
-                Circle()
-                    .fill(Color.green)
-                    .frame(width: 7, height: 7)
-                    .help("New — not opened yet")
+                    .help("즐겨찾기")
             } else {
                 Circle()
-                    .fill(Color.gray.opacity(0.32))
-                    .frame(width: 5, height: 5)
-                    .help("Opened")
+                    .fill(dotColor)
+                    .frame(width: dotSize, height: dotSize)
+                    .help(dotHelp)
             }
         }
         .frame(width: 11, height: 11)
@@ -1694,29 +1699,41 @@ private struct FileRow: View {
         .onTapGesture { onToggleStar() }
     }
 
+    /// Pipeline + review state folded into the dot color (replaces the loud
+    /// "Generated" badge): 녹음→전송→(Plaud)전사·분석→앱 리뷰.
+    private var dotColor: Color {
+        if !file.hasSummary { return Self.pendingRed }   // 전송됨, 분석 대기
+        if file.seenAt == nil { return Self.unreadGreen } // 분석 완료, 안 읽음
+        return Color.gray.opacity(0.34)                   // 읽음
+    }
+
+    private var dotSize: CGFloat {
+        // Seen (done) is intentionally smaller/quieter than the active states.
+        (file.hasSummary && file.seenAt != nil) ? 5 : 7
+    }
+
+    private var dotHelp: String {
+        if !file.hasSummary { return "전송됨 · 분석 대기 (Plaud 요약 없음)" }
+        if file.seenAt == nil { return "분석 완료 · 아직 안 읽음" }
+        return "읽음 (리뷰 완료)"
+    }
+
     @ViewBuilder
     private var metaLine: some View {
         if file.durationMs != nil || folderLabel != nil
-            || usageOption != nil || file.hasSummary || !file.primaryTags.isEmpty {
+            || meaningfulUsage != nil || !file.primaryTags.isEmpty {
             HStack(spacing: 6) {
                 if file.durationMs != nil {
                     Text(formatRecordingDurationFull(file.durationMs))
                         .font(Self.metaFont)
                         .foregroundStyle(.secondary)
                 }
-                if file.hasSummary {
-                    generatedBadge
-                }
                 if let folderLabel {
-                    if file.durationMs != nil || file.hasSummary { dotSeparator }
+                    if file.durationMs != nil { dotSeparator }
                     folderChip(folderLabel)
                 }
-                if let usageOption {
-                    Image(systemName: usageOption.symbolName)
-                        .font(.system(size: 10, weight: .semibold))
-                        .symbolRenderingMode(.hierarchical)
-                        .foregroundStyle(usageOption.color)
-                        .help(usageOption.title)
+                if let usage = meaningfulUsage {
+                    usageChip(usage)
                 }
                 ForEach(Array(file.primaryTags.prefix(2)), id: \.self) { tag in
                     tagChip(tagLabel(tag))
@@ -1733,17 +1750,27 @@ private struct FileRow: View {
             .foregroundStyle(.tertiary)
     }
 
-    /// Green "Generated" check — matches Plaud Web's indicator that the
-    /// server-side AI note exists.
-    private var generatedBadge: some View {
+    /// Only surface a usage chip for statuses the user actively set — the
+    /// default "Not Used" stays invisible so idle rows aren't noisy.
+    private var meaningfulUsage: UsageStatusOption? {
+        guard let o = usageOption, o.dbValue != "unused" else { return nil }
+        return o
+    }
+
+    /// Filled, color-coded usage pill so an applied status is easy to spot.
+    private func usageChip(_ o: UsageStatusOption) -> some View {
         HStack(spacing: 3) {
-            Image(systemName: "checkmark.seal.fill")
-                .font(.system(size: 10))
-            Text("Generated")
-                .font(.system(size: 11))
+            Image(systemName: o.symbolName)
+                .font(.system(size: 8.5, weight: .semibold))
+            Text(o.title)
+                .font(Self.metaFont)
+                .lineLimit(1)
         }
-        .foregroundStyle(AnuPalette.green)
-        .help("AI 노트 생성됨 (Plaud)")
+        .foregroundStyle(o.color)
+        .padding(.horizontal, 5)
+        .padding(.vertical, 1.5)
+        .background(o.color.opacity(0.16), in: Capsule())
+        .help(o.title)
     }
 
     /// Plaud-Web-parity row date+time on one line:
@@ -1818,36 +1845,40 @@ private struct UsageStatusOption: Identifiable {
 
     var id: String { dbValue }
 
+    // Hierarchical workflow palette — distinct hues that read as a progression:
+    // idle(gray) → prepared(blue) → integrated(green) → reused(purple) →
+    // closed(bronze). Designed so an applied status pops in the row chip and
+    // the detail Status tile.
     static let all: [UsageStatusOption] = [
         UsageStatusOption(
             dbValue: "unused",
             title: "Not Used",
-            symbolName: "minus.circle",
-            color: .secondary.opacity(0.68)
+            symbolName: "circle.dotted",
+            color: Color.secondary
         ),
         UsageStatusOption(
             dbValue: "metadata-ready",
             title: "Metadata Ready",
             symbolName: "wand.and.sparkles",
-            color: .blue
+            color: Color(red: 0.36, green: 0.56, blue: 0.95)  // blue — prepared
         ),
         UsageStatusOption(
             dbValue: "vault-linked",
             title: "Vault Linked",
-            symbolName: "link.circle",
-            color: .green
+            symbolName: "link.circle.fill",
+            color: Color(red: 0.24, green: 0.74, blue: 0.49)  // green — integrated
         ),
         UsageStatusOption(
             dbValue: "used-elsewhere",
             title: "Used Elsewhere",
-            symbolName: "arrow.up.forward.circle",
-            color: Color(red: 0.18, green: 0.68, blue: 0.52)
+            symbolName: "arrow.up.forward.app.fill",
+            color: Color(red: 0.60, green: 0.45, blue: 0.90)  // purple — reused
         ),
         UsageStatusOption(
             dbValue: "archived",
             title: "Archived",
-            symbolName: "archivebox",
-            color: Color(red: 0.80, green: 0.58, blue: 0.28)
+            symbolName: "archivebox.fill",
+            color: Color(red: 0.66, green: 0.55, blue: 0.42)  // bronze — closed
         ),
     ]
 
@@ -2412,9 +2443,17 @@ private struct DetailMetricStrip: View {
                 label: "Status",
                 value: statusValue,
                 systemName: statusSymbol,
-                color: statusColor
+                color: statusColor,
+                // Tint the tile once the user sets a real status (not the
+                // default unused / not-set) so it's unmistakable.
+                tinted: statusIsMeaningful
             )
         }
+    }
+
+    private var statusIsMeaningful: Bool {
+        guard let o = statusOption else { return false }
+        return o.dbValue != "unused"
     }
 
     private var recordedHelp: String {
