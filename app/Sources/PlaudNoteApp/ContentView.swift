@@ -1922,7 +1922,7 @@ private struct FileRow: View {
             HStack(spacing: 8) {
                 stateDot
                 Text(file.filename ?? "(untitled)")
-                    .font(.system(size: comfortable ? 15 : 13.5, weight: .semibold))
+                    .font(.system(size: 13.5, weight: .semibold))
                     .lineLimit(comfortable ? 2 : 1)
                     .truncationMode(.tail)
                     .foregroundStyle(Color.primary)
