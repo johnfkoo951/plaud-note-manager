@@ -68,6 +68,46 @@ private func formatRecordingDurationMs(_ ms: Double?) -> String {
     return "\(s)s"
 }
 
+/// Full Plaud-Web-parity duration WITH seconds: "1h 28m 48s", "8m 55s", "14s".
+private func formatRecordingDurationFull(_ ms: Double?) -> String {
+    guard let ms, ms > 0 else { return "—" }
+    let s = Int(ms / 1000.0)
+    if s >= 3600 { return "\(s/3600)h \((s%3600)/60)m \(s%60)s" }
+    if s >= 60 { return "\(s/60)m \(s%60)s" }
+    return "\(s)s"
+}
+
+/// Full "2026-06-12 11:58:16" timestamp for `.help(...)` tooltips.
+private func formatRecordingTimestampFull(_ date: Date?) -> String {
+    guard let date else { return "Recording start time unknown" }
+    let f = DateFormatter()
+    f.dateFormat = "yyyy-MM-dd HH:mm:ss"
+    return f.string(from: date)
+}
+
+/// App version info from Info.plist (set by the package build script), with
+/// `swift run` fallbacks. The build script sets CFBundleShortVersionString,
+/// CFBundleVersion (git commit count), and a custom "PlaudGitSHA" key.
+enum AppVersion {
+    private static func info(_ key: String) -> String? {
+        let v = Bundle.main.infoDictionary?[key] as? String
+        let trimmed = v?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (trimmed?.isEmpty ?? true) ? nil : trimmed
+    }
+    static var shortVersion: String { info("CFBundleShortVersionString") ?? "dev" }
+    static var build: String { info("CFBundleVersion") ?? "0" }
+    static var sha: String { info("PlaudGitSHA") ?? "local" }
+
+    /// "Plaud Note Manager v0.3.0 (build 142 · a1b2c3d)" for the settings footer.
+    static var longLine: String {
+        "Plaud Note Manager v\(shortVersion) (build \(build) · \(sha))"
+    }
+    /// "v0.3.0 (142)" for the tiny sidebar footer.
+    static var shortLine: String {
+        "v\(shortVersion) (\(build))"
+    }
+}
+
 /// Recording start as a compact, locale-aware "Jun 14 · 12:20" for tiles.
 private func formatRecordingStart(_ date: Date?) -> String {
     guard let date else { return "—" }
@@ -466,7 +506,7 @@ struct ContentView: View {
                 .help("Pre-cache transcripts + summaries for every file so clicks are instant.")
 
                 Button {
-                    Task { await store.classify() }
+                    Task { await store.classifyPreview() }
                 } label: {
                     if store.classifyRunning {
                         ToolbarProgressLabel(text: nil)
@@ -475,7 +515,7 @@ struct ContentView: View {
                     }
                 }
                 .disabled(store.classifyRunning)
-                .help("Auto-classify recordings into folders (App-only capability).")
+                .help("Auto-classify recordings into folders — preview before applying (App-only capability).")
 
                 Button {
                     Task { await store.sync() }
@@ -519,6 +559,145 @@ struct ContentView: View {
         } message: {
             Text(store.classifyResult ?? "")
         }
+        .sheet(isPresented: Binding(
+            get: { store.classifyPlans != nil },
+            set: { if !$0 { store.classifyPlans = nil } }
+        )) {
+            if let plans = store.classifyPlans {
+                ClassifyPreviewSheet(store: store, plans: plans) {
+                    store.classifyPlans = nil
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Classify Preview Sheet
+
+/// Preview-before-apply for auto-classification. Lists the dry-run plans
+/// sorted by confidence, pre-checks confident matches (>= 0.5), and applies
+/// only the rows the user keeps checked.
+private struct ClassifyPreviewSheet: View {
+    @ObservedObject var store: FileStore
+    let plans: [FileStore.ClassifyPlan]
+    let dismiss: () -> Void
+
+    /// File ids the user has selected to apply. Seeded from confidence >= 0.5.
+    @State private var checked: Set<String> = []
+
+    private var lowConfidenceCount: Int {
+        plans.filter { $0.confidence < 0.5 }.count
+    }
+    private var targetFolderCount: Int {
+        Set(plans.filter { checked.contains($0.fileID) }.map { $0.folderName }).count
+    }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("자동 분류 미리보기").font(.title3.bold())
+                    Text(headerLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button { dismiss() } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.system(size: 18, weight: .semibold))
+                        .symbolRenderingMode(.hierarchical)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .keyboardShortcut(.cancelAction)
+            }
+            .padding(.horizontal, AppUI.spacingXL)
+            .padding(.vertical, AppUI.spacingL)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: 1) {
+                    ForEach(plans) { plan in
+                        planRow(plan)
+                    }
+                }
+                .padding(AppUI.spacingS)
+            }
+
+            Divider()
+
+            HStack {
+                Button("취소") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("적용 (\(checked.count)개)") {
+                    let ids = Array(checked)
+                    dismiss()
+                    Task { await store.applyClassify(fileIDs: ids) }
+                }
+                .keyboardShortcut(.defaultAction)
+                .controlSize(.large)
+                .disabled(checked.isEmpty || store.classifyRunning)
+            }
+            .padding(.horizontal, AppUI.spacingXL)
+            .padding(.vertical, 14)
+        }
+        .frame(width: 640, height: 560)
+        .onAppear {
+            checked = Set(plans.filter { $0.confidence >= 0.5 }.map { $0.fileID })
+        }
+    }
+
+    private var headerLine: String {
+        "\(targetFolderCount)개 폴더로 이동 예정 · \(lowConfidenceCount)개는 신뢰도 낮아 제외"
+    }
+
+    private func planRow(_ plan: FileStore.ClassifyPlan) -> some View {
+        let isChecked = checked.contains(plan.fileID)
+        return Button {
+            if isChecked { checked.remove(plan.fileID) }
+            else { checked.insert(plan.fileID) }
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: isChecked ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(isChecked ? Color.accentColor : Color.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(plan.title)
+                        .font(.system(size: 13, weight: .medium))
+                        .lineLimit(1)
+                    HStack(spacing: 4) {
+                        Image(systemName: "arrow.right")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(.tertiary)
+                        Label(plan.folderName, systemImage: "folder.fill")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                confidencePill(plan.confidence)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .contentShape(RoundedRectangle(cornerRadius: AppUI.tightRadius))
+            .help(plan.reason.isEmpty ? plan.folderName : plan.reason)
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func confidencePill(_ value: Double) -> some View {
+        let pct = Int((value * 100).rounded())
+        let color: Color = value >= 0.7 ? AnuPalette.green
+            : (value >= 0.5 ? AnuPalette.yellow : Color.gray)
+        return Text("\(pct)%")
+            .font(.system(size: 11, weight: .bold))
+            .foregroundStyle(color)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.18), in: Capsule())
     }
 }
 
@@ -654,6 +833,9 @@ private struct SettingsSheet: View {
             Divider()
 
             HStack {
+                Text(AppVersion.longLine)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
                 Spacer()
                 Button("Done") { dismiss() }
                     .keyboardShortcut(.defaultAction)
@@ -892,8 +1074,31 @@ private struct SidebarView: View {
                 }
                 .padding(.vertical, 2)
             }
+
+            if !store.tagCounts.isEmpty {
+                Section {
+                    ForEach(orderedTags, id: \.tag) { entry in
+                        tagRow(entry.tag, count: entry.count,
+                               pinned: store.pinnedTags.contains(entry.tag))
+                    }
+                } header: {
+                    Text("Tags")
+                        .font(AppUI.sectionFont)
+                        .padding(.vertical, 2)
+                }
+            }
         }
         .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) {
+            HStack {
+                Text(AppVersion.shortLine)
+                    .font(.system(size: 9.5))
+                    .foregroundStyle(.tertiary)
+                Spacer()
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+        }
         .sheet(item: $editing) { folder in
             EditFolderSheet(folder: folder, store: store) { editing = nil }
         }
@@ -945,6 +1150,54 @@ private struct SidebarView: View {
         }
         .padding(.vertical, 2)
         .tag(item)
+    }
+
+    /// Pinned tags first (in config order), then the rest by count desc.
+    private var orderedTags: [(tag: String, count: Int)] {
+        let counts = Dictionary(store.tagCounts.map { ($0.tag, $0.count) },
+                                uniquingKeysWith: { a, _ in a })
+        let pinnedSet = Set(store.pinnedTags)
+        let pinned: [(tag: String, count: Int)] = store.pinnedTags.map {
+            (tag: $0, count: counts[$0] ?? 0)
+        }
+        let rest = store.tagCounts.filter { !pinnedSet.contains($0.tag) }
+        return pinned + rest
+    }
+
+    @ViewBuilder
+    private func tagRow(_ tag: String, count: Int, pinned: Bool) -> some View {
+        HStack {
+            Image(systemName: pinned ? "pin.fill" : "tag")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(pinned ? FileRow.starGold : Color.secondary)
+                .frame(width: 18)
+            Text("#\(tag)")
+                .font(AppUI.rowTitleFont)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Spacer()
+            Text("\(count)")
+                .font(AppUI.metaFont)
+                .foregroundStyle(.tertiary)
+                .frame(width: 34, alignment: .trailing)
+        }
+        .padding(.vertical, 2)
+        .tag(SidebarItem.tag(tag))
+        .contextMenu {
+            if pinned {
+                Button {
+                    Task { await store.unpinTag(tag) }
+                } label: {
+                    Label("고정 해제", systemImage: "pin.slash")
+                }
+            } else {
+                Button {
+                    Task { await store.pinTag(tag) }
+                } label: {
+                    Label("고정", systemImage: "pin")
+                }
+            }
+        }
     }
 }
 
@@ -1005,6 +1258,12 @@ private struct FileListView: View {
                 .padding(.horizontal, AppUI.spacingM)
                 .padding(.top, AppUI.spacingM)
                 .padding(.bottom, 10)
+
+            if store.lastClassifyApply != nil {
+                ClassifyUndoBanner(store: store)
+                    .padding(.horizontal, AppUI.spacingM)
+                    .padding(.bottom, 8)
+            }
 
             HStack {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -1120,6 +1379,61 @@ private struct FileListView: View {
         }
         .sheet(item: $moveTarget) { target in
             MoveToFolderSheet(store: store, fileID: target.id) { moveTarget = nil }
+        }
+        // Selecting a recording dismisses the auto-classify undo banner.
+        .onChange(of: store.selectedID) { _, _ in
+            store.lastClassifyApply = nil
+        }
+    }
+}
+
+/// Transient bar offering to undo the last auto-classify. Auto-dismisses
+/// after ~12s (or when a recording is selected — handled by the list).
+private struct ClassifyUndoBanner: View {
+    @ObservedObject var store: FileStore
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "wand.and.stars")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(AppUI.accentPink)
+            Text("\(store.lastClassifyApply?.count ?? 0)개 자동 분류됨")
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+            Spacer(minLength: 6)
+            Button {
+                Task { await store.classifyUndo() }
+            } label: {
+                Label("되돌리기", systemImage: "arrow.uturn.backward")
+                    .font(.system(size: 11.5, weight: .semibold))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+            .disabled(store.classifyRunning)
+            Button {
+                store.lastClassifyApply = nil
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.tertiary)
+            }
+            .buttonStyle(.plain)
+            .help("배너 닫기")
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(AppUI.accentPink.opacity(0.10), in: RoundedRectangle(cornerRadius: AppUI.radius))
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.radius)
+                .stroke(AppUI.accentPink.opacity(0.30), lineWidth: 1)
+        )
+        .task(id: store.lastClassifyApply?.at) {
+            // Auto-dismiss after ~12s unless replaced by a newer apply.
+            let stamp = store.lastClassifyApply?.at
+            try? await Task.sleep(nanoseconds: 12_000_000_000)
+            if store.lastClassifyApply?.at == stamp {
+                store.lastClassifyApply = nil
+            }
         }
     }
 }
@@ -1322,6 +1636,7 @@ private struct FileRow: View {
                         .font(Self.metaFont)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .help(formatRecordingTimestampFull(date))
                 }
             }
             metaLine
@@ -1382,15 +1697,18 @@ private struct FileRow: View {
     @ViewBuilder
     private var metaLine: some View {
         if file.durationMs != nil || folderLabel != nil
-            || usageOption != nil || !file.primaryTags.isEmpty {
+            || usageOption != nil || file.hasSummary || !file.primaryTags.isEmpty {
             HStack(spacing: 6) {
                 if file.durationMs != nil {
-                    Text(formatRecordingDurationMs(file.durationMs))
+                    Text(formatRecordingDurationFull(file.durationMs))
                         .font(Self.metaFont)
                         .foregroundStyle(.secondary)
                 }
+                if file.hasSummary {
+                    generatedBadge
+                }
                 if let folderLabel {
-                    if file.durationMs != nil { dotSeparator }
+                    if file.durationMs != nil || file.hasSummary { dotSeparator }
                     folderChip(folderLabel)
                 }
                 if let usageOption {
@@ -1415,16 +1733,34 @@ private struct FileRow: View {
             .foregroundStyle(.tertiary)
     }
 
-    /// "Jun 11" for past days, just the time for today, year added when older.
+    /// Green "Generated" check — matches Plaud Web's indicator that the
+    /// server-side AI note exists.
+    private var generatedBadge: some View {
+        HStack(spacing: 3) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 10))
+            Text("Generated")
+                .font(.system(size: 11))
+        }
+        .foregroundStyle(AnuPalette.green)
+        .help("AI 노트 생성됨 (Plaud)")
+    }
+
+    /// Plaud-Web-parity row date+time on one line:
+    /// today → "11:58"; this year → "Jun 12, 11:58"; older → "Jun 12 '25".
     private static func formatRowDate(_ date: Date) -> String {
         let calendar = Calendar.current
         if calendar.isDateInToday(date) {
             return date.formatted(date: .omitted, time: .shortened)
         }
         if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
-            return date.formatted(.dateTime.month(.abbreviated).day())
+            let day = date.formatted(.dateTime.month(.abbreviated).day())
+            let time = date.formatted(.dateTime.hour().minute())
+            return "\(day), \(time)"
         }
-        return date.formatted(.dateTime.year().month(.abbreviated).day())
+        let day = date.formatted(.dateTime.month(.abbreviated).day())
+        let yy = date.formatted(.dateTime.year(.twoDigits))
+        return "\(day) '\(yy)"
     }
 
     private var folderLabel: String? {
@@ -2056,7 +2392,7 @@ private struct DetailMetricStrip: View {
             .help(recordedHelp)
             MiniMetricCard(
                 label: "Duration",
-                value: formatRecordingDurationMs(file.durationMs),
+                value: formatRecordingDurationFull(file.durationMs),
                 systemName: "timer",
                 color: AnuPalette.sky
             )
@@ -2514,11 +2850,33 @@ private struct MetadataBar: View {
                     statusPicker
                 }
 
-                TextField("tag", text: $newTag)
-                    .textFieldStyle(.roundedBorder)
-                    .font(AppUI.metaFont)
-                    .frame(width: 116)
-                    .onSubmit { addTag() }
+                HStack(spacing: 2) {
+                    TextField("tag", text: $newTag)
+                        .textFieldStyle(.roundedBorder)
+                        .font(AppUI.metaFont)
+                        .frame(width: 116)
+                        .onSubmit { addTag() }
+                    // Autocomplete: a menu of matching existing tags. Non-
+                    // intrusive (doesn't steal focus while typing); appears
+                    // only when the input matches known tags.
+                    if !tagSuggestions.isEmpty {
+                        Menu {
+                            ForEach(tagSuggestions, id: \.self) { suggestion in
+                                Button("#\(suggestion)") {
+                                    newTag = ""
+                                    Task { await store.addTag(suggestion, to: file.id) }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "chevron.down.circle")
+                                .font(.system(size: 11))
+                        }
+                        .menuStyle(.borderlessButton)
+                        .menuIndicator(.hidden)
+                        .frame(width: 16)
+                        .help("Matching tags")
+                    }
+                }
 
                 Button { addTag() } label: {
                     Image(systemName: "plus.circle.fill")
@@ -2602,6 +2960,22 @@ private struct MetadataBar: View {
         .fixedSize()
         .foregroundStyle(.secondary)
         .help("Assign Plaud folder (one folder per file)")
+    }
+
+    /// Up to 5 existing tags matching the current input (case-insensitive
+    /// substring), excluding tags already attached to this file.
+    private var tagSuggestions: [String] {
+        let needle = newTag.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard needle.count >= 1 else { return [] }
+        let attached = Set(tags.map { $0.tag.lowercased() })
+        return store.tagCounts
+            .map { $0.tag }
+            .filter { tag in
+                let lower = tag.lowercased()
+                return lower.contains(needle) && lower != needle && !attached.contains(lower)
+            }
+            .prefix(5)
+            .map { $0 }
     }
 
     private func addTag() {

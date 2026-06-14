@@ -22,7 +22,14 @@ struct PlaudFileVM: Identifiable, Hashable, FetchableRecord {
     let folderNames: [String]
     let folderColor: String?
     let primaryTags: [String]
+    /// Every tag on the file (not just the top-3 `primaryTags`) — used by the
+    /// Tags sidebar filter so a file matches even when the tag isn't in the
+    /// truncated display set. Empty for rows from the older `files(for:)` path.
+    let allTags: [String]
     let usageStatus: String?
+    /// True when the server-side AI note (`file_content.summary_md`) exists —
+    /// drives the green "Generated" badge (Plaud-Web parity).
+    let hasSummary: Bool
     /// LOCAL-ONLY read state (epoch seconds when the user first opened the
     /// recording); nil = never opened. `var` so optimistic in-memory updates
     /// can flip it without a full reload.
@@ -42,7 +49,9 @@ struct PlaudFileVM: Identifiable, Hashable, FetchableRecord {
         self.folderNames = Self.splitList(row["folder_names"])
         self.folderColor = row["folder_color"]
         self.primaryTags = Self.splitList(row["primary_tags"])
+        self.allTags = Self.splitList(row["all_tags"])
         self.usageStatus = row["usage_status"]
+        self.hasSummary = (row["has_summary"] as Int64? ?? 0) != 0
         // Safe defaults when the columns don't exist yet (pre-migration DB).
         self.seenAt = row["seen_at"]
         self.starred = (row["starred"] as Int64? ?? 0) != 0
@@ -203,6 +212,7 @@ enum SidebarItem: Hashable {
     case starred
     case trash
     case folder(String)
+    case tag(String)
 }
 
 final class Database: @unchecked Sendable {
@@ -446,6 +456,12 @@ final class Database: @unchecked Sendable {
         let sql = """
         SELECT f.*,
                EXISTS(SELECT 1 FROM file_content fc WHERE fc.file_id = f.id) AS has_content,
+               EXISTS(
+                   SELECT 1 FROM file_content fc
+                    WHERE fc.file_id = f.id
+                      AND fc.summary_md IS NOT NULL
+                      AND fc.summary_md != ''
+               ) AS has_summary,
                COALESCE(
                    NULLIF(fnames.agg_folder_names, ''),
                    nm.folder_name
@@ -476,7 +492,12 @@ final class Database: @unchecked Sendable {
                                    nt.tag COLLATE NOCASE
                           LIMIT 3
                      )
-               ) AS primary_tags
+               ) AS primary_tags,
+               (
+                   SELECT GROUP_CONCAT(nt.tag, char(31))
+                     FROM note_tags nt
+                    WHERE nt.file_id = f.id
+               ) AS all_tags
           FROM files f
           LEFT JOIN note_metadata nm ON nm.file_id = f.id
           LEFT JOIN (
@@ -568,6 +589,9 @@ final class Database: @unchecked Sendable {
         case .folder(let id):
             sql += " AND f.is_trash = 0 AND f.id IN (SELECT file_id FROM file_folders WHERE folder_id = ?)"
             args.append(id)
+        case .tag(let tag):
+            sql += " AND f.is_trash = 0 AND f.id IN (SELECT file_id FROM note_tags WHERE tag = ?)"
+            args.append(tag)
         }
         if !search.isEmpty {
             sql += " AND f.filename LIKE ?"
@@ -621,6 +645,36 @@ final class Database: @unchecked Sendable {
             let trash: Int = row["trash_count"] ?? 0
             return (all, unfiled, starred, trash)
         } ?? (0, 0, 0, 0)
+    }
+
+    /// Distinct tags across non-trash files with their file counts, ordered by
+    /// count desc then name. Drives the Tags section in the sidebar.
+    func tagCounts() -> [(tag: String, count: Int)] {
+        read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT nt.tag AS tag, COUNT(DISTINCT nt.file_id) AS cnt
+                  FROM note_tags nt
+                  JOIN files f ON f.id = nt.file_id AND f.is_trash = 0
+                 GROUP BY nt.tag
+                 ORDER BY cnt DESC, nt.tag COLLATE NOCASE
+            """).map { row -> (tag: String, count: Int) in
+                (tag: row["tag"], count: row["cnt"] ?? 0)
+            }
+        } ?? []
+    }
+
+    /// Set of non-trash file ids carrying the given tag. Used by the sidebar
+    /// `.tag` filter (kept as a fallback / direct lookup path).
+    func fileIDsWithTag(_ tag: String) -> Set<String> {
+        let ids: [String] = read { db in
+            try String.fetchAll(db, sql: """
+                SELECT DISTINCT nt.file_id
+                  FROM note_tags nt
+                  JOIN files f ON f.id = nt.file_id AND f.is_trash = 0
+                 WHERE nt.tag = ?
+            """, arguments: [tag])
+        } ?? []
+        return Set(ids)
     }
 
     /// Count of files that don't yet have cached transcripts/summary.
@@ -695,6 +749,9 @@ final class Database: @unchecked Sendable {
         /// Which model runs auto-classify / metadata-generate by default
         /// (top-level `classify_model` key; `plaud config-classify`).
         var classifyModel: String
+        /// Tags the user pinned to the top of the sidebar Tags section
+        /// (top-level `pinned_tags` key; `plaud tag-pin`).
+        var pinnedTags: [String]
     }
 
     func loadAppConfig() -> AppConfig {
@@ -704,7 +761,8 @@ final class Database: @unchecked Sendable {
                        "grok": "api"],
             models: Self.fallbackModelIDs,
             paths: ["transcripts": "", "summaries": "", "integrated": ""],
-            classifyModel: "claude"
+            classifyModel: "claude",
+            pinnedTags: []
         )
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -714,6 +772,11 @@ final class Database: @unchecked Sendable {
         if let m = obj["models"] as? [String: String] { cfg.models.merge(m) { _, new in new } }
         if let p = obj["paths"] as? [String: String] { cfg.paths.merge(p) { _, new in new } }
         if let c = obj["classify_model"] as? String, !c.isEmpty { cfg.classifyModel = c }
+        if let t = obj["pinned_tags"] as? [String] {
+            cfg.pinnedTags = t
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
         return cfg
     }
 

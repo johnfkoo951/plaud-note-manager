@@ -171,6 +171,26 @@ markdown files   Swift app (GRDB)
 
 ## 2. 완료된 기능
 
+### 2026-06-14 v0.4 업그레이드 — Plaud Web 패리티 · 안전한 자동분류 · 태그 사이드바
+- [x] **리스트 행 Plaud Web 패리티** — 생성 일시(시각 포함, full timestamp 툴팁),
+      초 단위 길이(`1h 28m 48s`), **Generated 배지**(Plaud AI 노트 존재 시 초록 체크),
+      폴더 칩 + 읽음/별 점 + 태그까지 한 행에.
+- [x] **안전한 자동분류** — ✨ 버튼이 바로 적용하지 않고 **미리보기 시트**
+      (`classify --json` dry-run → 신뢰도순, 체크박스, 신뢰도 0.5↑ 기본 선택,
+      낮은 매칭 제외). 적용은 선택분만 (`classify --apply --only`). 적용 후
+      **되돌리기 배너**(`classify-undo` — 매니페스트 기반으로 정확히 Unfiled 복원).
+      ⌘K 팔레트에도 Undo. config `classify_model`로 사용할 모델/구독·API 선택.
+- [x] **색상 차분화 + 읽음/별** — 선택 행 핑크 채움 → 액센트 바, 마크다운 제목
+      중립색. 점 의미: 초록=안 본 것, 회색=본 것, 골드 별=즐겨찾기.
+      파일 table에 `seen_at`/`starred` (local-only, 클라우드 sync에도 보존).
+- [x] **태그 사이드바** — 좌측에 Tags 섹션(태그별 카운트, 빈도순). 클릭 시 해당
+      태그로 리스트 필터. **태그 핀**(우클릭 고정 → 상단 고정, config `pinned_tags`).
+      MetadataBar 태그 첨부 폴리시(Enter 커밋, chip x 제거, 자동완성).
+      CLI `tags-all` / `tag-pin`.
+- [x] **버전·빌드 표시** — 패키지 스크립트가 `pyproject` 버전 + git 커밋 수(build)
+      + short SHA를 Info.plist에 주입. Settings 푸터·사이드바 하단에 표시.
+- [x] **기본 창 비율** — 1920×1180 (사이드바·리스트·디테일·Work Sidebar 균형).
+
 ### 2026-06-12 v0.3 업그레이드 — 파생 진행률 + P0 UX (branch improve/v0.3-ux)
 - [x] **`plaud status` 재정의** — 정적 `files.status`(대부분 'new') 대신
       아티팩트에서 파생: `new`(메타만) → `cached`(detail 캐시) →

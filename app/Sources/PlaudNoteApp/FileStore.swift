@@ -110,6 +110,11 @@ final class FileStore: ObservableObject {
     private var masterFiles: [Database.MasterFile] = []
     @Published var files: [PlaudFileVM] = []
     @Published var folders: [FolderVM] = []
+    /// Distinct tags with file counts, refreshed in `reload()`. Drives the
+    /// sidebar Tags section.
+    @Published var tagCounts: [(tag: String, count: Int)] = []
+    /// Tags pinned to the top of the Tags section (config.json `pinned_tags`).
+    @Published var pinnedTags: [String] = []
     @Published var categoryCounts: (all: Int, unfiled: Int, starred: Int, trash: Int) = (0, 0, 0, 0)
     @Published var cacheStatus: (total: Int, cached: Int) = (0, 0)
     @Published var sidebar: SidebarItem = .allFiles
@@ -337,6 +342,8 @@ final class FileStore: ObservableObject {
         Task.detached(priority: .userInitiated) { [weak self] in
             let master = Database.shared.masterFiles()
             let folders = Database.shared.folders()
+            let tagCounts = Database.shared.tagCounts()
+            let pinnedTags = Database.shared.loadAppConfig().pinnedTags
             let categoryCounts = Database.shared.categoryCounts()
             let cacheStatus = Database.shared.contentCacheStatus()
             let metadata = selectedID.map { Database.shared.noteMetadata(for: $0) }
@@ -347,6 +354,8 @@ final class FileStore: ObservableObject {
                 guard generation == strongSelf.reloadGeneration else { return }
                 strongSelf.masterFiles = master
                 strongSelf.folders = folders
+                strongSelf.tagCounts = tagCounts
+                strongSelf.pinnedTags = pinnedTags
                 strongSelf.categoryCounts = categoryCounts
                 strongSelf.cacheStatus = cacheStatus
                 // Re-derive the visible list against the freshly-loaded master
@@ -385,6 +394,8 @@ final class FileStore: ObservableObject {
                 matchesSidebar = item.file.isTrash
             case .folder(let id):
                 matchesSidebar = !item.file.isTrash && item.folderIDs.contains(id)
+            case .tag(let tag):
+                matchesSidebar = !item.file.isTrash && item.file.allTags.contains(tag)
             }
             guard matchesSidebar else { return nil }
             if !needle.isEmpty {
@@ -511,26 +522,104 @@ final class FileStore: ObservableObject {
 
     @Published var classifyRunning: Bool = false
     @Published var classifyResult: String?
+    /// Decoded dry-run plans driving the preview sheet (nil = sheet closed).
+    @Published var classifyPlans: [ClassifyPlan]?
+    /// Set after a successful apply so the file list can offer an undo banner.
+    /// `count` = how many recordings were actually moved.
+    @Published var lastClassifyApply: (count: Int, at: Date)?
 
-    /// Auto-classify recordings into the Plaud folder taxonomy and move them
-    /// into the matched folders (`classify --apply`). The App's unique
-    /// capability — the web client cannot do this. Reports a short summary of
-    /// how many files were moved, then refreshes the library.
-    func classify() async {
+    /// One planned classification, decoded from `plaud classify --json`.
+    /// In a dry run (`moved_to == ""`) this is a proposal; the preview lets the
+    /// user uncheck wrong matches before applying.
+    struct ClassifyPlan: Identifiable, Hashable, Decodable {
+        let fileID: String
+        let title: String
+        let folderName: String
+        let confidence: Double
+        let reason: String
+
+        var id: String { fileID }
+
+        enum CodingKeys: String, CodingKey {
+            case fileID = "file_id"
+            case title
+            case folderName = "folder_name"
+            case confidence
+            case reason
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            self.fileID = (try? c.decode(String.self, forKey: .fileID)) ?? ""
+            self.title = (try? c.decode(String.self, forKey: .title)) ?? "(untitled)"
+            self.folderName = (try? c.decode(String.self, forKey: .folderName)) ?? ""
+            self.confidence = (try? c.decode(Double.self, forKey: .confidence)) ?? 0
+            self.reason = (try? c.decode(String.self, forKey: .reason)) ?? ""
+        }
+    }
+
+    /// Run a DRY-RUN classification (`classify --json`, no `--apply`) and
+    /// publish the decoded plans into `classifyPlans` to open the preview
+    /// sheet. The App's unique capability — the web client cannot do this.
+    /// Nothing is moved here; the user reviews + confirms in the sheet.
+    func classifyPreview() async {
         guard !classifyRunning else { return }
         classifyRunning = true
         defer { classifyRunning = false }
-        let output = await runPlaudOutput(args: ["classify", "--apply"])
+        let output = await runPlaudOutput(args: ["classify", "--json"])
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8), !data.isEmpty,
+              let plans = try? JSONDecoder().decode([ClassifyPlan].self, from: data)
+        else {
+            // Only surface an error if the command itself didn't already report
+            // one (runPlaudOutput sets lastCommandError on non-zero exit).
+            if lastCommandError == nil {
+                classifyResult = "No recordings to classify, or the plan could not be read."
+            }
+            return
+        }
+        // Only files that resolved to a folder are actionable proposals.
+        let actionable = plans.filter { !$0.folderName.isEmpty }
+        if actionable.isEmpty {
+            classifyResult = "No recordings matched a folder."
+            return
+        }
+        classifyPlans = actionable.sorted { $0.confidence > $1.confidence }
+    }
+
+    /// Apply classification for ONLY the given file ids (`classify --apply`
+    /// with one `--only <id>` each), then sync + reload. Sets
+    /// `lastClassifyApply` so the UI can offer an Undo banner.
+    func applyClassify(fileIDs: [String]) async {
+        guard !classifyRunning, !fileIDs.isEmpty else { return }
+        classifyRunning = true
+        defer { classifyRunning = false }
+        let args = ["classify", "--apply"] + fileIDs.flatMap { ["--only", $0] }
+        let output = await runPlaudOutput(args: args)
         await sync(showError: false)
-        // CLI prints one line per file; lines with `->` were actually moved.
-        let lines = output
-            .components(separatedBy: .newlines)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        let moved = lines.filter { $0.contains("->") }.count
-        classifyResult = moved > 0
-            ? "Auto-classified \(moved) recording\(moved == 1 ? "" : "s") into folders."
-            : "No recordings matched a folder with enough confidence."
+        // The JSON array has `moved_to` set for files that were actually moved.
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        var moved = fileIDs.count
+        if let data = trimmed.data(using: .utf8), !data.isEmpty,
+           let results = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
+            let movedCount = results.filter {
+                let to = ($0["moved_to"] as? String) ?? ""
+                return !to.isEmpty
+            }.count
+            if movedCount > 0 { moved = movedCount }
+        }
+        lastClassifyApply = (count: moved, at: Date())
+    }
+
+    /// Revert the last applied classification (`classify-undo --json`), then
+    /// sync + reload and clear the undo banner.
+    func classifyUndo() async {
+        guard !classifyRunning else { return }
+        classifyRunning = true
+        defer { classifyRunning = false }
+        _ = await runPlaudOutput(args: ["classify-undo", "--json"])
+        lastClassifyApply = nil
+        await sync(showError: false)
     }
 
     /// Background backfill of transcript/summary cache for every file.
@@ -584,11 +673,29 @@ final class FileStore: ObservableObject {
         guard !tag.isEmpty else { return }
         await runPlaud(args: ["tag-add", fileID, tag])
         noteMetadata = Database.shared.noteMetadata(for: fileID)
+        // Refresh the sidebar tag counts + the file's chip set.
+        reload()
     }
 
     func removeTag(_ tag: String, from fileID: String) async {
         await runPlaud(args: ["tag-remove", fileID, tag])
         noteMetadata = Database.shared.noteMetadata(for: fileID)
+        reload()
+    }
+
+    /// Pin a tag to the top of the sidebar Tags section (`plaud tag-pin`),
+    /// then reload so the pinned list and counts converge.
+    func pinTag(_ tag: String) async {
+        await runPlaud(args: ["tag-pin", tag])
+        pinnedTags = Database.shared.loadAppConfig().pinnedTags
+        reload()
+    }
+
+    /// Unpin a tag (`plaud tag-pin <tag> --off`).
+    func unpinTag(_ tag: String) async {
+        await runPlaud(args: ["tag-pin", tag, "--off"])
+        pinnedTags = Database.shared.loadAppConfig().pinnedTags
+        reload()
     }
 
     @Published var metadataGeneratingIDs: Set<String> = []
