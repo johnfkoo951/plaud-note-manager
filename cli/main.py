@@ -1277,6 +1277,37 @@ def search_reindex() -> None:
     console.print(f"[green]indexed {n}[/green] recordings for search")
 
 
+@safe_command(name="prune-empty-cache")
+def prune_empty_cache(
+    refetch: bool = typer.Option(
+        False, "--refetch", help="Immediately re-fetch each cleared file from Plaud."
+    ),
+) -> None:
+    """Clear stale empty caches (recordings stored before Plaud finished
+    processing) so they show as uncached and re-fetch with real content."""
+    storage = Storage()
+    ids = storage.delete_empty_content()
+    if not ids:
+        console.print("[green]ok[/green] no empty caches to prune")
+        return
+    console.print(f"[green]pruned {len(ids)}[/green] empty caches")
+    if not refetch:
+        console.print("  re-fetch via the app Backfill button, by clicking each, or --refetch")
+        return
+    cfg = load_config()
+    ok = 0
+    with PlaudClient(cfg) as client:
+        for fid in ids:
+            try:
+                content = client.file_content(fid)
+                storage.save_content(content, now=int(time.time()))
+                if not content.is_empty:
+                    ok += 1
+            except Exception as exc:  # noqa: BLE001 — report, keep going
+                console.print(f"[yellow]skip[/yellow] {fid}: {exc}")
+    console.print(f"[green]re-fetched {ok}[/green] / {len(ids)} (still-empty ones stay uncached)")
+
+
 @safe_command(name="classify-undo")
 def classify_undo(
     json_out: bool = typer.Option(False, "--json"),

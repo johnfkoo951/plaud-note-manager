@@ -74,6 +74,13 @@ class FileContent(BaseModel):
     folder_ids: list[str] = Field(default_factory=list)
 
     @property
+    def is_empty(self) -> bool:
+        """True when Plaud returned nothing usable — typically because the
+        recording is still being processed. Such results must NOT be cached as
+        final, or the file gets stuck showing 'no content' forever."""
+        return not self.transcript and not self.summaries and not self.outline
+
+    @property
     def summary_md(self) -> str | None:
         for s in self.summaries:
             if s.kind == "auto_sum_note":

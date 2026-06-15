@@ -454,6 +454,12 @@ class Storage:
     # ---------- content ----------
 
     def save_content(self, content: FileContent, *, now: int) -> None:
+        # Never persist an empty Plaud result (still-processing recording) — it
+        # would create a stale "no content" cache that never self-heals. Folder
+        # assignment is independent of content, so still sync that.
+        if content.is_empty:
+            self.set_file_folders(content.file_id, content.folder_ids)
+            return
         with self._connect() as conn:
             conn.execute(
                 """
@@ -489,6 +495,27 @@ class Storage:
                     conn, content.file_id, content.title, transcript_json, content.summary_md
                 )
         self.set_file_folders(content.file_id, content.folder_ids)
+
+    def delete_empty_content(self) -> list[str]:
+        """Drop stale empty caches (no transcript/summary/outline) so they
+        re-fetch. Returns the cleared file ids."""
+        with self._connect() as conn:
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    """
+                    SELECT file_id FROM file_content
+                     WHERE COALESCE(length(transcript), 0) <= 2
+                       AND COALESCE(length(summary_md), 0) = 0
+                       AND COALESCE(length(outline), 0) <= 2
+                    """
+                ).fetchall()
+            ]
+            for fid in ids:
+                conn.execute("DELETE FROM file_content WHERE file_id = ?", (fid,))
+                if self._fts_ok:
+                    conn.execute("DELETE FROM recording_fts WHERE file_id = ?", (fid,))
+        return ids
 
     def get_content_row(self, file_id: str) -> sqlite3.Row | None:
         with self._connect() as conn:

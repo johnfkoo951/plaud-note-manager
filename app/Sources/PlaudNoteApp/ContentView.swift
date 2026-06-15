@@ -3621,10 +3621,19 @@ private struct PlaudPanel: View {
                         MarkdownDocumentView(text: body)
                     }
                 } else {
-                    CenteredStateView(
-                        message: "No Plaud summary cached for this recording yet.",
-                        systemImage: "doc.text.magnifyingglass"
-                    )
+                    VStack(spacing: AppUI.spacingS) {
+                        CenteredStateView(
+                            message: "이 녹음의 Plaud 요약이 아직 없습니다.\nPlaud에서 처리 중이거나 받아오지 못한 상태일 수 있어요.",
+                            systemImage: "doc.text.magnifyingglass"
+                        )
+                        if let id = store.selectedID {
+                            Button {
+                                Task { await store.refetchDetail(id) }
+                            } label: {
+                                Label("Plaud에서 다시 받아오기", systemImage: "arrow.clockwise")
+                            }
+                        }
+                    }
                 }
             case .outline:
                 let outline = plaudContent.outline
