@@ -171,6 +171,18 @@ markdown files   Swift app (GRDB)
 
 ## 2. 완료된 기능
 
+### 2026-06-15 v0.5.1 — 빈 캐시 버그 수정 · 행 밀도 · 기술 사양서
+- [x] **빈 캐시(stale) 버그 수정** — Plaud 처리 완료 전 캐시되어 '내용 없음'으로
+      굳던 문제. `FileContent.is_empty` 도입, `save_content`가 빈 결과 미저장(폴더는
+      동기화). `storage.delete_empty_content()` + CLI `prune-empty-cache [--refetch]`로
+      기존 stale 정리(실DB 72→0). 앱 요약 빈-상태에 "Plaud에서 다시 받아오기" 버튼.
+- [x] **행 밀도 옵션** — 2줄(조밀)/3줄(여유) 선택(메타 1줄로 압축, 제목만 ≤2줄,
+      폰트 동일). 검색창 옆 메뉴, @AppStorage 영속.
+- [x] **상태 점 hasContent 기준** — 전사본만 있고 요약 없는 파일이 빨강으로 잘못
+      뜨던 것 수정(요약 캐시 → 전사본 캐시 기준).
+- [x] **기술 사양서** `docs/SPEC.md` — SQLite(plaud.db, WAL) 단일 DB 스키마/인덱스/
+      FTS5/볼트 인덱스/데이터 흐름 정리.
+
 ### 2026-06-14 v0.5 업그레이드 — 전체내용 검색 · 태그 뷰 · 상태 점 재설계
 - [x] **전체 내용 검색** — `recording_fts` FTS5(trigram) 인덱스로 제목·전사본·요약
       전문 검색 (한국어 부분 일치 OK, <5ms). 2글자 등 짧은 검색어는 LIKE 폴백.
