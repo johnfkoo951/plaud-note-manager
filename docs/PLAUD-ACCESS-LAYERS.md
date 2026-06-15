@@ -3,7 +3,7 @@
 Plaud Cloud 데이터에 접근·조작·생산하는 다섯 가지 채널을 한 곳에 정리. 어떤 작업을 어떤 채널로 해야 하는지 결정할 때 본 문서를 SSOT로 사용한다.
 
 - 최초 작성: 2026-05-20
-- 최신 갱신: 2026-06-11 (App 인증 — Web Login auth 추가)
+- 최신 갱신: 2026-06-15 (App v0.5.1 — 전체내용 검색 · 태그 정리 · 서버 화자 변경 · 안전한 자동분류 · Grok 구독 CLI)
 - 대상 저장소: `~/DEV/plaud-note-manager`
 - 공개 랜딩: <https://plaud.cmdspace.work> — `web/` 서브폴더 + Vercel 배포
 - Obsidian 요약: `<your-obsidian-vault>/70. Outputs/74. Projects/Plaud Note Manager/2026-05-20-plaud-access-layers.md`
@@ -84,10 +84,12 @@ plaud-note-manager/
 | **폴더 이름변경 / 색 / 아이콘** | ✅ | ✅ | ❌ | ❌ | ✅ `plaud folder-rename` → `PATCH /filetag/{id}` |
 | **폴더 삭제** | ✅ | ✅ | ❌ | ❌ | ✅ `plaud folder-delete` → `DELETE /filetag/{id}` |
 | **파일을 폴더에 할당 / 이동** | ✅ | ✅ | ❌ | ❌ | ✅ `plaud move` → `PATCH /file/{id}` (`filetag_id_list`) |
-| **AI 기반 자동 분류 → 폴더 배치** | ❌ | ❌ | ❌ | ❌ | ✅ `plaud classify --apply` (14개 카테고리 SSOT) |
-| **폴더 배치 계획 미리보기** | — | — | ❌ | ❌ | ✅ `plaud folder-plan` |
-| 스피커 라벨 편집 (Plaud 서버) | ✅ | ✅ | ❌ | ❌ | ❌ |
-| 트랜스크립트 텍스트 수정 (Plaud 서버) | ✅ | ✅ | ❌ | ❌ | ❌ |
+| **AI 기반 자동 분류 → 폴더 배치** | ❌ | ❌ | ❌ | ❌ | ✅ `plaud classify --apply` (앱은 미리보기 + 선택 적용 + `classify-undo`) |
+| **폴더 배치 계획 미리보기** | — | — | ❌ | ❌ | ✅ `plaud folder-plan` · 앱 자동분류 미리보기 시트 |
+| **전체 내용 검색** (제목·전사본·요약) | △ | △ | ❌ | ❌ | ✅ `plaud search` (FTS5 trigram, 한국어 부분 일치) |
+| **태그 정리 / 핀 / 중첩 뷰** | ❌ | ❌ | ❌ | ❌ | ✅ `plaud tag-add` · `tags-all` · `tag-pin` |
+| 스피커 라벨 편집 (Plaud 서버) | ✅ | ✅ | ❌ | ❌ | ✅ `plaud plaud-relabel` (서버 trans_result PATCH, 2026-06-11) |
+| 트랜스크립트 텍스트 수정 (Plaud 서버) | ✅ | ✅ | ❌ | ❌ | △ (같은 trans_result 엔드포인트로 가능 — 앱은 화자 변경만 노출) |
 | 세션 삭제 / 휴지통 | ✅ | ✅ | ❌ | ❌ | ❌ |
 | 공유링크 생성 | ✅ | ✅ | ❌ | ❌ | ❌ |
 | **녹음 중 실시간 라벨 / 하이라이트** | ❌ | ✅ | ❌ | ❌ | ❌ |

@@ -900,8 +900,8 @@
     <div class="hero-bg"></div>
     <div class="hero-inner">
         <div class="hero-eyebrow">
-            <span class="en-only">Plaud Access Layers · Updated 2026-05-22</span>
-            <span class="ko-only">Plaud 접근 5축 · 2026-05-22 업데이트</span>
+            <span class="en-only">Plaud Access Layers · Updated 2026-06-15</span>
+            <span class="ko-only">Plaud 접근 5축 · 2026-06-15 업데이트</span>
         </div>
         <h1 class="hero-title">
             <span class="en-only">One Plaud account.<br><span class="grad">Five channels</span> to use it.</span>
@@ -949,9 +949,9 @@
             </div>
             <div class="idea-body">
                 <p class="en-only">After Plaud announced its official MCP server (2026-05-13), three more channels became visible: a public OAuth MCP, an unofficial bash skill, and a self-hosted Python·SwiftUI app that already wraps the web API. Add the official Web and Desktop apps, and you get <em>five</em>.</p>
-                <p class="en-only">They are not interchangeable. MCP is read-only. Skill exposes content MCP can't see (markMemo, highlight). The App is the only channel that can create folders, classify recordings with AI, and push to Obsidian. Desktop is the only channel that can <em>record live meetings</em> from system audio.</p>
+                <p class="en-only">They are not interchangeable. MCP is read-only. Skill exposes content MCP can't see (markMemo, highlight). The App is the only channel that creates folders, auto-classifies recordings with AI, searches across every transcript, organizes by tags, and pushes to Obsidian. Desktop is the only channel that can <em>record live meetings</em> from system audio.</p>
                 <p class="ko-only">2026-05-13 Plaud가 공식 MCP 서버를 발표하면서 세 가지 채널이 더 가시화됐습니다 — OAuth MCP, 비공식 bash 스킬, 그리고 web API를 직접 감싸는 자체 Python·SwiftUI 앱. 거기에 공식 Web·Desktop을 더하면 <em>다섯 축</em>이 됩니다.</p>
-                <p class="ko-only">이들은 서로 대체재가 아닙니다. MCP는 read-only. 스킬은 MCP가 못 보는 콘텐츠(markMemo, highlight)를 노출합니다. 앱은 폴더 생성·AI 자동 분류·Obsidian 송출이 가능한 유일한 채널. Desktop은 시스템 오디오로 <em>회의를 실시간 녹음</em>할 수 있는 유일한 채널입니다.</p>
+                <p class="ko-only">이들은 서로 대체재가 아닙니다. MCP는 read-only. 스킬은 MCP가 못 보는 콘텐츠(markMemo, highlight)를 노출합니다. 앱은 폴더 생성·AI 자동 분류·전체 전사본 검색·태그 정리·Obsidian 송출이 가능한 유일한 채널. Desktop은 시스템 오디오로 <em>회의를 실시간 녹음</em>할 수 있는 유일한 채널입니다.</p>
             </div>
         </div>
     </div>
@@ -1014,8 +1014,8 @@
                 <div class="file-precedence">5</div>
                 <div>
                     <div class="file-name"><code>App</code><span class="file-tag" style="background: color-mix(in srgb, var(--cmds-green) 10%, transparent);">⚠️ Unofficial</span></div>
-                    <div class="file-desc en-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS app. Only channel with write power (folder CRUD, rename, AI auto-classify, Obsidian export).</div>
-                    <div class="file-desc ko-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS 앱. 쓰기 권한을 가진 유일한 비공식 채널 (폴더 CRUD · 제목 변경 · AI 자동 분류 · Obsidian 송출).</div>
+                    <div class="file-desc en-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS app. The only write-capable channel: folder CRUD, title &amp; server-transcript speaker rename, safe AI auto-classify (preview + undo), full-content search (FTS5, Korean substring), tag organization, multi-model AI summaries (Claude/Codex/Gemini/Grok via subscription), and Obsidian export.</div>
+                    <div class="file-desc ko-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS 앱. 쓰기 권한을 가진 유일한 비공식 채널: 폴더 CRUD · 제목/서버 전사본 화자 변경 · 안전한 AI 자동 분류(미리보기·되돌리기) · 전체 내용 검색(FTS5, 한국어 부분 일치) · 태그 정리 · 멀티모델 AI 요약(Claude·Codex·Gemini·Grok 구독 활용) · Obsidian 송출.</div>
                 </div>
                 <div class="file-audience">Manage + Power</div>
             </div>
@@ -1106,12 +1106,12 @@
                 </div>
                 <div class="aud-title en-only">Write — only 3 of 5 can write</div>
                 <div class="aud-title ko-only">쓰기 — 5축 중 3축만 가능</div>
-                <p class="aud-desc en-only">Web and Desktop have full edit (rename, folder CRUD, speaker labels, delete). App matches them on rename + folder, and is the <em>only</em> channel that adds AI-based auto-classification. MCP and Skill are read-only.</p>
-                <p class="aud-desc ko-only">Web · Desktop은 풀 편집 (제목 · 폴더 CRUD · 스피커 라벨 · 삭제). 앱은 제목 · 폴더만 동등, 대신 AI 자동 분류는 <em>유일</em>. MCP · Skill은 read-only.</p>
+                <p class="aud-desc en-only">Web and Desktop have full edit (rename, folder CRUD, speaker labels, delete). App matches rename + folder, renames speakers in the <em>server transcript</em>, and is the <em>only</em> channel that adds AI auto-classification, full-content search, and tag organization. MCP and Skill are read-only.</p>
+                <p class="aud-desc ko-only">Web · Desktop은 풀 편집 (제목 · 폴더 CRUD · 스피커 라벨 · 삭제). 앱은 제목 · 폴더에 더해 <em>서버 전사본</em> 화자 변경, 그리고 AI 자동 분류 · 전체 내용 검색 · 태그 정리는 <em>유일</em>. MCP · Skill은 read-only.</p>
                 <ul class="aud-list">
                     <li>✅ <span class="en-only">Web · Desktop — full edit</span><span class="ko-only">Web · Desktop — 풀 편집</span></li>
-                    <li>✅ <span class="en-only">App — rename · folder CRUD · move</span><span class="ko-only">App — 제목 변경 · 폴더 CRUD · 이동</span></li>
-                    <li>⭐ <span class="en-only">App only — AI auto-classify (14 categories)</span><span class="ko-only">App만 — AI 자동 분류 (14 카테고리)</span></li>
+                    <li>✅ <span class="en-only">App — rename · folder CRUD · move · speaker rename</span><span class="ko-only">App — 제목 변경 · 폴더 CRUD · 이동 · 화자 변경</span></li>
+                    <li>⭐ <span class="en-only">App only — safe AI auto-classify (preview + undo) · full-content search · tags</span><span class="ko-only">App만 — 안전한 AI 자동 분류(미리보기·되돌리기) · 전체 내용 검색 · 태그</span></li>
                     <li>❌ <span class="en-only">MCP · Skill — no write at all</span><span class="ko-only">MCP · Skill — 쓰기 0건</span></li>
                 </ul>
             </div>
