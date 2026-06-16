@@ -185,3 +185,51 @@ uv run ruff format --check core cli tests
 swift build --package-path app
 scripts/package-macos-app.sh               # → /Applications, 버전=pyproject + build=git commit수
 ```
+
+---
+
+## 8. DB 들여다보기 (탐색 방법)
+
+`data/plaud.db`를 직접 열어 스키마·데이터를 확인하는 세 가지 방법.
+앱이 켜져 있어도 **읽기는 안전**(WAL 동시 읽기). 안전하게 하려면 read-only로 연다.
+
+### 8.1 `sqlite3` — macOS 기본 내장(설치 불필요), 가장 빠름
+
+```bash
+cd ~/DEV/plaud-note-manager
+sqlite3 "file:data/plaud.db?mode=ro"      # read-only로 안전하게
+```
+자주 쓰는 명령:
+```sql
+.tables                 -- 테이블 목록
+.schema files           -- 특정 테이블 구축문(CREATE) — ALTER 이력까지 보임
+.schema                 -- 전체 스키마 한 번에
+.mode column
+.headers on
+SELECT filename, duration, starred FROM files LIMIT 10;
+SELECT tag, COUNT(*) n FROM note_tags GROUP BY tag ORDER BY n DESC LIMIT 10;
+PRAGMA journal_mode;    -- wal
+PRAGMA user_version;    -- 스키마 버전 (SCHEMA_VERSION)
+.quit
+```
+전체 스키마를 파일로 덤프:
+```bash
+sqlite3 data/plaud.db .schema > /tmp/plaud-schema.sql
+```
+
+### 8.2 GUI로 클릭하며 보기
+
+- **DB Browser for SQLite** (무료): `brew install --cask db-browser-for-sqlite`
+  → 앱에서 `data/plaud.db`를 **Open Database Read-Only**로 열면 앱과 충돌 없음.
+- **TablePlus** / **DBeaver**도 동일하게 열린다.
+
+### 8.3 Datasette — 브라우저 웹 UI(검색·필터·패싯·JSON), 탐색에 가장 좋음
+
+```bash
+uv tool install datasette
+datasette ~/DEV/plaud-note-manager/data/plaud.db --open
+# → http://localhost:8001 에 모든 테이블이 클릭 가능한 웹 UI로 뜸
+```
+
+> 참고: AI 결과물 본문(전사/요약/통합)은 DB가 아니라 `data/{transcripts,
+> summaries,integrated}/{file_id}/*.md` 파일에 있다(§1). DB에는 캐시/메타/인덱스만.
