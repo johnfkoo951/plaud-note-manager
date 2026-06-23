@@ -34,8 +34,8 @@ private enum AppearanceMode: String, CaseIterable, Identifiable {
 }
 
 enum AppUI {
-    static let radius: CGFloat = 10
-    static let tightRadius: CGFloat = 7
+    static let radius: CGFloat = 12          // Updated for 2026 rounded modern look
+    static let tightRadius: CGFloat = 8
     static let panelPadding: CGFloat = 12
 
     // Spacing scale — use these instead of scattered literals so padding
@@ -54,10 +54,18 @@ enum AppUI {
 
     static let brandGreen = Color(red: 0.075, green: 0.271, blue: 0.220)
     static let accentPink = Color(red: 0.847, green: 0.365, blue: 0.525)
+
+    // Legacy fills (kept for compatibility)
     static let subtleFill = Color(NSColor.controlBackgroundColor).opacity(0.58)
     static let selectedFill = Color(NSColor.controlBackgroundColor).opacity(0.95)
     static let cardFill = Color(NSColor.controlBackgroundColor).opacity(0.44)
     static let cardStroke = Color(NSColor.separatorColor).opacity(0.42)
+
+    // 2026 Liquid Glass / modern Apple design (WWDC25+)
+    // Use .regularMaterial for floating controls, glass for nav/toolbars
+    // .glassEffect() for interactive floating elements (macOS Tahoe+)
+    static let glassRadius: CGFloat = 12
+    static let glassStroke = Color.white.opacity(0.25)  // subtle highlight for glass
 }
 
 private func formatRecordingDurationMs(_ ms: Double?) -> String {
@@ -171,10 +179,10 @@ private struct ToolbarIconLabel: View {
             .foregroundStyle(active ? .primary : .secondary)
             .frame(width: 32, height: 32)
             .background(
-                active ? AppUI.selectedFill : Color.clear,
-                in: RoundedRectangle(cornerRadius: AppUI.radius)
+                active ? AppUI.selectedFill : AppUI.subtleFill,
+                in: RoundedRectangle(cornerRadius: 8)
             )
-            .contentShape(RoundedRectangle(cornerRadius: AppUI.radius))
+            .contentShape(RoundedRectangle(cornerRadius: 8))
     }
 }
 
@@ -479,6 +487,7 @@ struct ContentView: View {
         NavigationSplitView {
             SidebarView(store: store)
                 .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+                // 2026 Liquid Glass: .backgroundExtensionEffect() on macOS 26+ for floating sidebar
         } content: {
             FileListView(store: store)
                 .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
@@ -1468,6 +1477,7 @@ private struct FileListView: View {
                     .padding(.bottom, 8)
             }
 
+            // Polished search bar: rounded container with consistent internal treatment
             HStack(spacing: 8) {
                 // Magnifier doubles as a scope menu (파일명 ⇄ 전체내용).
                 Menu {
@@ -1484,6 +1494,7 @@ private struct FileListView: View {
                           ? "doc.text.magnifyingglass" : "magnifyingglass")
                         .foregroundStyle(searchScopeContent
                                          ? AppUI.accentPink : .secondary)
+                        .frame(width: 18)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
@@ -1494,6 +1505,7 @@ private struct FileListView: View {
                           text: $store.search)
                     .textFieldStyle(.plain)
                     .font(AppUI.bodyFont)
+                    .frame(maxWidth: .infinity)
 
                 if store.contentSearchRunning {
                     ProgressView()
@@ -1512,15 +1524,25 @@ private struct FileListView: View {
                 } label: {
                     Image(systemName: rowDensity.symbol)
                         .foregroundStyle(.secondary)
+                        .frame(width: 18)
                 }
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
                 .help("행 밀도: 2줄(조밀) 또는 3줄(여유)")
             }
-            .padding(.horizontal, AppUI.spacingM)
+            .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .background(AppUI.subtleFill)
+            // Clean modern search container – matches the dark theme and metric cards above.
+            // Uses subtle dark fill with rounded corners for a cohesive header area.
+            .background(
+                RoundedRectangle(cornerRadius: 10)
+                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.75))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 10)
+                    .stroke(Color.white.opacity(0.08), lineWidth: 0.5)
+            )
             // Keep the store's scope mirror in sync with the persisted toggle.
             .onAppear { store.contentSearchScope = searchScopeContent }
             .onChange(of: searchScopeContent) { _, newValue in
@@ -1833,21 +1855,14 @@ private struct LibraryOverview: View {
             }
         }
         .padding(12)
+        // 2026 Liquid Glass inspired: regularMaterial + brand tint overlay + glass stroke
         .background(
-            LinearGradient(
-                colors: [
-                    AppUI.brandGreen.opacity(0.13),
-                    AppUI.accentPink.opacity(0.09),
-                    AppUI.cardFill,
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: AppUI.radius)
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .fill(.regularMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: AppUI.radius)
-                .stroke(AppUI.cardStroke, lineWidth: 1)
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .stroke(AppUI.glassStroke, lineWidth: 0.6)
         )
     }
 }
@@ -1962,8 +1977,8 @@ private struct FileRow: View {
     }
 
     private var rowFill: Color {
-        if isSelected { return Color.primary.opacity(0.07) }
-        if hovering { return Color.primary.opacity(0.05) }
+        if isSelected { return Color.primary.opacity(0.09) }
+        if hovering { return Color.primary.opacity(0.04) } // subtle modern hover (glass-like)
         return Color.clear
     }
 
@@ -2897,9 +2912,30 @@ private struct DetailView: View {
                 newPlayer.play()
             }
         } else {
-            ContentUnavailableView("No file selected",
-                                   systemImage: "waveform",
-                                   description: Text("Pick a recording from the list."))
+            // Nicer empty state for the detail pane – matches the modern dark/glass aesthetic
+            VStack(spacing: 16) {
+                Image(systemName: "waveform")
+                    .font(.system(size: 48, weight: .light))
+                    .foregroundStyle(.secondary)
+                    .symbolRenderingMode(.hierarchical)
+
+                VStack(spacing: 6) {
+                    Text("No file selected")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text("Pick a recording from the list to see details,\ntranscripts, and AI summaries.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                }
+            }
+            .frame(maxWidth: 320)
+            .padding(40)
+            .background(
+                RoundedRectangle(cornerRadius: 16)
+                    .fill(Color(NSColor.controlBackgroundColor).opacity(0.6))
+            )
         }
     }
 
@@ -2932,18 +2968,33 @@ private struct DetailView: View {
                         Text(source.rawValue)
                             .font(AppUI.controlFont)
                             .foregroundStyle(sourceTab == source ? .primary : .secondary)
-                            .frame(width: 74)
-                            .padding(.vertical, 5)
+                            .frame(width: 78)
+                            .padding(.vertical, 6)
                             .background(
-                                sourceTab == source ? AppUI.selectedFill : Color.clear,
+                                sourceTab == source
+                                    ? AppUI.selectedFill
+                                    : Color.clear,
                                 in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
                             )
                     }
                     .buttonStyle(.plain)
                 }
             }
-            .padding(3)
-            .background(AppUI.subtleFill, in: RoundedRectangle(cornerRadius: AppUI.radius))
+            .padding(4)
+            // Liquid Glass segmented for 2026
+            .background(
+                RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                    .fill(.regularMaterial)
+            )
+            // Liquid Glass style via material + stroke (glassEffect for macOS 26+)
+            .background(
+                RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                    .fill(.regularMaterial)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                    .stroke(AppUI.glassStroke, lineWidth: 0.5)
+            )
             Spacer(minLength: 0)
         }
     }
@@ -2991,26 +3042,30 @@ private struct DetailView: View {
                             .opacity(titleHovered ? 1 : 0)
                             .help("Rename recording")
                         }
-                        Button {
-                            if let id = store.selectedID {
-                                Task { await store.refetchDetail(id) }
+                        // Grouped secondary actions for cleaner header
+                        HStack(spacing: 2) {
+                            Button {
+                                if let id = store.selectedID {
+                                    Task { await store.refetchDetail(id) }
+                                }
+                            } label: {
+                                Image(systemName: "arrow.clockwise.circle")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
                             }
-                        } label: {
-                            Image(systemName: "arrow.clockwise.circle")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.tertiary)
+                            .buttonStyle(.plain)
+                            .help("Re-fetch detail (transcript + summary) from Plaud")
+
+                            Button {
+                                store.openInPlaudWeb(file.id)
+                            } label: {
+                                Image(systemName: "safari")
+                                    .font(.system(size: 13, weight: .semibold))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Open in Plaud Web (web.plaud.ai/file/\(file.id))")
                         }
-                        .buttonStyle(.plain)
-                        .help("Re-fetch detail (transcript + summary) from Plaud")
-                        Button {
-                            store.openInPlaudWeb(file.id)
-                        } label: {
-                            Image(systemName: "safari")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.tertiary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Open in Plaud Web (web.plaud.ai/file/\(file.id))")
                     }
                     .onHover { titleHovered = $0 }
                     // Recording start time — the most important context for a
@@ -3057,16 +3112,14 @@ private struct DetailView: View {
             MetadataBar(store: store, file: file)
         }
         .padding(14)
+        // Modern floating header: glass material with subtle brand tint (Liquid Glass 2026 style)
         .background(
-            LinearGradient(
-                colors: [
-                    AppUI.brandGreen.opacity(0.12),
-                    AppUI.accentPink.opacity(0.08),
-                    Color(NSColor.windowBackgroundColor).opacity(0.4),
-                ],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            )
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .fill(.regularMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .stroke(AppUI.glassStroke, lineWidth: 0.5)
         )
     }
 
@@ -4264,8 +4317,20 @@ private struct AIInspectorPanel: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(AppUI.controlFont)
-        .background(AppUI.subtleFill)
-        .cornerRadius(AppUI.radius)
+        // Liquid Glass quick actions area
+        .background(
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .fill(.regularMaterial)
+        )
+        // Liquid Glass style via material + stroke (use .glassEffect on macOS 26+)
+        .background(
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .fill(.regularMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .stroke(AppUI.glassStroke, lineWidth: 0.6)
+        )
     }
 
     private func reload() {
@@ -4375,8 +4440,20 @@ private struct AIInspectorPanel: View {
             }
         }
         .padding(10)
-        .background(AppUI.subtleFill)
-        .cornerRadius(AppUI.radius)
+        // Liquid Glass card (2026): regular material base + subtle glass stroke
+        .background(
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .fill(.regularMaterial)
+        )
+        // Liquid Glass style via material + stroke (use .glassEffect on macOS 26+)
+        .background(
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .fill(.regularMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: AppUI.glassRadius)
+                .stroke(AppUI.glassStroke, lineWidth: 0.6)
+        )
     }
 
     /// Small rounded chip for slot metadata (model id, template).
