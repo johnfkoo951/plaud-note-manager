@@ -1,4 +1,4 @@
-"""Inspect the Plaud credentials in `.env` for auth-status monitoring.
+"""Inspect macOS Keychain Plaud credentials for auth-status monitoring.
 
 The `authorization` header is a JWT (`bearer <header>.<payload>.<sig>`); its
 payload carries `iat` (issued) and `exp` (expires) plus workspace/member/role.
@@ -45,6 +45,12 @@ class AuthStatus:
     remaining_human: str | None = None
     live_state: str | None = None  # ok | rejected | unreachable | None = not checked
     live_ok: bool | None = None  # derived from live_state — never set directly
+    # Headless-renewal readiness: ready | expiring | expired | disabled |
+    # not_bootstrapped | store_unavailable.
+    # "expiring"/"expired" refer to the *refresh* token (re-bootstrap horizon),
+    # not the 24h access token tracked by `state`.
+    auto_refresh: str | None = None
+    refresh_expires_at: int | None = None  # epoch seconds, if the server told us
     detail: str = ""
 
     def __post_init__(self) -> None:
@@ -123,6 +129,8 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
     else:
         state = "valid"
 
+    auto_refresh, refresh_expires_at = _auto_refresh_state(now)
+
     live_state: str | None = None
     if live and state != "expired":
         # lazy import to avoid import cost when only decoding offline
@@ -133,10 +141,9 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
                 client.list_files(limit=1)
             live_state = "ok"
         except PlaudAPIError as exc:
-            # Only an explicit 401/403 means the token was rejected. The Plaud
-            # backend returns spurious 500s, and network errors carry no status
-            # code at all — both just mean we couldn't verify.
-            live_state = "rejected" if exc.status_code in (401, 403) else "unreachable"
+            # Plaud also reports an expired workspace token as HTTP 200 with
+            # business status -419, which is just as conclusive as HTTP 401/403.
+            live_state = "rejected" if exc.is_auth_rejection else "unreachable"
 
     return AuthStatus(
         configured=True,
@@ -151,5 +158,37 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
         seconds_remaining=remaining,
         remaining_human=_human_duration(remaining) if remaining is not None else None,
         live_state=live_state,
+        auto_refresh=auto_refresh,
+        refresh_expires_at=refresh_expires_at,
         detail=detail,
     )
+
+
+def _auto_refresh_state(now: int) -> tuple[str, int | None]:
+    """Classify automatic-renewal readiness from the Keychain credential blob."""
+    import os
+
+    if os.environ.get("PLAUD_AUTO_REFRESH", "1") == "0":
+        return "disabled", None
+
+    from .config import resolve_env_path
+    from .secret_store import CredentialStoreError, load_credential_values
+
+    try:
+        values: dict[str, str | None] = load_credential_values(resolve_env_path())
+    except CredentialStoreError:
+        return "store_unavailable", None
+
+    if not values.get("PLAUD_WS_REFRESH_TOKEN"):
+        return "not_bootstrapped", None
+
+    from .ws_refresh import REFRESH_TOKEN_WARN_WINDOW, _normalize_epoch_seconds
+
+    expires_at = _normalize_epoch_seconds(values.get("PLAUD_WS_REFRESH_EXPIRES_AT"))
+    if expires_at is None:
+        return "ready", None  # horizon unknown — assume usable until a refresh says otherwise
+    if expires_at <= now:
+        return "expired", expires_at
+    if expires_at - now <= REFRESH_TOKEN_WARN_WINDOW:
+        return "expiring", expires_at
+    return "ready", expires_at

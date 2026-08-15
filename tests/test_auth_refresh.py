@@ -16,6 +16,21 @@ curl 'https://api-apne1.plaud.ai/filetag/' \\
   -H 'cookie: sessionid=abc; workspace=cmds'
 """
 
+CURRENT_WEB_CURL = """
+curl 'https://api-apne1.plaud.ai/summary/community/templates/weekly_recommend' \\
+  -H 'accept: application/json, text/plain, */*' \\
+  -H 'app-language: en' \\
+  -H 'app-platform: web' \\
+  -H 'authorization: bearer header.payload.signature' \\
+  -H 'content-type: application/json' \\
+  -b 'session=abc; preference=ko' \\
+  -H 'edit-from: web' \\
+  -H 'origin: https://web.plaud.ai' \\
+  -H 'timezone: Asia/Seoul' \\
+  -H 'x-device-id: current-device' \\
+  --data-raw '{"language_os":"en"}'
+"""
+
 
 def test_refresh_auth_keeps_curl_clipboard_concept_and_cookie(tmp_path, monkeypatch) -> None:
     for key in (
@@ -41,6 +56,61 @@ def test_refresh_auth_keeps_curl_clipboard_concept_and_cookie(tmp_path, monkeypa
     assert cfg.headers()["x-pld-tag"] == "legacy-tag"
 
 
+def test_refresh_auth_accepts_current_weekly_curl_without_legacy_user(
+    tmp_path, monkeypatch
+) -> None:
+    for key in (
+        "PLAUD_AUTHORIZATION",
+        "PLAUD_X_DEVICE_ID",
+        "PLAUD_X_PLD_USER",
+        "PLAUD_COOKIE",
+        "PLAUD_BASE_URL",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    env_path = tmp_path / ".env"
+    result = refresh_auth(env_path=env_path, curl_text=CURRENT_WEB_CURL)
+
+    assert result.status == "ok"
+    assert result.cookie_captured is True
+    cfg = load_config(env_path)
+    assert cfg.base_url == "https://api-apne1.plaud.ai"
+    assert cfg.headers()["authorization"] == "bearer header.payload.signature"
+    assert cfg.headers()["cookie"] == "session=abc; preference=ko"
+    assert "x-pld-user" not in cfg.headers()
+    assert "PLAUD_X_PLD_USER" not in env_path.read_text(encoding="utf-8")
+
+
+def test_refresh_auth_accepts_single_line_curl_and_region_host(tmp_path, monkeypatch) -> None:
+    for key in ("PLAUD_AUTHORIZATION", "PLAUD_X_DEVICE_ID", "PLAUD_X_PLD_USER"):
+        monkeypatch.delenv(key, raising=False)
+
+    curl = (
+        "curl 'https://api-eu1.plaud.ai/filetag/' "
+        "-H 'authorization: Bearer single.line.token' -H 'x-device-id: one-line-device'"
+    )
+    env_path = tmp_path / ".env"
+
+    assert refresh_auth(env_path=env_path, curl_text=curl).status == "ok"
+    cfg = load_config(env_path)
+    assert cfg.base_url == "https://api-eu1.plaud.ai"
+    assert "x-pld-user" not in cfg.headers()
+
+
+def test_refresh_auth_rejects_non_plaud_target_without_writing(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    curl = (
+        "curl 'https://example.com/' "
+        "-H 'authorization: Bearer should.not.persist' -H 'x-device-id: nope'"
+    )
+
+    result = refresh_auth(env_path=env_path, curl_text=curl)
+
+    assert result.status == "invalid_curl"
+    assert "api-*.plaud.ai" in result.detail
+    assert not env_path.exists()
+
+
 def test_refresh_auth_stays_quiet_for_json_callers(tmp_path, capsys) -> None:
     env_path = tmp_path / ".env"
     env_path.write_text("PLAUD_AUTHORIZATION='old'\n", encoding="utf-8")
@@ -62,11 +132,45 @@ curl 'https://api-apne1.plaud.ai/filetag/' \\
 def test_refresh_auth_reports_invalid_curl(tmp_path) -> None:
     env_path = tmp_path / ".env"
 
-    result = refresh_auth(env_path=env_path, curl_text="curl 'https://x' -H 'foo: bar'")
+    result = refresh_auth(
+        env_path=env_path,
+        curl_text="curl 'https://api-apne1.plaud.ai/filetag/' -H 'foo: bar'",
+    )
 
     assert result.status == "invalid_curl"
     assert "missing required headers" in result.detail
     assert not env_path.exists()
+
+
+def test_refresh_auth_live_rejection_keeps_previous_env_byte_identical(tmp_path) -> None:
+    env_path = tmp_path / ".env"
+    previous = "PLAUD_AUTHORIZATION='Bearer old.token'\nPLAUD_X_DEVICE_ID='old-device'\n"
+    env_path.write_text(previous, encoding="utf-8")
+
+    result = refresh_auth(
+        env_path=env_path,
+        curl_text=CURRENT_WEB_CURL,
+        validate_live=True,
+        live_validator=lambda values: "rejected",
+    )
+
+    assert result.status == "live_auth_failed"
+    assert "header.payload.signature" not in result.detail
+    assert env_path.read_text(encoding="utf-8") == previous
+
+
+def test_current_capture_removes_legacy_user_from_same_process(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(
+        "PLAUD_AUTHORIZATION='Bearer old.token'\n"
+        "PLAUD_X_DEVICE_ID='old-device'\n"
+        "PLAUD_X_PLD_USER='legacy-user'\n",
+        encoding="utf-8",
+    )
+    assert load_config(env_path).headers()["x-pld-user"] == "legacy-user"
+    assert refresh_auth(env_path=env_path, curl_text=CURRENT_WEB_CURL).status == "ok"
+
+    assert "x-pld-user" not in load_config(env_path).headers()
 
 
 def test_refresh_auth_reports_empty_clipboard(tmp_path) -> None:

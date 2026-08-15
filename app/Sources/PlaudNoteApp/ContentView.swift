@@ -368,6 +368,9 @@ private struct AuthStatusIndicator: View {
                     if let live = auth.liveOK {
                         detailRow("Live ping", live ? "reachable" : "rejected")
                     }
+                    if auth.autoRefresh != nil {
+                        detailRow("Auto-refresh", autoRefreshText(auth))
+                    }
                 }
             } else {
                 Text("Loading auth status…")
@@ -376,22 +379,54 @@ private struct AuthStatusIndicator: View {
             }
 
             Divider()
-            VStack(alignment: .leading, spacing: 6) {
-                Text(style.needsReauth ? "Re-authenticate" : "Update credentials")
-                    .font(AppUI.controlFont)
-                Text("Open Plaud in your browser, then import the copied cURL inside the app.")
-                    .font(AppUI.metaFont)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Button {
-                    showAuthSheet = true
-                } label: {
-                    Label(
-                        style.needsReauth ? "Authenticate with Plaud" : "Update Plaud Credentials",
-                        systemImage: "key.viewfinder"
-                    )
+            if store.auth?.autoRefreshReady == true {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(style.needsReauth ? "Renew token" : "Headless refresh")
+                        .font(AppUI.controlFont)
+                    Text("Tokens renew automatically in the background — no browser needed. Re-authenticate only if refresh stops working.")
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack(spacing: 8) {
+                        Button {
+                            Task { await store.refreshWorkspaceToken() }
+                        } label: {
+                            HStack(spacing: 6) {
+                                if store.refreshingWorkspaceToken {
+                                    ProgressView().controlSize(.small)
+                                }
+                                Label("Refresh Token Now", systemImage: "arrow.triangle.2.circlepath")
+                            }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(store.refreshingWorkspaceToken || store.refreshingAuth)
+                        .help("Mint a fresh 24h token from the stored workspace refresh token")
+
+                        Button {
+                            showAuthSheet = true
+                        } label: {
+                            Label("Re-authenticate…", systemImage: "key.viewfinder")
+                        }
+                    }
                 }
-                .buttonStyle(.borderedProminent)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(style.needsReauth ? "Re-authenticate" : "Update credentials")
+                        .font(AppUI.controlFont)
+                    Text("One-time setup: sign in once with Plaud Web Login. The verified rotating session is kept in macOS Keychain; after that no browser is needed.")
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Button {
+                        showAuthSheet = true
+                    } label: {
+                        Label(
+                            style.needsReauth ? "Authenticate with Plaud" : "Update Plaud Credentials",
+                            systemImage: "key.viewfinder"
+                        )
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
             }
 
             Divider()
@@ -423,6 +458,29 @@ private struct AuthStatusIndicator: View {
         }
         .padding(AppUI.spacingL)
         .frame(width: 360)
+    }
+
+    /// Human copy for the popover's Auto-refresh row.
+    private func autoRefreshText(_ auth: AuthStatus) -> String {
+        switch auth.autoRefresh {
+        case "ready":
+            if let epoch = auth.refreshExpiresAt {
+                return "on — armed until \(formatAuthEpoch(epoch))"
+            }
+            return "on (headless)"
+        case "expiring":
+            return "on — refresh token expiring soon, re-login recommended"
+        case "expired":
+            return "off — refresh token expired, re-login needed"
+        case "not_bootstrapped":
+            return "off — sign in once via Plaud Web Login to enable"
+        case "disabled":
+            return "off — disabled by PLAUD_AUTO_REFRESH"
+        case "store_unavailable":
+            return "unavailable — unlock macOS Keychain"
+        default:
+            return auth.autoRefresh ?? "—"
+        }
     }
 
     private func detailRow(_ label: String, _ value: String) -> some View {
@@ -822,6 +880,38 @@ private struct SettingsSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    section("Metadata") {
+                        settingsRow("Metadata model") {
+                            Picker("", selection: Binding(
+                                get: { config.metadataModel },
+                                set: { newVal in
+                                    config.metadataModel = newVal
+                                    Task { await store.setMetadataModel(newVal) }
+                                }
+                            )) {
+                                ForEach(models, id: \.self) { Text($0).tag($0) }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(width: 280)
+                        }
+                        settingsRow("Auto-generate") {
+                            Toggle("", isOn: Binding(
+                                get: { config.autoMetadata },
+                                set: { newVal in
+                                    config.autoMetadata = newVal
+                                    Task { await store.setAutoMetadata(newVal) }
+                                }
+                            ))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                        }
+                        Text(metadataModelCaption)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     section("Output folders") {
                         pathRow("Transcripts", kind: "transcripts",
                                 defaultText: "data/transcripts/")
@@ -875,8 +965,27 @@ private struct SettingsSheet: View {
         } else {
             route = "via \(model) CLI (구독)"
         }
-        return "Auto-classify and metadata generation run \(route). "
+        return "Auto-classify runs \(route). "
             + "Used whenever no explicit model override is given."
+    }
+
+    /// Billing route for the metadata model (mirrors classifyModelCaption).
+    private var metadataModelCaption: String {
+        let model = config.metadataModel
+        let providerLabels = [
+            "claude": "Anthropic", "codex": "OpenAI",
+            "gemini": "Google", "grok": "xAI",
+        ]
+        let route: String
+        if (config.backends[model] ?? "cli") == "api" {
+            route = "via \(providerLabels[model] ?? model) API "
+                + "($\(envHints[model] ?? ""))"
+        } else {
+            route = "via \(model) CLI (구독)"
+        }
+        return "Metadata generation runs \(route). With Auto-generate on, "
+            + "freshly synced recordings get metadata without a manual click "
+            + "(folder placement stays suggestion-only)."
     }
 
     private func section<Content: View>(
@@ -2851,6 +2960,10 @@ private struct DetailView: View {
     @State private var statusObserver: NSKeyValueObservation?
     @State private var sourceTab: SourceTab = .plaud
     @AppStorage("showRightWorkSidebar") private var showRightWorkSidebar: Bool = true
+    /// Persisted Work Sidebar width. HSplitView never saves its divider, so
+    /// without this the sidebar snaps back to its ideal width every launch.
+    /// Defaults to the minimum (360) — sidebar minimized, content maximized.
+    @AppStorage("workSidebarWidth") private var workSidebarWidth: Double = 360
     /// Inline title editing (detail header). Click the title (or the hover
     /// pencil) to edit; Enter commits, Esc/blur cancels.
     @State private var editingTitle = false
@@ -2874,9 +2987,20 @@ private struct DetailView: View {
                         AIInspectorPanel(store: store) {
                             showRightWorkSidebar = false
                         }
-                        // Wide enough by default that slot cards and the
-                        // source tab row never squish.
-                        .frame(minWidth: 360, idealWidth: 400, maxWidth: 520)
+                        // Min keeps slot cards from squishing; ideal restores
+                        // the user's last dragged width (default = minimized).
+                        .frame(
+                            minWidth: 360,
+                            idealWidth: max(360, min(520, workSidebarWidth)),
+                            maxWidth: 520
+                        )
+                        .background(
+                            GeometryReader { proxy in
+                                Color.clear.onChange(of: proxy.size.width) { _, width in
+                                    workSidebarWidth = Double(width)
+                                }
+                            }
+                        )
                     }
                 } else {
                     mainContent(file: file)
@@ -3190,12 +3314,10 @@ private struct DetailView: View {
     @ToolbarContentBuilder
     private func toolbar(file: PlaudFileVM) -> some ToolbarContent {
         ToolbarItem {
-            Button {
-                Task { await store.sendToObsidian(file.id) }
-            } label: {
-                ToolbarIconLabel(systemName: "paperplane")
-            }
-            .help("Send to Obsidian")
+            VaultSendMenu(store: store, fileID: file.id, compact: true)
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .help("Send to Obsidian vault")
         }
         ToolbarItem {
             Menu {
@@ -3709,7 +3831,9 @@ private struct PlaudPanel: View {
             switch AuthStateStyle(store.auth?.state) {
             case .expired:
                 CenteredStateView(
-                    message: "Plaud auth expired. Use auth > Authenticate with Plaud, then sync again.",
+                    message: store.auth?.autoRefreshReady == true
+                        ? "Plaud auth expired. Use auth > Refresh Token Now (renews without a browser), then sync again."
+                        : "Plaud auth expired. Use auth > Authenticate with Plaud, then sync again.",
                     systemImage: "xmark.shield.fill",
                     tint: .red
                 )
@@ -4129,6 +4253,92 @@ private struct CmdsPanel: View {
 ///   - `integrate` (CMDS + Plaud transcripts + Plaud summaries → final
 ///     transcript **and** comprehensive summary, both saved separately).
 ///
+/// Destination/mode menu for sending a recording's generated content into an
+/// Obsidian vault. Integrated-first: every entry defaults to the fused output
+/// (with summary/plaud fallback in the CLI). Used in the Work Sidebar Actions
+/// row, the detail toolbar, and the command palette.
+struct VaultSendMenu: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+    /// Compact = toolbar icon; full = labeled button for the Actions row.
+    var compact: Bool = false
+
+    private var isSending: Bool { store.vaultSendingIDs.contains(fileID) }
+
+    var body: some View {
+        Menu {
+            Section("Main Vault") {
+                Button {
+                    send()
+                } label: {
+                    Label("Inbox로 보내기 (통합본 · 즉시)", systemImage: "tray.and.arrow.down")
+                }
+                Button {
+                    send(withTranscript: true)
+                } label: {
+                    Label("Inbox로 + 전사본 포함", systemImage: "doc.plaintext")
+                }
+                Button {
+                    send(dest: "meetings")
+                } label: {
+                    Label("Meetings 폴더로 (63. Meetings)", systemImage: "person.2")
+                }
+            }
+            Section("Wiki Vault (CMDS_LLM_Wiki)") {
+                Button {
+                    send(to: "wiki")
+                } label: {
+                    Label("Wiki Inbox로 보내기", systemImage: "books.vertical")
+                }
+            }
+            Section("AI로 다듬어서") {
+                Button {
+                    send(via: "claude")
+                } label: {
+                    Label("Claude가 정형화 후 저장 (headless, 수 분)", systemImage: "wand.and.stars")
+                }
+                Button {
+                    send(via: "claude-window")
+                } label: {
+                    Label("Claude Terminal에서 직접 파일링…", systemImage: "terminal")
+                }
+            }
+        } label: {
+            if compact {
+                if isSending {
+                    ProgressView().controlSize(.small)
+                } else {
+                    ToolbarIconLabel(systemName: "paperplane")
+                }
+            } else {
+                HStack(spacing: 4) {
+                    if isSending {
+                        ProgressView().controlSize(.small)
+                        Text("Sending…")
+                    } else {
+                        Label("Send to Vault", systemImage: "paperplane.fill")
+                    }
+                }
+            }
+        }
+        .disabled(fileID.isEmpty || isSending)
+        .help("생성된 요약/통합본을 옵시디언 볼트로 보내기")
+    }
+
+    private func send(
+        to: String = "main",
+        dest: String = "",
+        via: String = "direct",
+        withTranscript: Bool = false
+    ) {
+        Task {
+            await store.vaultSend(
+                fileID, to: to, dest: dest, via: via, withTranscript: withTranscript
+            )
+        }
+    }
+}
+
 /// The slot row exposes a mode picker (Summary / Integrated) so the user can
 /// flip between both kinds of output for the same file.
 private struct AIInspectorPanel: View {
@@ -4199,6 +4409,8 @@ private struct AIInspectorPanel: View {
             reload()
             expanded.removeAll()
             expandedSlot = nil
+            modeMap.removeAll()  // re-derive integrated-first defaults per file
+            store.lastVaultSend = nil
         }
         .onChange(of: store.summarizingKeys.count) { _, _ in
             refreshTick &+= 1
@@ -4262,12 +4474,9 @@ private struct AIInspectorPanel: View {
                 .font(AppUI.sectionFont)
                 .foregroundStyle(.secondary)
             HStack(spacing: 6) {
-                Button {
-                    Task { await store.sendToObsidian(fid) }
-                } label: {
-                    Label("Obsidian", systemImage: "paperplane.fill")
-                }
-                .disabled(fid.isEmpty)
+                VaultSendMenu(store: store, fileID: fid)
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
 
                 Button {
                     // No explicit model: the CLI resolves the configured
@@ -4311,7 +4520,28 @@ private struct AIInspectorPanel: View {
                     Label("Summary Slot", systemImage: "plus")
                 }
                 .disabled(fid.isEmpty)
+
+                Button {
+                    // Kick every slot's Integrated generation concurrently —
+                    // each runs as its own CLI process; per-card spinners come
+                    // from summarizingKeys.
+                    for slot in slots {
+                        let s = slot
+                        Task {
+                            await store.integrate(
+                                fileID: fid, model: s.model,
+                                modelID: s.modelID ?? "", template: s.template
+                            )
+                            refreshTick &+= 1
+                        }
+                    }
+                } label: {
+                    Label("Generate All", systemImage: "arrow.triangle.merge")
+                }
+                .disabled(fid.isEmpty || slots.isEmpty || !store.summarizingKeys.isEmpty)
+                .help("모든 슬롯의 Integrated 결과를 한 번에 생성")
             }
+            vaultSendFeedback(fid)
         }
         .buttonStyle(.borderless)
         .padding(10)
@@ -4338,9 +4568,50 @@ private struct AIInspectorPanel: View {
         templates = Database.shared.listTemplates()
     }
 
+    /// Vault-send progress/result strip under the action buttons: spinner
+    /// while a send runs, then the written note's filename + Open button.
+    @ViewBuilder
+    private func vaultSendFeedback(_ fid: String) -> some View {
+        if store.vaultSendingIDs.contains(fid) {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.small)
+                Text("볼트로 보내는 중…")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        } else if let sent = store.lastVaultSend, sent.status == "ok", !sent.noteFilename.isEmpty {
+            HStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.system(size: 11))
+                Text(sent.noteFilename)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer(minLength: 4)
+                Button("Open") {
+                    store.openVaultNote(sent)
+                }
+                .controlSize(.small)
+                .font(.caption)
+            }
+        }
+    }
+
     private func mode(for slot: Database.Slot) -> SlotMode {
         if let m = modeMap[slot.id] { return m }
-        return slot.template == "integrated" ? .integrated : .summary
+        if slot.template == "integrated" { return .integrated }
+        // Integrated-first: when a fused output already exists for this slot,
+        // surface it by default — it is the artifact the user actually uses.
+        let fid = store.selectedID ?? ""
+        if !fid.isEmpty,
+           Database.shared.integratedExists(
+               fileID: fid, model: slot.outputModel, template: slot.template
+           ) {
+            return .integrated
+        }
+        return .summary
     }
 
     private func viewKind(for slot: Database.Slot) -> Database.IntegratedKind {
@@ -4417,6 +4688,22 @@ private struct AIInspectorPanel: View {
                 }
                 Spacer()
                 if hasOutput {
+                    Button {
+                        Task {
+                            await store.vaultSend(
+                                fid,
+                                content: m == .integrated ? "integrated" : "summary",
+                                model: slot.outputModel,
+                                template: slot.template
+                            )
+                        }
+                    } label: {
+                        Image(systemName: "paperplane")
+                            .font(.system(size: 10.5, weight: .semibold))
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(store.vaultSendingIDs.contains(fid))
+                    .help("이 결과물을 메인 볼트 Inbox로 보내기")
                     copyMenu(slot: slot, mode: m)
                     Button {
                         expandedSlot = slot

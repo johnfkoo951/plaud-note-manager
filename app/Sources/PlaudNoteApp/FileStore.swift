@@ -27,6 +27,11 @@ struct AuthStatus: Codable, Equatable {
     var secondsRemaining: Int?
     var remainingHuman: String?
     var liveOK: Bool?
+    /// Renewal readiness: ready | expiring | expired | disabled |
+    /// not_bootstrapped | store_unavailable.
+    var autoRefresh: String?
+    /// When the *refresh* token itself dies (epoch s) — the re-bootstrap horizon.
+    var refreshExpiresAt: Int?
     var detail: String
 
     enum CodingKeys: String, CodingKey {
@@ -40,7 +45,14 @@ struct AuthStatus: Codable, Equatable {
         case secondsRemaining = "seconds_remaining"
         case remainingHuman = "remaining_human"
         case liveOK = "live_ok"
+        case autoRefresh = "auto_refresh"
+        case refreshExpiresAt = "refresh_expires_at"
         case detail
+    }
+
+    /// True when the CLI can renew the token headlessly (no browser needed).
+    var autoRefreshReady: Bool {
+        autoRefresh == "ready" || autoRefresh == "expiring"
     }
 
     /// Fallback used when the CLI output can't be decoded — keeps the indicator
@@ -57,6 +69,8 @@ struct AuthStatus: Codable, Equatable {
             secondsRemaining: nil,
             remainingHuman: nil,
             liveOK: nil,
+            autoRefresh: nil,
+            refreshExpiresAt: nil,
             detail: detail
         )
     }
@@ -146,8 +160,11 @@ final class FileStore: ObservableObject {
     /// Latest Plaud credential health, refreshed at launch, after each sync,
     /// and on app activation. Drives the toolbar auth-status indicator.
     @Published var auth: AuthStatus?
+    /// True while `plaud ws-refresh` mints a fresh token headlessly (drives
+    /// the popover's Refresh Token button spinner).
+    @Published var refreshingWorkspaceToken: Bool = false
     /// True while `refreshAuthCredentials()` parses the copied Plaud cURL and
-    /// rewrites `.env`. Drives auth UI spinners and disabled
+    /// replaces the Keychain credential bundle. Drives auth UI spinners and disabled
     /// state.
     @Published var refreshingAuth = false
 
@@ -191,7 +208,9 @@ final class FileStore: ObservableObject {
                 .map { trimTraceLine($0) }
                 .filter { !$0.isEmpty }
             if cleaned.localizedCaseInsensitiveContains("workspace token expired") {
-                return "Plaud auth expired. Use auth > Authenticate with Plaud, then retry."
+                // Static context — can't check autoRefreshReady here, so point at
+                // the popover, which offers whichever renewal path is available.
+                return "Plaud auth expired. Use the toolbar auth button to renew, then retry."
             }
 
             if cleaned.localizedCaseInsensitiveContains("traceback")
@@ -563,6 +582,14 @@ final class FileStore: ObservableObject {
         // Cheap offline auth check after every sync — also covers launch and
         // app-activation, both of which route through `sync()`.
         await refreshAuth()
+        // Keep new recordings flowing to "Metadata Ready" without a manual
+        // Backfill click: fetch content for uncached files, which also fires
+        // the CLI's auto-metadata hook (config `auto_metadata`, on by
+        // default). No-ops fast when everything is cached; skipped while a
+        // manual deep sync is already running.
+        if !deepSyncRunning {
+            Task { await self.deepSync() }
+        }
     }
 
     /// Refresh the cached Plaud auth status via `plaud auth --json`.
@@ -592,7 +619,7 @@ final class FileStore: ObservableObject {
 
     /// Minimal shape of `plaud refresh-auth --json`'s output. The credential
     /// itself is *never* in this payload — the command writes it straight to
-    /// `.env` after parsing the copied Plaud cURL.
+    /// macOS Keychain after parsing the copied Plaud cURL.
     private struct RefreshAuthResult: Decodable {
         let status: String
         let detail: String?
@@ -614,7 +641,7 @@ final class FileStore: ObservableObject {
         defer { refreshingAuth = false }
 
         let cleanCurl = curlText?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var args = ["refresh-auth", "--json"]
+        var args = ["refresh-auth", "--json", "--validate-live"]
         let stdinText: String?
         if let cleanCurl, !cleanCurl.isEmpty {
             args.append("--stdin")
@@ -650,6 +677,18 @@ final class FileStore: ObservableObject {
             await refreshAuth(live: true)
             await sync(showError: false)
             return true
+        case "live_check_unavailable":
+            // The capture was saved, but an outage is not proof of a working
+            // connection. Keep the sheet open and let the user retry.
+            await refreshAuth(live: false)
+            lastCommandError = detailOrNil
+                ?? "자격증명은 저장했지만 Plaud 연결을 검증하지 못했습니다. 네트워크를 확인해주세요."
+            return false
+        case "live_auth_failed":
+            // Validate-before-write leaves the previous Keychain item unchanged.
+            lastCommandError = detailOrNil
+                ?? "Plaud가 복사한 인증 정보를 거부했습니다. 최신 cURL을 다시 복사해주세요."
+            return false
         case "clipboard_empty":
             lastCommandError = detailOrNil
                 ?? "Plaud API 요청을 cURL로 복사한 뒤 다시 눌러주세요."
@@ -846,6 +885,11 @@ final class FileStore: ObservableObject {
 
     @Published var metadataGeneratingIDs: Set<String> = []
     @Published var meetingNoteGeneratingIDs: Set<String> = []
+    /// Recordings with a `plaud vault-send` in flight (drives send spinners).
+    @Published var vaultSendingIDs: Set<String> = []
+    /// Last successful vault-send (path + obsidian:// URL) for the feedback
+    /// row in the Work Sidebar. Cleared when the selection changes.
+    @Published var lastVaultSend: VaultSendOutcome?
 
     /// Generate metadata + auto tags. By default no `--model` is passed so the
     /// CLI resolves the configured classify model (`plaud config-classify`) —
@@ -1141,6 +1185,17 @@ final class FileStore: ObservableObject {
     /// the Python side, preserving unknown keys.
     func setClassifyModel(_ model: String) async {
         await runPlaud(args: ["config-classify", model])
+    }
+
+    /// Set the default metadata-generate model (codex = GPT via the Codex CLI
+    /// subscription login). Same CLI-routed write as setClassifyModel.
+    func setMetadataModel(_ model: String) async {
+        await runPlaud(args: ["config-metadata-model", model])
+    }
+
+    /// Toggle automatic metadata generation after sync.
+    func setAutoMetadata(_ enabled: Bool) async {
+        await runPlaud(args: ["config-auto-metadata", enabled ? "on" : "off"])
     }
 
     /// Resolve a fresh signed audio URL via the CLI and stash it for AVPlayer.

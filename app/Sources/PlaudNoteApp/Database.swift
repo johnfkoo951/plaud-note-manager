@@ -756,9 +756,16 @@ final class Database: @unchecked Sendable {
         var backends: [String: String]
         var models: [String: String]
         var paths: [String: String]
-        /// Which model runs auto-classify / metadata-generate by default
+        /// Which model runs auto-classify by default
         /// (top-level `classify_model` key; `plaud config-classify`).
         var classifyModel: String
+        /// Which model runs metadata-generate by default — codex = GPT via
+        /// the Codex CLI subscription login
+        /// (top-level `metadata_model` key; `plaud config-metadata-model`).
+        var metadataModel: String
+        /// Auto-generate metadata for fresh files after sync
+        /// (top-level `auto_metadata` key; `plaud config-auto-metadata`).
+        var autoMetadata: Bool
         /// Tags the user pinned to the top of the sidebar Tags section
         /// (top-level `pinned_tags` key; `plaud tag-pin`).
         var pinnedTags: [String]
@@ -772,6 +779,8 @@ final class Database: @unchecked Sendable {
             models: Self.fallbackModelIDs,
             paths: ["transcripts": "", "summaries": "", "integrated": ""],
             classifyModel: "claude",
+            metadataModel: "codex",
+            autoMetadata: true,
             pinnedTags: []
         )
         guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
@@ -782,6 +791,8 @@ final class Database: @unchecked Sendable {
         if let m = obj["models"] as? [String: String] { cfg.models.merge(m) { _, new in new } }
         if let p = obj["paths"] as? [String: String] { cfg.paths.merge(p) { _, new in new } }
         if let c = obj["classify_model"] as? String, !c.isEmpty { cfg.classifyModel = c }
+        if let m = obj["metadata_model"] as? String, !m.isEmpty { cfg.metadataModel = m }
+        if let a = obj["auto_metadata"] as? Bool { cfg.autoMetadata = a }
         if let t = obj["pinned_tags"] as? [String] {
             cfg.pinnedTags = t
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }

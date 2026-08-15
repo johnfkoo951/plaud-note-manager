@@ -3,7 +3,8 @@ import Foundation
 struct PlaudWebAuthCapture: Codable, Equatable {
     var authorization: String
     var xDeviceID: String
-    var xPldUser: String
+    /// Legacy request header. New Plaud Web API traffic may omit it.
+    var xPldUser: String?
     var cookie: String?
     var xPldTag: String?
     var baseURL: String?
@@ -13,6 +14,10 @@ struct PlaudWebAuthCapture: Codable, Equatable {
     var origin: String?
     var referer: String?
     var timezone: String?
+    /// Raw web.plaud.ai localStorage `workspaceList` JSON. Carries the
+    /// workspace *refresh* token, which the CLI stores so it can renew the
+    /// 24h token headlessly — the reason embedded login beats cURL import.
+    var workspaceList: String?
 
     enum CodingKeys: String, CodingKey {
         case authorization
@@ -27,5 +32,6 @@ struct PlaudWebAuthCapture: Codable, Equatable {
         case origin
         case referer
         case timezone
+        case workspaceList = "workspace_list"
     }
 }

@@ -1,6 +1,17 @@
 # Plaud Note Manager — Development Status
 
-마지막 업데이트: 2026-06-12
+마지막 업데이트: 2026-08-15
+
+> **v0.6 (2026-08-15)**: `docs/PLAN-v0.6.md`의 M1–M3 구현 완료 —
+> ① 메타데이터 기본 모델을 GPT(Codex CLI 구독 인증)로 분리
+> (`metadata_model`, `plaud config-metadata-model`, 앱 Settings › Metadata 피커),
+> ② sync 후 자동 메타데이터 생성 (`auto_metadata` 기본 on,
+> `plaud metadata-auto [--backfill]`, sync-content 훅 + 앱 sync 연동,
+> 소스 해시 멱등 + 실패 백오프, 폴더는 제안만),
+> ③ Tier-1 인증 자동 복구 `plaud auth-recover` (cmux 브라우저의 살아있는
+> web.plaud.ai 세션에서 workspaceList 재수확 → ws-bootstrap 재가동,
+> 비밀번호 입력 없음; 앱 Auth 시트 "Recover Now" 버튼).
+> 기본 창 크기 1608×854 (14" MBP 실측 비율).
 
 Plaud Cloud 녹음을 native macOS 앱 + Python CLI 한 쌍으로 관리하고,
 CMDS 자체 전사(ElevenLabs Scribe) + 다중 모델(Claude/Codex/Gemini/Grok)

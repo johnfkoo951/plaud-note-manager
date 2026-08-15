@@ -667,6 +667,37 @@ class Storage:
         with self._connect() as conn:
             return list(conn.execute(sql, params))
 
+    def files_for_auto_metadata(
+        self,
+        *,
+        fetched_after: int | None = None,
+    ) -> list[sqlite3.Row]:
+        """Candidates for automatic metadata generation.
+
+        Cheap SQL prefilter only: has transcript/summary content, and either
+        no successful generation yet or content refetched since. The caller
+        does the precise source-hash / backoff filtering in Python.
+        """
+        sql = """
+            SELECT f.id AS file_id, fc.transcript, fc.summary_md,
+                   fc.summary_extra, fc.fetched_at,
+                   nm.generated_at, nm.metadata_json
+              FROM files f
+              JOIN file_content fc ON fc.file_id = f.id
+              LEFT JOIN note_metadata nm ON nm.file_id = f.id
+             WHERE f.is_trash = 0
+               AND (COALESCE(fc.transcript, '') != ''
+                    OR COALESCE(fc.summary_md, '') != '')
+               AND (nm.generated_at IS NULL OR fc.fetched_at > nm.generated_at)
+        """
+        params: list[int] = []
+        if fetched_after is not None:
+            sql += " AND fc.fetched_at >= ?"
+            params.append(int(fetched_after))
+        sql += " ORDER BY fc.fetched_at DESC"
+        with self._connect() as conn:
+            return list(conn.execute(sql, params))
+
     def get_note_metadata(self, file_id: str) -> sqlite3.Row | None:
         with self._connect() as conn:
             return conn.execute(

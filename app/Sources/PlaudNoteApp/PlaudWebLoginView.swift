@@ -66,6 +66,7 @@ struct PlaudWebLoginView: NSViewRepresentable {
         var isEmitting = false
         var didCapture = false
         var cookieReadAttempts = 0
+        var workspaceReadAttempts = 0
         var lastSeenGeneration = 0
         weak var webView: WKWebView?
 
@@ -105,6 +106,7 @@ struct PlaudWebLoginView: NSViewRepresentable {
             didCapture = false
             isEmitting = false
             cookieReadAttempts = 0
+            workspaceReadAttempts = 0
             latestHeaders.removeAll()
             latestURL = nil
         }
@@ -135,13 +137,21 @@ struct PlaudWebLoginView: NSViewRepresentable {
             else {
                 return
             }
+            var requestHeaders: [String: String] = [:]
+            for (key, value) in headers {
+                requestHeaders[key.lowercased()] = String(describing: value)
+            }
+            // Keep one request intact. Merging headers from unrelated API
+            // requests can pair a token with the wrong device/base URL.
+            guard requestHeaders["authorization"]?.isEmpty == false,
+                  requestHeaders["x-device-id"]?.isEmpty == false
+            else { return }
+            latestHeaders = requestHeaders
             if let urlString = body["url"] as? String {
                 latestURL = URL(string: urlString)
             }
-            for (key, value) in headers {
-                latestHeaders[key.lowercased()] = String(describing: value)
-            }
             cookieReadAttempts = 0
+            workspaceReadAttempts = 0
             emitIfComplete()
         }
 
@@ -154,14 +164,13 @@ struct PlaudWebLoginView: NSViewRepresentable {
             guard !didCapture, !isEmitting, let webView else { return }
             guard let authorization = header("authorization"),
                   let deviceID = header("x-device-id"),
-                  let user = header("x-pld-user"),
                   !authorization.isEmpty,
-                  !deviceID.isEmpty,
-                  !user.isEmpty
+                  !deviceID.isEmpty
             else {
                 onStatus("Embedded login waiting for Plaud auth headers.")
                 return
             }
+            let user = header("x-pld-user")
 
             isEmitting = true
             webView.configuration.websiteDataStore.httpCookieStore.getAllCookies { cookies in
@@ -194,9 +203,159 @@ struct PlaudWebLoginView: NSViewRepresentable {
         private func finishCapture(
             authorization: String,
             deviceID: String,
-            user: String,
+            user: String?,
             cookieLine: String
         ) {
+            // Plaud 3.x stores this under `pld_<JWT sub>:workspaceList`, not
+            // the old raw `workspaceList` key.  Select only the current JWT's
+            // account + workspace; never scan another signed-in account's
+            // namespaced value.
+            guard let webView else {
+                emitCapture(
+                    authorization: authorization, deviceID: deviceID, user: user,
+                    cookieLine: cookieLine, workspaceList: nil
+                )
+                return
+            }
+            guard let claims = workspaceClaims(authorization: authorization) else {
+                isEmitting = false
+                onStatus("Waiting for a Plaud workspace session.")
+                return
+            }
+            let script = workspaceListScript(sub: claims.sub, wid: claims.wid)
+            webView.evaluateJavaScript(script) { value, _ in
+                DispatchQueue.main.async {
+                    if let workspaceList = value as? String, !workspaceList.isEmpty {
+                        self.emitCapture(
+                            authorization: authorization, deviceID: deviceID, user: user,
+                            cookieLine: cookieLine, workspaceList: workspaceList
+                        )
+                        return
+                    }
+                    // The request hook fires before Plaud's response stores the
+                    // rotating token. Poll for up to 12 seconds instead of
+                    // completing a false-success access-token-only login.
+                    if self.workspaceReadAttempts < 30 {
+                        self.workspaceReadAttempts += 1
+                        self.onStatus("Connected; waiting for automatic-renewal token…")
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                            self.finishCapture(
+                                authorization: authorization,
+                                deviceID: deviceID,
+                                user: user,
+                                cookieLine: cookieLine
+                            )
+                        }
+                    } else {
+                        self.emitCapture(
+                            authorization: authorization, deviceID: deviceID, user: user,
+                            cookieLine: cookieLine, workspaceList: nil
+                        )
+                    }
+                }
+            }
+        }
+
+        private func workspaceClaims(authorization: String) -> (sub: String, wid: String)? {
+            let token = authorization
+                .replacingOccurrences(of: "^Bearer\\s+", with: "", options: [
+                    .regularExpression, .caseInsensitive
+                ])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let parts = token.split(separator: ".", omittingEmptySubsequences: false)
+            guard parts.count == 3 else { return nil }
+            var encoded = String(parts[1])
+                .replacingOccurrences(of: "-", with: "+")
+                .replacingOccurrences(of: "_", with: "/")
+            encoded += String(repeating: "=", count: (4 - encoded.count % 4) % 4)
+            guard let data = Data(base64Encoded: encoded),
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let sub = object["sub"] as? String, !sub.isEmpty,
+                  let wid = object["wid"] as? String, !wid.isEmpty
+            else { return nil }
+            return (sub, wid)
+        }
+
+        private func javascriptLiteral(_ value: String) -> String {
+            guard let data = try? JSONEncoder().encode(value),
+                  let literal = String(data: data, encoding: .utf8)
+            else { return "\"\"" }
+            return literal
+        }
+
+        private func workspaceListScript(sub: String, wid: String) -> String {
+            let subLiteral = javascriptLiteral(sub)
+            let widLiteral = javascriptLiteral(wid)
+            return """
+            (() => {
+              const expectedSub = \(subLiteral);
+              const expectedWid = \(widLiteral);
+              const preferredKey = `pld_${expectedSub}:workspaceList`;
+              const namespacedKeys = [];
+              for (let i = 0; i < localStorage.length; i += 1) {
+                const key = localStorage.key(i);
+                if (key && key.endsWith(':workspaceList')) namespacedKeys.push(key);
+              }
+              const preferredRaw = localStorage.getItem(preferredKey);
+              const rawValues = [];
+              if (preferredRaw !== null) {
+                rawValues.push(preferredRaw);
+              } else if (namespacedKeys.length === 0) {
+                for (const key of ['workspaceList', 'pld_workspaceList']) {
+                  const raw = localStorage.getItem(key);
+                  if (raw !== null) rawValues.push(raw);
+                }
+              }
+              const decode = (raw) => {
+                let value = raw;
+                for (let i = 0; i < 2 && typeof value === 'string'; i += 1) {
+                  try { value = JSON.parse(value); } catch (_) { return []; }
+                }
+                if (Array.isArray(value)) return value;
+                return value && typeof value === 'object' ? [value] : [];
+              };
+              const candidates = [];
+              for (const raw of rawValues) {
+                for (const entry of decode(raw)) {
+                  if (!entry || typeof entry !== 'object') continue;
+                  const workspaceId = String(entry.workspaceId ?? entry.workspace_id ?? '');
+                  const refreshToken = entry.refreshToken ?? entry.refresh_token;
+                  const rawExpiry = entry.refreshExpiresAt ?? entry.refresh_expires_at ?? null;
+                  let expiresAt = Number(rawExpiry ?? 0);
+                  if (expiresAt > 0 && expiresAt < 1e12) expiresAt *= 1000;
+                  if (workspaceId !== expectedWid) continue;
+                  if (typeof refreshToken !== 'string' || !refreshToken.trim()) continue;
+                  if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt <= Date.now()) continue;
+                  candidates.push({
+                    workspaceId,
+                    refreshToken: refreshToken.trim(),
+                    refreshExpiresAt: rawExpiry,
+                    domain: typeof entry.domain === 'string' ? entry.domain : null,
+                    expiresAt: Number.isFinite(expiresAt) ? expiresAt : 0
+                  });
+                }
+              }
+              candidates.sort((a, b) => b.expiresAt - a.expiresAt);
+              if (!candidates.length) return null;
+              const selected = candidates[0];
+              return JSON.stringify([{
+                workspaceId: selected.workspaceId,
+                refreshToken: selected.refreshToken,
+                refreshExpiresAt: selected.refreshExpiresAt,
+                domain: selected.domain
+              }]);
+            })()
+            """
+        }
+
+        private func emitCapture(
+            authorization: String,
+            deviceID: String,
+            user: String?,
+            cookieLine: String,
+            workspaceList: String?
+        ) {
+            guard !didCapture else { return }
             didCapture = true
             isEmitting = false
             onStatus(
@@ -217,7 +376,8 @@ struct PlaudWebLoginView: NSViewRepresentable {
                     editFrom: header("edit-from"),
                     origin: header("origin"),
                     referer: header("referer"),
-                    timezone: header("timezone")
+                    timezone: header("timezone"),
+                    workspaceList: workspaceList?.isEmpty == false ? workspaceList : nil
                 )
             )
         }

@@ -1,3 +1,7 @@
+---
+date created: 2026-06-15T13:46
+date modified: 2026-06-15T13:51
+---
 # Plaud Access Layers — Web · Desktop · MCP · Skill · App
 
 Plaud Cloud 데이터에 접근·조작·생산하는 다섯 가지 채널을 한 곳에 정리. 어떤 작업을 어떤 채널로 해야 하는지 결정할 때 본 문서를 SSOT로 사용한다.
@@ -115,7 +119,7 @@ App은 Plaud (및 Desktop) 이 지원하지 않는 사용자 워크플로우용 
 | Obsidian-style 태그 | `plaud tag-add` / `plaud tag-remove` |
 | `usage_status` (unused / metadata-ready / vault-linked …) | `plaud usage-status` |
 | 자체 스피커 재라벨 (ElevenLabs Scribe + saved speakers) | `plaud cmds-relabel` |
-| 자동 메타데이터 생성 (Grok / Claude / Codex / Gemini) | `plaud metadata-generate` |
+| 자동 메타데이터 생성 (Grok / Claude / Codex / Gemini) | `plaud metadata-generate` · **상시 자동**: sync 후 신규 파일 자동 생성 (`auto_metadata` 기본 on, 기본 모델 `metadata_model: codex` = GPT 구독 경로; 수동 배치는 `plaud metadata-auto [--backfill]`) |
 | Obsidian 회의록 · 강의록 생성 | `plaud meeting-note` · `plaud obsidian` |
 | 자체 트랜스크립션 (Plaud STT 대체) | `plaud cmds-transcribe` |
 | 자체 요약 · 통합 | `plaud cmds-summarize` · `plaud cmds-integrate` |
@@ -209,13 +213,34 @@ App 에서 사용:
 | MCP | `~/.plaud/tokens-mcp.json` (자동 refresh) |
 | Plaud CLI (`plfetch` 외부 도구) | `~/.plaud/tokens.json` |
 | Skill `plaud-cloud-tools` | `~/.claude/skills/plaud-cloud-tools/.env` |
-| App `plaud-note-manager` | `<repo>/.env` (PLAUD_COOKIE 포함 · 0600 권한) |
+| App `plaud-note-manager` | `<repo>/.env` (PLAUD_COOKIE · PLAUD_WS_REFRESH_TOKEN 포함 · 0600 권한) |
+
+**App 헤드리스 자동 갱신 (2026-07 신규)**: Plaud web 인증은 2-tier OAuth이며
+`POST {domain}/user-app/auth/workspace/refresh/{wid}` 가 24h 토큰을 재발급한다.
+워크스페이스 refresh token을 1회 부트스트랩하면 (Embedded Web Login이 자동
+캡쳐, 또는 devtools `copy(localStorage.getItem("workspaceList"))` →
+`plaud ws-bootstrap`) 이후 모든 CLI 명령이 만료 6h 전에 토큰을 자동 갱신한다.
+refresh token은 매 사용 시 로테이션 → `.env`에 원자적으로 영속화, 동시 갱신은
+`.env.lock` flock으로 직렬화. 수동 강제: `plaud ws-refresh`. 끄기:
+`PLAUD_AUTO_REFRESH=0`.
+
+**App Tier-1 복구 (2026-08 신규)**: refresh 체인 자체가 끊겼을 때
+(`not_bootstrapped` / `rejected`) `uv run plaud auth-recover`가 cmux
+브라우저에 이미 로그인돼 있는 web.plaud.ai 세션에서 `workspaceList`를
+재수확해 (`localStorage` 읽기 — 비밀번호 입력 없음) `ws-bootstrap`을
+재가동한다. 앱 Auth 시트 최상단 "Recover Now" 버튼과 동일. aside 등 MCP
+브라우저를 가진 Claude 세션은 `core/auth_recover.py`의 `CAPTURE_JS`를 직접
+실행해 `uv run plaud ws-bootstrap --stdin`으로 파이프하면 된다. cmux
+세션도 죽었으면 Tier 2 (Embedded Web Login, 사용자 1회 로그인).
 
 401 발생 시:
 - MCP → `login` 도구 호출
 - Skill → web.plaud.ai 에서 cURL 재캡쳐 후 `onboard` 재실행
-- App → 앱 Auth 버튼 (browser import 우선, embedded Web Login fallback) ·
-  CLI: cURL 복사 후 `uv run plaud refresh-auth` (클립보드 자동) ·
+- App → 부트스트랩되어 있으면 자동 복구 (아무 명령이나 실행, 또는
+  `uv run plaud ws-refresh`) · 체인 단절 시 `uv run plaud auth-recover`
+  (Tier-1, 위 참고) · 미부트스트랩: 앱 Auth 버튼 (Embedded Web
+  Login 권장 — 자동 갱신까지 활성화) · CLI: cURL 복사 후
+  `uv run plaud refresh-auth` (클립보드 자동) ·
   최후 fallback `pbpaste | uv run plaud onboard`
 - Desktop → 앱 내 재로그인
 
@@ -276,6 +301,15 @@ DevTools 캡쳐(`Copy as cURL`)로 확인. 인증은 기존 cURL 헤더 그대�
 
 ## 13. 변경 이력
 
+- **2026-08-15**: v0.6 — 자동 메타데이터 + Tier-1 인증 복구 (`docs/PLAN-v0.6.md`)
+  - `plaud metadata-auto` + sync-content 훅: 신규 파일 메타데이터 상시 자동 생성
+    (`auto_metadata` 기본 on · 소스 해시 멱등 · 실패 백오프 · 폴더는 제안만 ·
+    과거 백로그는 `--backfill` 옵트인)
+  - 메타데이터 기본 모델 분리: `metadata_model: codex` (GPT, Codex CLI 구독 인증 —
+    API 키 불필요) · `plaud config-metadata-model` · 앱 Settings › Metadata 피커/토글
+  - `plaud auth-recover`: cmux 브라우저 세션에서 workspaceList 재수확 →
+    headless refresh 재가동 (§10 Tier-1) · 앱 Auth 시트 "Recover Now" 버튼 ·
+    agent 게이트 완화 (expired 시 1회 자동 복구 시도)
 - **2026-06-11**: App 에 Plaud Web Login 인증 추가 (`codex/web-login-auth` 브랜치)
   - 앱 툴바 Auth 버튼 → "Authenticate with Plaud" 시트 — browser cURL import
     (Open Plaud → Import Copied cURL) 기본 · embedded Web Login (WKWebView 캡쳐) fallback

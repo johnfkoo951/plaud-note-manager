@@ -4,11 +4,18 @@ let plaudAuthCaptureScript = """
 (() => {
   if (window.__plaudAuthCaptureInstalled) { return; }
   window.__plaudAuthCaptureInstalled = true;
-  const targetHost = "api-apne1.plaud.ai";
+  const isPlaudAPI = (rawURL) => {
+    try {
+      const host = new URL(String(rawURL || ""), window.location.href).hostname.toLowerCase();
+      return host.startsWith("api") && host.endsWith(".plaud.ai");
+    } catch (_) {
+      return false;
+    }
+  };
   const post = (url, headers) => {
     try {
       const rawURL = String(url || "");
-      if (!rawURL.includes(targetHost)) { return; }
+      if (!isPlaudAPI(rawURL)) { return; }
       window.webkit.messageHandlers.plaudAuthCapture.postMessage({
         url: rawURL,
         headers: headers || {}

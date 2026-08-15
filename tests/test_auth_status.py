@@ -13,8 +13,8 @@ from core.config import ConfigError, PlaudConfig
 
 
 def test_mask_id():
-    assert mask_id("ws_clQNfkQoaS") == "ws_clQ…oaS"
-    assert mask_id("mem_clQNfkQoaT") == "mem_cl…oaT"
+    assert mask_id("ws_testWkspc9") == "ws_tes…pc9"
+    assert mask_id("mem_testMembr8") == "mem_te…br8"
     assert mask_id(None) is None
     assert mask_id("") == ""
     # short values don't reveal most of themselves
@@ -71,16 +71,16 @@ def test_valid_token(monkeypatch):
         {
             "exp": now + 50_000,
             "iat": now - 100,
-            "wid": "ws_clQNfkQoaS",
-            "mid": "mem_clQNfkQoaT",
+            "wid": "ws_testWkspc9",
+            "mid": "mem_testMembr8",
             "role": "admin",
         }
     )
     monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
     st = auth_status(now=now)
     assert st.state == "valid"
-    assert st.workspace_id == "ws_clQ…oaS"  # masked at source
-    assert st.member_id == "mem_cl…oaT"
+    assert st.workspace_id == "ws_tes…pc9"  # masked at source
+    assert st.member_id == "mem_te…br8"
     assert st.role == "admin"
     assert st.seconds_remaining == 50_000
     assert st.live_ok is None  # not pinged

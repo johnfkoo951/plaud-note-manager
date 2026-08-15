@@ -7,9 +7,13 @@ Workflow:
   4. Group word-level results into speaker segments.
   5. Persist into cmds_transcripts. Delete tempfile.
 
-The API key is loaded from `ELEVENLABS_API_KEY` env var, falling back
-to a regex parse of `~/.zshrc` so users with the key in their shell
-profile don't need to duplicate it into our `.env`.
+The API key is loaded from `ELEVENLABS_API_KEY` env var (which `load_config`
+populates from our `.env` via `load_dotenv`), falling back to a scan of the
+user's zsh startup files so users with the key in their shell profile don't
+need to duplicate it into our `.env`. The scan follows `source`/`.` directives
+(e.g. `source ~/.zshrc.secrets`) because a GUI `.app` bundle launched from
+Finder does NOT inherit the interactive shell environment — reading the rc
+files directly is the only way to recover a key kept in the shell profile.
 """
 
 from __future__ import annotations
@@ -26,17 +30,45 @@ from .client import PlaudClient
 from .config import PlaudConfig
 
 
+_KEY_RE = re.compile(r'export\s+ELEVENLABS_API_KEY\s*=\s*["\']?([^"\'\s]+)')
+# `source`/`.` may be chained after a guard, e.g. `[ -f f ] && source f`,
+# so anchor on line-start OR a `&&`/`;` separator rather than line-start only.
+_SOURCE_RE = re.compile(r'(?:^|&&|;)\s*(?:source|\.)\s+["\']?([^"\'\s;]+)', re.MULTILINE)
+
+
+def _scan_shell_files_for_key() -> str | None:
+    """Find an `export ELEVENLABS_API_KEY=...` across the zsh startup files.
+
+    Breadth-first over the rc files a login zsh reads, following `source`/`.`
+    directives so a key kept in a sourced secrets file (e.g. `~/.zshrc.secrets`)
+    is still found. Visited files are tracked to avoid loops.
+    """
+    home = Path.home()
+    queue: list[Path] = [home / ".zshrc", home / ".zshenv", home / ".zprofile"]
+    seen: set[Path] = set()
+    while queue:
+        candidate = queue.pop(0)
+        try:
+            path = candidate.expanduser().resolve()
+        except (OSError, RuntimeError):
+            continue
+        if path in seen or not path.is_file():
+            continue
+        seen.add(path)
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if m := _KEY_RE.search(text):
+            return m.group(1)
+        for sm in _SOURCE_RE.finditer(text):
+            raw = sm.group(1).replace("$HOME", str(home)).replace("${HOME}", str(home))
+            queue.append(Path(raw))
+    return None
+
+
 def load_elevenlabs_key() -> str | None:
     key = os.environ.get("ELEVENLABS_API_KEY")
     if key:
         return key
-    zshrc = Path.home() / ".zshrc"
-    if zshrc.exists():
-        text = zshrc.read_text(encoding="utf-8", errors="ignore")
-        m = re.search(r'export\s+ELEVENLABS_API_KEY\s*=\s*["\']?([^"\'\s]+)', text)
-        if m:
-            return m.group(1)
-    return None
+    return _scan_shell_files_for_key()
 
 
 def transcribe_file(

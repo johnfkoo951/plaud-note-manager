@@ -441,6 +441,7 @@ def sync_content(parallel: int = 6) -> None:
     pending = storage.files_without_content()
     if not pending:
         console.print("[green]all files already cached[/green]")
+        _maybe_auto_metadata(storage)
         return
     console.print(f"backfilling {len(pending)} files with parallel={parallel}")
     done = 0
@@ -462,6 +463,24 @@ def sync_content(parallel: int = 6) -> None:
             if done % 10 == 0:
                 console.print(f"  {done}/{len(pending)}")
     console.print(f"[green]done[/green] {done}/{len(pending)}")
+    _maybe_auto_metadata(storage)
+
+
+def _maybe_auto_metadata(storage: Storage) -> None:
+    """Post-sync hook: generate metadata for fresh files when enabled."""
+    if not app_config.auto_metadata_enabled():
+        return
+    from core.auto_metadata import run_auto_metadata
+
+    try:
+        report = run_auto_metadata(storage)
+    except Exception as exc:  # never let metadata break a sync
+        console.print(f"[yellow]auto-metadata skipped[/yellow] {exc}")
+        return
+    if report.aborted:
+        console.print(f"[yellow]{report.summary()}[/yellow]")
+    elif report.generated or report.failed or report.remaining:
+        console.print(report.summary())
 
 
 @safe_command()
@@ -705,7 +724,8 @@ def auth_cmd(
         console.print(f"  workspace: {st.workspace_id}   member: {st.member_id}   role: {st.role}")
     if st.expires_at:
         exp = datetime.fromtimestamp(st.expires_at).strftime("%Y-%m-%d %H:%M")
-        console.print(f"  expires:   {exp}  ({st.remaining_human} left)")
+        left = "expired" if st.remaining_human == "expired" else f"{st.remaining_human} left"
+        console.print(f"  expires:   {exp}  ({left})")
     if st.live_state is not None:
         live_label = {
             "ok": "[green]reachable[/green]",
@@ -713,10 +733,32 @@ def auth_cmd(
             "unreachable": "[yellow]could not reach Plaud (network)[/yellow]",
         }.get(st.live_state, st.live_state)
         console.print(f"  live ping: {live_label}")
+    if st.auto_refresh:
+        auto_label = {
+            "ready": "[green]on[/green] — token renews headlessly",
+            "expiring": "[yellow]on — refresh token expiring soon, re-bootstrap recommended[/yellow]",
+            "expired": "[red]off — refresh token expired, re-bootstrap needed[/red]",
+            "not_bootstrapped": "[dim]off — not bootstrapped[/dim]",
+        }.get(st.auto_refresh, st.auto_refresh)
+        console.print(f"  auto-refresh: {auto_label}")
+        if st.refresh_expires_at:
+            rexp = datetime.fromtimestamp(st.refresh_expires_at).strftime("%Y-%m-%d %H:%M")
+            console.print(f"  refresh token expires: {rexp}")
     if st.state in ("expired", "expiring", "unconfigured"):
+        if st.auto_refresh == "ready":
+            console.print(
+                "  [dim]headless refresh is armed — any command renews it, "
+                "or force one: uv run plaud ws-refresh[/dim]"
+            )
+        else:
+            console.print(
+                "  [dim]refresh: use the app Auth button > Authenticate with Plaud. "
+                "Advanced fallback: uv run plaud refresh-auth[/dim]"
+            )
+    if st.auto_refresh == "not_bootstrapped":
         console.print(
-            "  [dim]refresh: use the app Auth button > Authenticate with Plaud. "
-            "Advanced fallback: uv run plaud refresh-auth[/dim]"
+            "  [dim]enable headless renewal (one-time): log in once via the app's "
+            "Embedded Web Login, or run: uv run plaud ws-bootstrap[/dim]"
         )
 
 
@@ -732,12 +774,17 @@ def refresh_auth_cmd(
         "--stdin",
         help="Read the Plaud cURL from stdin instead of the macOS clipboard.",
     ),
+    validate_live: bool = typer.Option(
+        False,
+        "--validate-live",
+        help="Verify recording-list access before replacing Keychain credentials.",
+    ),
 ) -> None:
-    """Refresh .env from a fresh Plaud API cURL."""
+    """Refresh macOS Keychain from a fresh Plaud API cURL."""
     from core.refresh_auth import refresh_auth
 
     curl_text = sys.stdin.read() if stdin else None
-    result = refresh_auth(curl_text=curl_text)
+    result = refresh_auth(curl_text=curl_text, validate_live=validate_live)
     if json_out:
         _emit_json(
             {
@@ -787,7 +834,7 @@ def web_auth_cmd(
         "(validation runs by default).",
     ),
 ) -> None:
-    """Import a Plaud Web Login capture (JSON on stdin) into .env — requires --stdin (used by the macOS app)."""
+    """Import a Plaud Web Login capture into macOS Keychain (app bridge)."""
     from core.web_auth import import_web_auth
 
     if not stdin:
@@ -795,6 +842,7 @@ def web_auth_cmd(
             "status": "stdin_required",
             "detail": "send Plaud Web Login capture JSON on stdin",
             "cookie_captured": False,
+            "auto_refresh_armed": False,
         }
     else:
         raw = sys.stdin.read()
@@ -805,6 +853,7 @@ def web_auth_cmd(
                 "status": "invalid_payload",
                 "detail": f"invalid JSON: {exc.msg}",
                 "cookie_captured": False,
+                "auto_refresh_armed": False,
             }
         else:
             imported = import_web_auth(payload, validate_live=not skip_live)
@@ -812,6 +861,7 @@ def web_auth_cmd(
                 "status": imported.status,
                 "detail": imported.detail,
                 "cookie_captured": imported.cookie_captured,
+                "auto_refresh_armed": imported.auto_refresh_armed,
             }
 
     if json_out:
@@ -826,6 +876,151 @@ def web_auth_cmd(
         return
     console.print(f"[red]web auth failed[/red] ({result['status']}) — {result['detail']}")
     raise typer.Exit(1)
+
+
+_WS_BOOTSTRAP_SNIPPET = (
+    "copy(localStorage.getItem(Object.keys(localStorage).find(k => "
+    'k.startsWith("pld_") && k.endsWith(":workspaceList"))))'
+)
+
+
+def _print_ws_outcome(outcome: Any) -> None:
+    """Shared pretty-printer for ws-refresh / ws-bootstrap outcomes."""
+    if outcome.status in ("ok", "fresh"):
+        icon = "✅ refreshed" if outcome.status == "ok" else "✅ already fresh"
+        console.print(f"[green]{icon}[/green] — {outcome.detail}")
+        if outcome.access_expires_at:
+            exp = datetime.fromtimestamp(outcome.access_expires_at).strftime("%Y-%m-%d %H:%M")
+            console.print(f"  token valid until {exp}")
+        if outcome.refresh_expires_at:
+            rexp = datetime.fromtimestamp(outcome.refresh_expires_at).strftime("%Y-%m-%d %H:%M")
+            note = (
+                "  [yellow](expiring soon — re-bootstrap recommended)[/yellow]"
+                if outcome.refresh_expiring_soon
+                else ""
+            )
+            console.print(f"  headless refresh armed until {rexp}{note}")
+        return
+    color = "yellow" if outcome.status in ("not_bootstrapped", "unreachable") else "red"
+    console.print(f"[{color}]{outcome.status}[/{color}] — {outcome.detail}")
+
+
+@safe_command(name="ws-refresh")
+def ws_refresh_cmd(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit JSON and always exit 0; callers must check the status field.",
+    ),
+    only_if_needed: bool = typer.Option(
+        False,
+        "--only-if-needed",
+        help="Skip the network call while the current token still has >6h left.",
+    ),
+) -> None:
+    """Mint a fresh 24h Plaud token headlessly — no browser, no cURL."""
+    from core.ws_refresh import refresh_workspace_token
+
+    outcome = refresh_workspace_token(only_if_needed=only_if_needed)
+    if json_out:
+        _emit_json(asdict(outcome))
+        return
+    _print_ws_outcome(outcome)
+    if outcome.status in ("ok", "fresh"):
+        return
+    raise typer.Exit(2 if outcome.status == "not_bootstrapped" else 1)
+
+
+@safe_command(name="ws-bootstrap")
+def ws_bootstrap_cmd(
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit JSON and always exit 0; callers must check the status field.",
+    ),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read the workspaceList JSON from stdin instead of the macOS clipboard.",
+    ),
+) -> None:
+    """One-time arm of headless token refresh from web.plaud.ai's workspaceList.
+
+    In the web.plaud.ai devtools Console run
+    copy the current `pld_<account>:workspaceList` value, then run this command.
+    It stores the workspace refresh token in Keychain and validates it with one refresh.
+    (App users don't need this: the Embedded Web Login bootstraps automatically.)
+    """
+    from core.refresh_auth import _read_pasteboard
+    from core.ws_refresh import bootstrap_workspace
+
+    if stdin:
+        text = sys.stdin.read()
+    else:
+        try:
+            text = _read_pasteboard()
+        except RuntimeError as exc:
+            text = ""
+            if not json_out:
+                console.print(f"[red]could not read clipboard[/red] — {exc}")
+
+    if not text.strip():
+        if json_out:
+            _emit_json({"status": "invalid_payload", "detail": "no workspaceList JSON provided"})
+            return
+        console.print(
+            "[yellow]nothing to import[/yellow] — in the web.plaud.ai devtools Console run:"
+        )
+        console.print(f"  [bold]{_WS_BOOTSTRAP_SNIPPET}[/bold]")
+        console.print("then re-run this command (the JSON lands on your clipboard).")
+        raise typer.Exit(2)
+
+    outcome = bootstrap_workspace(text)
+    if json_out:
+        _emit_json(asdict(outcome))
+        return
+    _print_ws_outcome(outcome)
+    if outcome.status != "ok":
+        raise typer.Exit(1)
+
+
+@safe_command(name="auth-recover")
+def auth_recover_cmd(
+    driver: str = typer.Option(
+        "auto", help="Browser driver: auto | cmux. (aside/MCP browsers run agent-side.)"
+    ),
+    json_out: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit JSON and always exit 0; callers must check the status field.",
+    ),
+) -> None:
+    """Tier-1 auth recovery: re-harvest workspaceList from a live browser session.
+
+    No password is ever typed — this only reads localStorage from a browser
+    that is already logged in to web.plaud.ai, then re-arms headless refresh
+    (same as ws-bootstrap). Falls back to the app Auth sheet when no live
+    session exists.
+    """
+    from core.auth_recover import CAPTURE_JS, recover
+
+    outcome = recover(driver=driver)
+    if json_out:
+        _emit_json(asdict(outcome))
+        return
+    if outcome.status == "ok":
+        console.print(f"[green]✅ recovered[/green] via {outcome.driver} — {outcome.detail}")
+        return
+    color = "yellow" if outcome.status in ("no_session", "driver_unavailable") else "red"
+    console.print(f"[{color}]{outcome.status}[/{color}] — {outcome.detail}")
+    console.print(
+        "\n[dim]Other recovery paths:[/dim]\n"
+        "  • Claude session with a browser tool (aside 등): run this JS on web.plaud.ai\n"
+        f"    [bold]{CAPTURE_JS}[/bold]\n"
+        "    then pipe the value to: [bold]uv run plaud ws-bootstrap --stdin[/bold]\n"
+        "  • App toolbar Auth → Embedded Web Login (Tier 2, one manual login)"
+    )
+    raise typer.Exit(2 if outcome.status == "driver_unavailable" else 1)
 
 
 def _render_dashboard_md(st: Any, counts: dict[str, Any], now: int) -> str:
@@ -1076,7 +1271,7 @@ def tag_remove(
 def metadata_generate(
     file_id: str,
     model: str = typer.Option(
-        "", help=MODEL_HELP + " Empty = configured classify model (plaud config-classify)."
+        "", help=MODEL_HELP + " Empty = configured metadata model (plaud config-metadata-model)."
     ),
     model_id: str = typer.Option("", help="Optional provider API model id override."),
     vault: Path | None = None,
@@ -1090,7 +1285,7 @@ def metadata_generate(
 
     storage = Storage()
     ensure_content_cached(storage, file_id)
-    model = model or app_config.classify_model()
+    model = model or app_config.metadata_model()
     metadata = generate_note_metadata(
         storage,
         file_id,
@@ -1122,6 +1317,46 @@ def metadata_generate(
             f"low confidence {confidence:.2f} < {min_folder_confidence:.2f}"
         )
     console.print_json(json=_json.dumps(metadata, ensure_ascii=False))
+
+
+@safe_command(name="metadata-auto")
+def metadata_auto(
+    limit: int = typer.Option(0, help="Max files this run. 0 = configured limit."),
+    since_days: int = typer.Option(7, help="Only files whose content was cached in the last N days."),
+    backfill: bool = typer.Option(False, "--backfill", help="Ignore recency — process the whole backlog."),
+    model: str = typer.Option("", help=MODEL_HELP + " Empty = configured metadata model."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List what would be generated, change nothing."),
+    json_output: bool = typer.Option(False, "--json", help="Print the report as JSON."),
+) -> None:
+    """Generate metadata for eligible files (cached content, no metadata yet).
+
+    This is what sync-content triggers automatically when auto_metadata is on.
+    Folder placement is suggestion-only here; use `plaud classify --apply` to move files.
+    """
+    import json as _json
+    from dataclasses import asdict
+
+    from core.auto_metadata import run_auto_metadata
+
+    report = run_auto_metadata(
+        Storage(),
+        model=model,
+        limit=limit or None,
+        since_days=since_days,
+        backfill=backfill,
+        dry_run=dry_run,
+    )
+    if json_output:
+        console.print_json(json=_json.dumps(asdict(report), ensure_ascii=False))
+        return
+    console.print(report.summary())
+    for file_id, err in report.failed.items():
+        console.print(f"  [red]failed[/red] {file_id}: {err[:120]}")
+    if report.remaining:
+        console.print(
+            f"  [yellow]{report.remaining} more eligible[/yellow] — "
+            "run again or raise the limit (plaud config-auto-metadata on --limit N)"
+        )
 
 
 @safe_command(name="classify")
@@ -1453,6 +1688,118 @@ def obsidian(
 
     launch_claude(prompt, cwd=vault_path)
     console.print(f"[green]launched Claude Code[/green] for {file_id}")
+
+
+@safe_command(name="vault-send")
+def vault_send_cmd(
+    file_id: str,
+    to: str = typer.Option("main", "--to", help="main | wiki | <absolute vault path>"),
+    dest: str = typer.Option(
+        "",
+        "--dest",
+        help="folder inside the vault (default: 00. Inbox; meetings shortcut: 'meetings')",
+    ),
+    content: str = typer.Option(
+        "integrated",
+        "--content",
+        help="integrated (default; falls back to summary→plaud) | summary | plaud | transcript",
+    ),
+    model: str = typer.Option("", help="pick the artifact generated by this model id"),
+    template: str = typer.Option("", help="pick the artifact generated with this template"),
+    via: str = typer.Option(
+        "direct",
+        "--via",
+        help="direct (no AI, instant) | claude (headless `claude -p` reformat) | "
+        "claude-window (interactive Terminal filing)",
+    ),
+    ai_model: str = typer.Option(
+        "claude", "--ai-model", help="provider for --via claude: " + MODEL_HELP
+    ),
+    ai_model_id: str = typer.Option("", "--ai-model-id", help="API model id override"),
+    with_transcript: bool = typer.Option(
+        False, "--with-transcript", help="append the full transcript to the note"
+    ),
+    open_note: bool = typer.Option(False, "--open", help="open the note in Obsidian after writing"),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit JSON and always exit 0; callers check the status field."
+    ),
+) -> None:
+    """Send generated content (integrated-first) into an Obsidian vault.
+
+    Examples:
+      plaud vault-send <id>                          # integrated → main vault 00. Inbox
+      plaud vault-send <id> --dest meetings          # → 60. Collections/63. Meetings
+      plaud vault-send <id> --to wiki                # → CMDS_LLM_Wiki/00. Inbox
+      plaud vault-send <id> --via claude             # claude -p가 CMDS 컨벤션으로 정형화
+      plaud vault-send <id> --via claude-window      # Terminal의 Claude Code가 직접 파일링
+    """
+    from dataclasses import asdict as _asdict
+
+    from core.vault_send import (
+        MEETINGS_DEST,
+        build_filing_prompt,
+        resolve_content,
+        resolve_vault,
+        vault_send,
+    )
+
+    if dest.strip().lower() in ("meetings", "meeting"):
+        dest = MEETINGS_DEST
+
+    if via == "claude-window":
+        # Interactive filing: Claude Code in a Terminal window writes the note
+        # itself, so there is no deterministic output path to report.
+        from core.metadata import build_recording_snapshot
+
+        vault_path = resolve_vault(to)
+        if vault_path is None:
+            console.print("[red]vault not configured[/red] — run: uv run plaud config-vault <path>")
+            raise typer.Exit(1)
+        storage = Storage()
+        snapshot = build_recording_snapshot(storage, file_id)
+        resolved = resolve_content(
+            storage, file_id, snapshot, content=content, model=model, template=template
+        )
+        if resolved is None:
+            console.print(f"[red]no '{content}' output found[/red] — generate one first")
+            raise typer.Exit(1)
+        prompt = build_filing_prompt(
+            vault=vault_path,
+            dest=dest.strip() or "00. Inbox",
+            title=snapshot["title"],
+            file_id=file_id,
+            resolved=resolved,
+            with_transcript=with_transcript,
+        )
+        launch_claude(prompt, cwd=vault_path)
+        if json_out:
+            _emit_json({"status": "ok", "via": "claude-window", "detail": "Claude Code launched"})
+        else:
+            console.print(f"[green]launched Claude Code[/green] for {file_id} → {vault_path}")
+        return
+
+    result = vault_send(
+        file_id,
+        to=to,
+        dest=dest,
+        content=content,
+        model=model,
+        template=template,
+        via=via,
+        with_transcript=with_transcript,
+        ai_model=ai_model,
+        ai_model_id=ai_model_id,
+    )
+    if result.status == "ok" and open_note and result.obsidian_url:
+        subprocess.run(["open", result.obsidian_url], check=False)
+    if json_out:
+        _emit_json(_asdict(result))
+        return
+    if result.status == "ok":
+        console.print(f"[green]sent[/green] ({result.content}, via {result.via}) → {result.path}")
+        return
+    console.print(f"[red]vault-send failed[/red] ({result.status}) — {result.detail}")
+    raise typer.Exit(1)
 
 
 @safe_command(name="audio-url")
@@ -1998,6 +2345,15 @@ def config_show() -> None:
     for k, v in cfg["models"].items():
         console.print(f"  {k:>8}: {v}")
     console.print(f"\n[bold]Auto-classify model[/bold]: {app_config.classify_model()}")
+    console.print(
+        f"[bold]Metadata model[/bold]: {app_config.metadata_model()}"
+        f" (backend: {app_config.backend_for(app_config.metadata_model())})"
+    )
+    auto_meta = "on" if app_config.auto_metadata_enabled() else "off"
+    console.print(
+        f"[bold]Auto metadata[/bold]: {auto_meta}"
+        f" (limit {app_config.auto_metadata_limit()}/batch)"
+    )
     console.print("\n[bold]Path overrides[/bold] (empty = default)")
     for k, v in cfg["paths"].items():
         console.print(f"  {k:>11}: {v or '(default)'}")
@@ -2020,6 +2376,48 @@ def config_classify(model: str) -> None:
     console.print(f"[green]ok[/green] classify model -> {model} (backend: {backend})")
 
 
+@safe_command(name="config-metadata-model")
+def config_metadata_model(
+    model: str,
+    backend: str = typer.Option("", help="Optionally also set the provider backend: cli | api."),
+    model_id: str = typer.Option("", "--id", help="Optionally pin the API model id."),
+) -> None:
+    """Set which model metadata-generate uses by default (e.g. codex = GPT via subscription)."""
+    valid = ("claude", "codex", "gemini", "grok")
+    if model not in valid:
+        raise typer.BadParameter(f"model must be one of: {', '.join(valid)}")
+    if backend:
+        if backend not in ("cli", "api"):
+            raise typer.BadParameter("backend must be 'cli' or 'api'")
+        app_config.set_backend(model, backend)
+    if model_id:
+        app_config.set_model_id(model, model_id)
+    app_config.set_metadata_model(model)
+    console.print(
+        f"[green]ok[/green] metadata model -> {model}"
+        f" (backend: {app_config.backend_for(model)})"
+    )
+
+
+@safe_command(name="config-auto-metadata")
+def config_auto_metadata(
+    state: str = typer.Argument(..., help="on | off"),
+    limit: int = typer.Option(0, help="Max files per auto batch (0 = keep current)."),
+) -> None:
+    """Enable/disable automatic metadata generation after sync."""
+    if state not in ("on", "off"):
+        raise typer.BadParameter("state must be 'on' or 'off'")
+    app_config.set_auto_metadata(state == "on")
+    if limit > 0:
+        cfg = app_config.load()
+        cfg["auto_metadata_limit"] = limit
+        app_config.save(cfg)
+    console.print(
+        f"[green]ok[/green] auto metadata -> {state}"
+        f" (limit {app_config.auto_metadata_limit()}/batch)"
+    )
+
+
 @safe_command(name="star")
 def star_cmd(
     file_id: str,
@@ -2035,6 +2433,20 @@ def config_vault(path: str = "") -> None:
     """Set the Obsidian vault path. Pass empty to clear."""
     app_config.set_obsidian_vault(path)
     console.print(f"[green]ok[/green] obsidian_vault -> {path or '(unset)'}")
+
+
+@safe_command(name="config-wiki-vault")
+def config_wiki_vault(path: str = "") -> None:
+    """Set the wiki (LLM satellite) vault path for `vault-send --to wiki`.
+
+    Empty clears the override; the sibling `CMDS_LLM_Wiki` directory next to
+    the main vault is then used when it exists.
+    """
+    from core.vault_send import set_wiki_vault, wiki_vault
+
+    set_wiki_vault(path)
+    resolved = wiki_vault()
+    console.print(f"[green]ok[/green] wiki_vault -> {path or '(auto)'}  (resolves to: {resolved})")
 
 
 @safe_command(name="config-author")
@@ -2126,7 +2538,7 @@ def paths_show() -> None:
 
 @safe_command()
 def onboard(env_path: Path = Path(".env")) -> None:
-    """Pipe a Plaud cURL on stdin to populate .env (headers + cookies)."""
+    """Pipe a Plaud cURL on stdin to populate Keychain (headers + cookies)."""
     from cli.onboard import parse_curl, write_env
     import sys
 

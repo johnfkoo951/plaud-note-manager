@@ -28,9 +28,10 @@ struct PlaudNoteApp: App {
             ContentView()
                 .frame(minWidth: 1280, minHeight: 800)
         }
-        // Wide default matching the reference layout — sidebar + list +
-        // detail + Work Sidebar all comfortable (~1.63:1 aspect).
-        .defaultSize(width: 1920, height: 1180)
+        // Default matches Yohan's working window on the 14" MBP
+        // (1608×854pt, ~1.88:1) — sidebar + list + detail + Work Sidebar
+        // all visible without horizontal crowding.
+        .defaultSize(width: 1608, height: 854)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appSettings) {

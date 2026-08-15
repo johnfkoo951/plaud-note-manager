@@ -11,7 +11,18 @@ from cli.onboard import DEFAULTS
 
 from .auth_status import _decode_jwt_payload
 from .client import PlaudAPIError, PlaudClient
-from .config import PlaudConfig, resolve_env_path, write_env_file
+from .config import PlaudConfig, resolve_env_path
+from .secret_store import (
+    CredentialStoreError,
+    credential_lock,
+    load_credential_values,
+    update_credential_values,
+)
+from .ws_refresh import (
+    _disarm,
+    _refresh_workspace_token_locked,
+    credential_env_updates,
+)
 
 
 class WebAuthCapture(BaseModel):
@@ -47,6 +58,13 @@ class WebAuthCapture(BaseModel):
     origin: str | None = None
     referer: str | None = None
     timezone: str | None = None
+    # Raw web.plaud.ai localStorage `workspaceList` JSON. Carries the workspace
+    # *refresh* token, which never appears in request headers — capturing it
+    # here is what arms automatic refresh from a single embedded login.
+    workspace_list: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("workspace_list", "workspaceList"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +72,7 @@ class WebAuthResult:
     status: str
     detail: str = ""
     cookie_captured: bool = False
+    auto_refresh_armed: bool = False  # workspace refresh token captured + stored
 
 
 CaptureInput = WebAuthCapture | Mapping[str, str | None]
@@ -77,22 +96,56 @@ def _parse_capture(capture: CaptureInput) -> WebAuthCapture | WebAuthResult:
         return WebAuthResult("invalid_payload", exc.errors()[0]["msg"])
 
 
-def _write_env(values: Mapping[str, str], env_path: Path) -> None:
-    order = (
-        "PLAUD_BASE_URL",
-        "PLAUD_AUTHORIZATION",
-        "PLAUD_X_DEVICE_ID",
-        "PLAUD_X_PLD_USER",
-        "PLAUD_X_PLD_TAG",
-        "PLAUD_COOKIE",
-        "PLAUD_APP_LANGUAGE",
-        "PLAUD_APP_PLATFORM",
-        "PLAUD_EDIT_FROM",
-        "PLAUD_ORIGIN",
-        "PLAUD_REFERER",
-        "PLAUD_TIMEZONE",
-    )
-    write_env_file({key: values[key] for key in order if values.get(key)}, env_path)
+def _write_env(
+    values: Mapping[str, str], env_path: Path, *, workspace_list_json: str | None = None
+) -> tuple[bool, str]:
+    """Atomically save capture and immediately prove/rotate a refresh token."""
+
+    with credential_lock(env_path):
+        existing_refresh = load_credential_values(env_path, already_locked=True).get(
+            "PLAUD_WS_REFRESH_TOKEN"
+        )
+        candidate_needs_verification = bool(workspace_list_json and not existing_refresh)
+        updates = credential_env_updates(
+            values,
+            env_path,
+            workspace_list_json=workspace_list_json,
+            already_locked=True,
+        )
+        update_credential_values(updates, env_path, already_locked=True)
+
+        refresh_detail = ""
+        if workspace_list_json:
+            outcome = _refresh_workspace_token_locked(
+                env_path=env_path, now=int(time.time()), only_if_needed=False
+            )
+            # A same-workspace Keychain token may already have rotated beyond
+            # WebKit's copy.  Try it first; only if it is conclusively rejected
+            # do we arm and verify the newly captured browser candidate.
+            if outcome.status == "rejected" and existing_refresh:
+                candidate_needs_verification = True
+                retry_updates = credential_env_updates(
+                    values,
+                    env_path,
+                    workspace_list_json=workspace_list_json,
+                    already_locked=True,
+                )
+                update_credential_values(retry_updates, env_path, already_locked=True)
+                outcome = _refresh_workspace_token_locked(
+                    env_path=env_path, now=int(time.time()), only_if_needed=False
+                )
+            if outcome.status not in ("ok", "fresh"):
+                refresh_detail = outcome.detail or outcome.status
+                if candidate_needs_verification:
+                    # Do not advertise or retain an unproved browser token as
+                    # ready. The access session remains saved; WebKit can retry.
+                    _disarm(env_path, already_locked=True)
+
+        token_present = bool(
+            load_credential_values(env_path, already_locked=True).get("PLAUD_WS_REFRESH_TOKEN")
+        )
+        armed = token_present and (not candidate_needs_verification or not refresh_detail)
+        return armed, refresh_detail
 
 
 def _token_expired(authorization: str, *, now: int | None = None) -> bool:
@@ -111,12 +164,12 @@ def _token_expired(authorization: str, *, now: int | None = None) -> bool:
 
 
 def _default_live_validator(values: Mapping[str, str]) -> str:
-    """Probe the candidate credentials in memory — .env is never read here."""
+    """Probe the candidate credentials in memory — Keychain is not read here."""
     cfg = PlaudConfig(
         base_url=values.get("PLAUD_BASE_URL", "https://api-apne1.plaud.ai"),
         authorization=values["PLAUD_AUTHORIZATION"],
         x_device_id=values["PLAUD_X_DEVICE_ID"],
-        x_pld_user=values["PLAUD_X_PLD_USER"],
+        x_pld_user=values.get("PLAUD_X_PLD_USER", ""),
         x_pld_tag=values.get("PLAUD_X_PLD_TAG", ""),
         app_language=values.get("PLAUD_APP_LANGUAGE", "en"),
         app_platform=values.get("PLAUD_APP_PLATFORM", "web"),
@@ -131,9 +184,9 @@ def _default_live_validator(values: Mapping[str, str]) -> str:
         with PlaudClient(cfg, timeout=10.0) as client:
             client.list_files(limit=1)
     except PlaudAPIError as exc:
-        # Only 401/403 is a genuine rejection; spurious 500s from the Plaud
-        # backend and status-less network errors mean "could not verify".
-        return "rejected" if exc.status_code in (401, 403) else "unreachable"
+        # HTTP 401/403 and Plaud's HTTP-200 business status -419 are genuine
+        # auth rejection; 5xx and status-less network errors are inconclusive.
+        return "rejected" if exc.is_auth_rejection else "unreachable"
     return "ok"
 
 
@@ -144,8 +197,8 @@ def import_web_auth(
     live_validator: LiveValidator | None = None,
     validate_live: bool = True,
 ) -> WebAuthResult:
-    """Validate-before-write: probe the candidate credentials in memory and only
-    touch .env once they look usable — no rollback path needed."""
+    """Validate-before-write: probe the candidate credentials in memory before
+    replacing the atomic Keychain bundle — no rollback path needed."""
     env_path = resolve_env_path(env_path)
     parsed = _parse_capture(capture)
     if isinstance(parsed, WebAuthResult):
@@ -154,7 +207,6 @@ def import_web_auth(
     required = {
         "authorization": _clean(parsed.authorization),
         "x_device_id": _clean(parsed.x_device_id),
-        "x_pld_user": _clean(parsed.x_pld_user),
     }
     missing = [key for key, value in required.items() if value is None]
     cookie = _clean(parsed.cookie)
@@ -170,7 +222,8 @@ def import_web_auth(
         values["PLAUD_BASE_URL"] = base_url
     values["PLAUD_AUTHORIZATION"] = required["authorization"] or ""
     values["PLAUD_X_DEVICE_ID"] = required["x_device_id"] or ""
-    values["PLAUD_X_PLD_USER"] = required["x_pld_user"] or ""
+    if x_pld_user := _clean(parsed.x_pld_user):
+        values["PLAUD_X_PLD_USER"] = x_pld_user
     if cookie:
         values["PLAUD_COOKIE"] = cookie
 
@@ -188,7 +241,7 @@ def import_web_auth(
             values[key] = clean
 
     # Local expiry pre-check: an already-expired capture is a known rejection —
-    # no network call, .env untouched.
+    # no network call, Keychain untouched.
     if _token_expired(values["PLAUD_AUTHORIZATION"]):
         return WebAuthResult(
             "live_auth_failed",
@@ -203,7 +256,7 @@ def import_web_auth(
         if verdict == "rejected":
             return WebAuthResult(
                 "live_auth_failed",
-                "Plaud rejected the captured credentials; .env unchanged",
+                "Plaud rejected the captured credentials; Keychain unchanged",
                 cookie_captured=cookie is not None,
             )
         if verdict == "unreachable":
@@ -212,8 +265,18 @@ def import_web_auth(
             detail = "credentials saved but could not be verified — check your network connection"
 
     try:
-        _write_env(values, env_path)
-    except OSError as exc:
+        armed, refresh_detail = _write_env(
+            values, env_path, workspace_list_json=_clean(parsed.workspace_list)
+        )
+    except (OSError, CredentialStoreError) as exc:
         return WebAuthResult("write_failed", str(exc), cookie_captured=cookie is not None)
 
-    return WebAuthResult(status, detail, cookie_captured=cookie is not None)
+    if armed and status == "ok":
+        detail += " — automatic renewal verified and stored in macOS Keychain"
+    elif status == "ok":
+        detail += " — connected, but automatic renewal is not ready"
+        if refresh_detail:
+            detail += f" ({refresh_detail})"
+    return WebAuthResult(
+        status, detail, cookie_captured=cookie is not None, auto_refresh_armed=armed
+    )

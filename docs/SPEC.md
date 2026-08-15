@@ -126,7 +126,9 @@ Plaud Cloud (api-apne1.plaud.ai, JWT in .env)
    transcripts/ summaries/ integrated/
 ```
 
-- **인증**: `.env`의 cURL 헤더(JWT bearer + x-device-id + x-pld-user [+ cookie]).
+- **인증**: `.env`의 cURL 헤더(JWT bearer + x-device-id, 레거시
+  x-pld-user 및 cookie는 있을 때만 사용). 최신 `weekly_recommend` 형식처럼
+  x-pld-user가 없는 Plaud Web cURL도 가져올 수 있다.
   앱 Auth 시트(browser import 우선·embedded WKWebView fallback) 또는
   `plaud refresh-auth`(클립보드 cURL) / `plaud web-auth`(앱 브리지). `.env`는 0600.
 - **모델 백엔드**: claude/codex/gemini/grok × cli(구독 OAuth)/api(키). grok은 Grok

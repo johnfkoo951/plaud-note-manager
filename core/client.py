@@ -29,11 +29,27 @@ logger = logging.getLogger(__name__)
 
 
 class PlaudAPIError(RuntimeError):
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        api_status: int | str | None = None,
+    ) -> None:
         super().__init__(message)
         # HTTP status when the server answered (e.g. 401/403); None for
         # network-level failures so callers can tell rejection from outage.
         self.status_code = status_code
+        # Plaud often returns HTTP 200 with a non-zero business status. In
+        # particular -419 means the workspace token is expired.
+        try:
+            self.api_status = int(api_status) if api_status is not None else None
+        except (TypeError, ValueError):
+            self.api_status = None
+
+    @property
+    def is_auth_rejection(self) -> bool:
+        return self.status_code in (401, 403) or self.api_status in (-419, 419)
 
 
 def _safe_json(resp: httpx.Response, label: str) -> dict[str, Any]:
@@ -107,7 +123,7 @@ class PlaudClient:
         status = data.get("status")
         if status not in (0, "0", None):
             msg = data.get("msg") or data.get("error") or "unknown Plaud error"
-            raise PlaudAPIError(f"Plaud API error: {msg}")
+            raise PlaudAPIError(f"Plaud API error ({status}): {msg}", api_status=status)
         return data
 
     def _patch_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:

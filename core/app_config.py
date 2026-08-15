@@ -43,11 +43,24 @@ DEFAULT_CONFIG: dict = {
     # Personal / environment-specific locations. Empty = unset; a fresh clone
     # gets safe empty defaults and the user opts in via env or `plaud config-*`.
     "obsidian_vault": "",
+    # Wiki (LLM satellite) vault for `vault-send --to wiki`. Empty = derive the
+    # sibling CMDS_LLM_Wiki directory next to the main vault.
+    "wiki_vault": "",
     "author": "",
     "api_info_dir": "",
-    # Which model runs auto-classify / metadata-generate (its backend — cli
-    # subscription vs api key — follows the per-model "backends" entry above).
+    # Which model runs auto-classify (its backend — cli subscription vs api
+    # key — follows the per-model "backends" entry above).
     "classify_model": "claude",
+    # Which model runs metadata-generate. Default is codex (GPT via the Codex
+    # CLI's ChatGPT subscription login — no API key needed while
+    # backends.codex stays "cli"). Empty = fall back to classify_model.
+    "metadata_model": "codex",
+    # Auto-generate metadata for eligible files right after sync (files with a
+    # cached transcript/summary and no metadata yet). Folder placement stays
+    # suggestion-only in this path.
+    "auto_metadata": True,
+    # Max files processed per auto-metadata batch (cost/latency guard).
+    "auto_metadata_limit": 20,
     # Tags the user pinned to the top of the app's Tags sidebar.
     "pinned_tags": [],
 }
@@ -118,7 +131,7 @@ def api_info_dir() -> Path | None:
 
 
 def classify_model() -> str:
-    """Model used by auto-classify / metadata-generate when no --model given."""
+    """Model used by auto-classify when no --model given."""
     return load().get("classify_model") or "claude"
 
 
@@ -126,6 +139,39 @@ def set_classify_model(model: str) -> None:
     cfg = load()
     cfg["classify_model"] = model
     save(cfg)
+
+
+def metadata_model() -> str:
+    """Model used by metadata-generate when no --model given.
+
+    Falls back to classify_model when unset so older configs keep their
+    previous behavior.
+    """
+    return load().get("metadata_model") or classify_model()
+
+
+def set_metadata_model(model: str) -> None:
+    cfg = load()
+    cfg["metadata_model"] = model
+    save(cfg)
+
+
+def auto_metadata_enabled() -> bool:
+    return bool(load().get("auto_metadata", True))
+
+
+def set_auto_metadata(enabled: bool) -> None:
+    cfg = load()
+    cfg["auto_metadata"] = bool(enabled)
+    save(cfg)
+
+
+def auto_metadata_limit() -> int:
+    try:
+        limit = int(load().get("auto_metadata_limit", 20))
+    except (TypeError, ValueError):
+        return 20
+    return max(1, limit)
 
 
 def pinned_tags() -> list[str]:

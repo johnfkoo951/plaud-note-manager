@@ -36,9 +36,13 @@ uv sync
 
 # 2. 자격증명 설정
 #    macOS 앱: 툴바 Auth 버튼 → Authenticate with Plaud
-#    (Browser login → Import Copied cURL 기본, embedded Web Login fallback)
-#    headless/CLI: web.plaud.ai에서 cURL 복사 후
+#    Plaud Web Login으로 1회 로그인하면 자동 갱신까지 검증·활성화됨.
+#    cURL import는 수동 비상 경로로만 지원
+#    CLI: web.plaud.ai에서 cURL 복사 후
 pbpaste | uv run plaud onboard
+#    + 자동 갱신 활성화(1회): devtools Application > Local Storage에서
+#      현재 `pld_<account>:workspaceList` 값을 복사한 후
+uv run plaud ws-bootstrap
 
 # 3. 파일 목록 동기화
 uv run plaud sync
@@ -63,9 +67,37 @@ Grok은 xAI API(`XAI_API_KEY`) backend로 사용합니다.
 `metadata-generate`는 녹음 제목/요약/볼트 맥락을 기준으로 로컬 메타데이터,
 Obsidian-style tags, `usage_status`, Plaud 폴더 분류를 함께 갱신합니다.
 
-토큰이 만료되면 `uv run plaud refresh-auth` (클립보드의 Plaud cURL 자동 파싱)
-또는 앱 Auth 버튼으로 갱신합니다. 자격증명 상태 확인은 `uv run plaud auth`
-(만료 카운트다운, `--live`로 실 토큰 검증).
+**토큰 갱신 — 자동 갱신이 기본입니다.** 워크스페이스 refresh token을
+한 번 부트스트랩하면 (앱 Plaud Web Login 1회, 또는 `plaud ws-bootstrap`)
+이후 24h 토큰은 모든 CLI 명령 실행 시 자동으로 갱신됩니다 — 브라우저 불필요.
+수동 강제 갱신은 `uv run plaud ws-refresh`. refresh token은 사용할 때마다
+로테이션되며 access token·cookie·workspace 정보와 함께 **macOS Keychain의 단일
+원자적 항목**으로 저장됩니다. 기존 `.env` 평문 인증 정보는 첫 실행 시 Keychain
+read-back 검증 후 자동 삭제됩니다. `PLAUD_AUTO_REFRESH=0`으로 자동 갱신을 끌 수 있습니다.
+
+부트스트랩 전이라면 기존 경로도 그대로 동작합니다:
+`uv run plaud refresh-auth` (클립보드의 Plaud cURL 자동 파싱) 또는 앱 Auth 버튼.
+자격증명 상태 확인은 `uv run plaud auth` (만료 카운트다운 + auto-refresh 상태,
+`--live`로 실 토큰 검증).
+
+**옵시디언 볼트 송출 — `plaud vault-send <id>`.** 통합본(Integrated) 우선으로
+CMDS frontmatter 노트를 만들어 메인 볼트 `00. Inbox`에 넣습니다 (통합본이
+없으면 슬롯 요약 → Plaud 요약 순 폴백).
+
+```bash
+uv run plaud vault-send <id>                    # 통합본 → 메인 볼트 00. Inbox (즉시)
+uv run plaud vault-send <id> --dest meetings    # → 60. Collections/63. Meetings
+uv run plaud vault-send <id> --to wiki          # → CMDS_LLM_Wiki 위성 볼트
+uv run plaud vault-send <id> --via claude       # claude -p 가 CMDS 컨벤션으로 정형화 후 저장
+uv run plaud vault-send <id> --via claude-window  # Terminal의 Claude Code가 스킬로 직접 파일링
+```
+
+`--via direct`(기본)는 AI 없이 즉시 조립, `--via claude`는 headless 정형화
+(`--ai-model codex|gemini|grok` 선택 가능), `--with-transcript`로 전사본 포함,
+`--open`으로 저장 즉시 Obsidian에서 열기. wiki 볼트 경로는 메인 볼트 옆
+`CMDS_LLM_Wiki`를 자동 인식하며 `plaud config-wiki-vault`로 바꿀 수 있습니다.
+앱에서는 Work Sidebar의 **Send to Vault** 메뉴(모드/목적지 선택), 각 슬롯
+카드의 ✈ 버튼(그 결과물만 전송), ⌘K 커맨드 팔레트에서 사용합니다.
 
 ## Setup on a new machine
 
@@ -79,8 +111,8 @@ cd plaud-note-manager
 # 2. 의존성 설치
 uv sync
 
-# 3. 자격증명 설정 — macOS 앱이라면 툴바 Auth 버튼 → Authenticate with Plaud
-#    (Browser login → Import Copied cURL 기본, embedded Web Login fallback).
+# 3. 자격증명 설정 — macOS 앱 툴바 Auth → Plaud Web Login (권장, 1회)
+#    앱이 namespaced workspace refresh token을 즉시 검증·회전해 Keychain에 저장.
 #    headless/CLI라면 web.plaud.ai에서 본인 cURL을 복사
 #    (DevTools → 요청 우클릭 → Copy as cURL)한 뒤
 pbpaste | uv run plaud onboard
@@ -103,9 +135,11 @@ export PLAUD_OBSIDIAN_VAULT="<your-obsidian-vault>"
 실사용 가능한 단계입니다.
 
 - [x] core: Plaud API 클라이언트, SQLite 메타/컨텐츠 캐시, 네트워크 실패 메시지 정제
-- [x] auth: 앱 Auth 시트(Authenticate with Plaud — browser cURL import 기본,
-      embedded Web Login fallback) + `plaud auth` / `refresh-auth` / `web-auth`,
-      live 검증 + validate-before-write, `.env` 0600 기록
+- [x] auth: 자동 갱신(`ws-bootstrap` 1회 → 모든 명령이 24h 토큰 자동
+      리프레시, 전역 flock 직렬화 + Keychain 원자적 로테이션 영속화) + 앱 Auth 시트
+      (namespaced Plaud Web Login이 자동 갱신을 즉시 검증, cURL은 수동 fallback) +
+      `plaud auth` / `refresh-auth` / `web-auth` / `ws-refresh` / `ws-bootstrap`,
+      live 검증 + validate-before-write, legacy `.env` 인증 자동 이관
 - [x] cli: sync, content backfill, folder CRUD, download/export, Obsidian 송출
 - [x] metadata: Plaud file_id 기준 local metadata DB, Obsidian-style tags,
       usage status, auto folder routing, main-vault meeting note generation

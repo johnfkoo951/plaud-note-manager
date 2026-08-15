@@ -9,8 +9,8 @@ struct PlaudAuthSheet: View {
     @State private var authenticating = false
     @State private var clipboardWatching = false
     @State private var showAdvancedCurl = false
-    @State private var showEmbeddedLogin = false
-    @State private var webStatus = "Embedded login is available if browser import is not enough."
+    @State private var showEmbeddedLogin = true
+    @State private var webStatus = "Sign in once; automatic renewal will be verified and saved."
     @State private var clearingSession = false
     /// Failure surfaced inline in the sheet. The root ContentView alert is
     /// queued behind this sheet on macOS, so errors must be shown here.
@@ -18,6 +18,8 @@ struct PlaudAuthSheet: View {
     /// Bumped after every failed capture or session clear so the embedded
     /// web view resets its one-shot capture latch and reloads.
     @State private var captureGeneration = 0
+    @State private var recovering = false
+    @State private var recoverStatus: String?
 
     private var trimmedCurl: String {
         curlText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -30,8 +32,9 @@ struct PlaudAuthSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: AppUI.spacingL) {
             header
-            browserImportCard
+            autoRecoverCard
             embeddedLoginFallback
+            browserImportCard
             advancedCurl
             footer
         }
@@ -55,18 +58,65 @@ struct PlaudAuthSheet: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Authenticate with Plaud")
                     .font(.title3.weight(.semibold))
-                Text("Use your browser first. The app imports credentials locally and never prints tokens.")
+                Text("Sign in once here. The app verifies a rotating refresh token and stores the complete session in macOS Keychain; future access tokens renew automatically.")
                     .font(AppUI.metaFont)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer()
+        }
+    }
+
+    /// Tier-1: harvest the workspaceList from a live web.plaud.ai session in
+    /// the cmux browser — zero manual steps when that session is alive.
+    private var autoRecoverCard: some View {
+        VStack(alignment: .leading, spacing: AppUI.spacingS) {
+            HStack(alignment: .center, spacing: AppUI.spacingM) {
+                Label("Auto-recover from browser session", systemImage: "arrow.triangle.2.circlepath")
+                    .font(AppUI.sectionFont)
+                Spacer()
+                Button {
+                    runAutoRecover()
+                } label: {
+                    HStack(spacing: 6) {
+                        if recovering {
+                            ProgressView().controlSize(.small)
+                        }
+                        Text("Recover Now")
+                    }
+                }
+                .disabled(recovering || isBusy)
+            }
+            Text(
+                recoverStatus
+                    ?? "Reads the login already saved in the cmux browser (no password entry). If that session is gone, use Web Login below."
+            )
+            .font(AppUI.metaFont)
+            .foregroundStyle(recoverStatus == nil ? .secondary : Color.primary)
+            .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func runAutoRecover() {
+        recovering = true
+        recoverStatus = "Opening web.plaud.ai in the cmux browser…"
+        Task {
+            let ok = await store.recoverAuthViaBrowser()
+            recovering = false
+            if ok {
+                recoverStatus = "✅ Recovered — automatic renewal re-armed."
+            } else {
+                recoverStatus = store.lastCommandError
+                    ?? "Recovery failed — use Web Login below."
+                store.lastCommandError = nil  // keep the error inline, not behind the sheet
+            }
         }
     }
 
     private var browserImportCard: some View {
         VStack(alignment: .leading, spacing: AppUI.spacingM) {
             HStack(alignment: .center, spacing: AppUI.spacingM) {
-                Label("Browser login", systemImage: "safari")
+                Label("Manual cURL fallback", systemImage: "safari")
                     .font(AppUI.sectionFont)
                 Spacer()
                 Button {
@@ -95,7 +145,7 @@ struct PlaudAuthSheet: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            Text("A URL alone is not enough. In DevTools > Network, find the `api-apne1.plaud.ai/file/simple/web?...` request, right-click it, then Copy > Copy as cURL. The copied text must start with `curl` and include headers.")
+            Text("A URL alone is not enough. In DevTools > Network, find any authenticated `api-*.plaud.ai` request (for example `weekly_recommend` or `file/simple/web`), right-click it, then Copy > Copy as cURL. The copied text must include authorization and x-device-id headers.")
                 .font(AppUI.metaFont)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -108,7 +158,7 @@ struct PlaudAuthSheet: View {
                 Text(
                     clipboardWatching
                         ? "Watching clipboard for a Plaud cURL..."
-                        : "Chrome path: View > Developer > Developer Tools > Network > filter simple/web."
+                        : "Chrome path: View > Developer > Developer Tools > Network > filter plaud.ai."
                 )
                 .font(AppUI.metaFont)
                 .foregroundStyle(clipboardWatching ? AppUI.accentPink : .secondary)
@@ -141,7 +191,10 @@ struct PlaudAuthSheet: View {
     }
 
     private var embeddedLoginFallback: some View {
-        DisclosureGroup("Embedded Web Login fallback", isExpanded: $showEmbeddedLogin) {
+        DisclosureGroup(
+            "Plaud Web Login — recommended one-time setup",
+            isExpanded: $showEmbeddedLogin
+        ) {
             VStack(alignment: .leading, spacing: AppUI.spacingS) {
                 HStack {
                     Label(webStatus, systemImage: authenticating ? "arrow.triangle.2.circlepath" : "globe")
@@ -235,7 +288,7 @@ struct PlaudAuthSheet: View {
 
     private var footer: some View {
         HStack {
-            Text("Credentials are stored in the project .env and used by the Plaud CLI bridge.")
+            Text("Authentication is stored in macOS Keychain. The project .env contains no Plaud tokens or cookies.")
                 .font(AppUI.metaFont)
                 .foregroundStyle(.secondary)
             Spacer()

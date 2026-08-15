@@ -111,7 +111,6 @@ def test_import_web_auth_rejects_missing_required_headers(tmp_path) -> None:
     result = import_web_auth(
         {
             "authorization": "Bearer missing.user",
-            "x_device_id": "device-from-webkit",
             "cookie": "session=abc",
         },
         env_path=env_path,
@@ -119,7 +118,7 @@ def test_import_web_auth_rejects_missing_required_headers(tmp_path) -> None:
     )
 
     assert result.status == "missing_required"
-    assert "x_pld_user" in result.detail
+    assert "x_device_id" in result.detail
     assert result.cookie_captured is True
     assert not env_path.exists()
 
@@ -146,7 +145,6 @@ def test_import_web_auth_accepts_header_only_capture_after_live_validation(
         {
             "authorization": "Bearer header.only",
             "x_device_id": "device-from-webkit",
-            "x_pld_user": "user-from-webkit",
         },
         env_path=env_path,
         live_validator=lambda values: "ok",
@@ -157,6 +155,8 @@ def test_import_web_auth_accepts_header_only_capture_after_live_validation(
     written = env_path.read_text(encoding="utf-8")
     assert "PLAUD_AUTHORIZATION='Bearer header.only'" in written
     assert "PLAUD_COOKIE" not in written
+    assert "PLAUD_X_PLD_USER" not in written
+    assert "x-pld-user" not in load_config(env_path).headers()
 
 
 def test_import_web_auth_rejected_never_creates_env(tmp_path) -> None:
@@ -381,3 +381,107 @@ def test_web_auth_cli_non_json_invalid_payload_exits_1(tmp_path, monkeypatch) ->
     result = runner.invoke(app, ["web-auth", "--stdin"], input="not json")
 
     assert result.exit_code == 1
+
+
+def test_import_web_auth_arms_headless_refresh_from_workspace_list(tmp_path, monkeypatch) -> None:
+    _clear_auth_env(monkeypatch)
+    env_path = tmp_path / ".env"
+    auth_jwt = _make_jwt({"exp": int(time.time()) + 86_400, "wid": "ws_abc"})
+    from core.ws_refresh import RefreshOutcome
+
+    monkeypatch.setattr(
+        web_auth_mod,
+        "_refresh_workspace_token_locked",
+        lambda **kwargs: RefreshOutcome("ok", "verified"),
+    )
+
+    result = import_web_auth(
+        {
+            "authorization": f"Bearer {auth_jwt}",
+            "x_device_id": "device-from-webkit",
+            "x_pld_user": "user-from-webkit",
+            "workspace_list": json.dumps(
+                [{"workspaceId": "ws_abc", "refreshToken": "ls-refresh-token"}]
+            ),
+        },
+        env_path=env_path,
+        live_validator=lambda values: "ok",
+    )
+
+    assert result.status == "ok"
+    assert result.auto_refresh_armed is True
+    assert "automatic renewal verified" in result.detail
+    from core.config import read_env_file
+
+    values = read_env_file(env_path)
+    assert values["PLAUD_WS_REFRESH_TOKEN"] == "ls-refresh-token"
+    assert values["PLAUD_WORKSPACE_ID"] == "ws_abc"
+
+
+def test_import_web_auth_without_workspace_list_keeps_existing_bootstrap(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_auth_env(monkeypatch)
+    env_path = tmp_path / ".env"
+    from core.config import read_env_file, write_env_file
+
+    auth_jwt = _make_jwt({"exp": int(time.time()) + 86_400, "wid": "ws_abc"})
+    write_env_file(
+        {
+            "PLAUD_AUTHORIZATION": "bearer old",
+            "PLAUD_X_DEVICE_ID": "old-dev",
+            "PLAUD_X_PLD_USER": "old-user",
+            "PLAUD_WORKSPACE_ID": "ws_abc",
+            "PLAUD_WS_REFRESH_TOKEN": "existing-refresh",
+        },
+        env_path,
+    )
+
+    result = import_web_auth(
+        {
+            "authorization": f"Bearer {auth_jwt}",
+            "x_device_id": "device-from-webkit",
+            "x_pld_user": "user-from-webkit",
+        },
+        env_path=env_path,
+        live_validator=lambda values: "ok",
+    )
+
+    assert result.status == "ok"
+    assert result.auto_refresh_armed is True  # preserved counts as armed
+    values = read_env_file(env_path)
+    assert values["PLAUD_WS_REFRESH_TOKEN"] == "existing-refresh"
+
+
+def test_import_web_auth_does_not_arm_unverified_browser_refresh_token(
+    tmp_path, monkeypatch
+) -> None:
+    _clear_auth_env(monkeypatch)
+    env_path = tmp_path / ".env"
+    auth_jwt = _make_jwt({"exp": int(time.time()) + 86_400, "wid": "ws_abc"})
+    from core.config import read_env_file
+    from core.ws_refresh import RefreshOutcome
+
+    monkeypatch.setattr(
+        web_auth_mod,
+        "_refresh_workspace_token_locked",
+        lambda **kwargs: RefreshOutcome("unreachable", "temporary outage"),
+    )
+
+    result = import_web_auth(
+        {
+            "authorization": f"Bearer {auth_jwt}",
+            "x_device_id": "device-from-webkit",
+            "workspace_list": json.dumps(
+                [{"workspaceId": "ws_abc", "refreshToken": "unproved-token"}]
+            ),
+        },
+        env_path=env_path,
+        live_validator=lambda values: "ok",
+    )
+
+    assert result.status == "ok"
+    assert result.auto_refresh_armed is False
+    values = read_env_file(env_path)
+    assert "PLAUD_WS_REFRESH_TOKEN" not in values
+    assert values["PLAUD_AUTHORIZATION"].startswith("Bearer ")

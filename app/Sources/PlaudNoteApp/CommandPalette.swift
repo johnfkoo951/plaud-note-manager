@@ -373,13 +373,35 @@ struct CommandPaletteOverlay: View {
 
         items.append(PaletteAction(
             id: "obsidian",
-            title: "Send to Obsidian",
+            title: "Send to Vault (Integrated · 즉시)",
             systemImage: "paperplane",
             keyHint: "O",
             isEnabled: hasSelection
         ) {
             guard let fileID else { return true }
-            Task { await store.sendToObsidian(fileID) }
+            Task { await store.vaultSend(fileID) }
+            return true
+        })
+
+        items.append(PaletteAction(
+            id: "obsidian-wiki",
+            title: "Send to Wiki Vault",
+            systemImage: "books.vertical",
+            isEnabled: hasSelection
+        ) {
+            guard let fileID else { return true }
+            Task { await store.vaultSend(fileID, to: "wiki") }
+            return true
+        })
+
+        items.append(PaletteAction(
+            id: "obsidian-claude",
+            title: "Send to Vault via Claude (headless)",
+            systemImage: "wand.and.stars",
+            isEnabled: hasSelection
+        ) {
+            guard let fileID else { return true }
+            Task { await store.vaultSend(fileID, via: "claude") }
             return true
         })
 
