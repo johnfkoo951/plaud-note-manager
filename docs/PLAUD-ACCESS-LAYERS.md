@@ -1,13 +1,13 @@
 ---
 date created: 2026-06-15T13:46
-date modified: 2026-06-15T13:51
+date modified: 2026-09-02T20:05
 ---
 # Plaud Access Layers — Web · Desktop · MCP · Skill · App
 
 Plaud Cloud 데이터에 접근·조작·생산하는 다섯 가지 채널을 한 곳에 정리. 어떤 작업을 어떤 채널로 해야 하는지 결정할 때 본 문서를 SSOT로 사용한다.
 
 - 최초 작성: 2026-05-20
-- 최신 갱신: 2026-06-15 (App v0.5.1 — 전체내용 검색 · 태그 정리 · 서버 화자 변경 · 안전한 자동분류 · Grok 구독 CLI)
+- 최신 갱신: 2026-09-02 (MCP 채널 능력 확장 반영 — `get_transcript` block 파라미터 · `get_note` 멀티탭 · workspace_id)
 - 대상 저장소: `~/DEV/plaud-note-manager`
 - 공개 랜딩: <https://plaud.cmdspace.work> — `web/` 서브폴더 + Vercel 배포
 - Obsidian 요약: `<your-obsidian-vault>/70. Outputs/74. Projects/Plaud Note Manager/2026-05-20-plaud-access-layers.md`
@@ -67,17 +67,18 @@ plaud-note-manager/
 |---|---|---|---|---|---|
 | 파일 리스트 (id/name/duration/date) | ✅ | ✅ | ✅ `list_files` | ✅ `list-files.sh` | ✅ `plaud sync` (+ SQLite 캐시) |
 | `is_trans` / `is_summary` / `is_markmemo` 플래그 | △ UI 표시 | △ UI 표시 | ❌ | ✅ | △ 캐시 후 derived (raw flag 미노출) |
-| 트랜스크립트 (`transaction`) — 112개 언어 + 스피커 라벨 | ✅ | ✅ | ✅ `get_transcript` | ✅ `transcript.sh` | ✅ `plaud transcript` |
+| 트랜스크립트 (`transaction`) — 112개 언어 + 스피커 라벨 | ✅ | ✅ | ✅ `get_transcript` (+페이지네이션) | ✅ `transcript.sh` | ✅ `plaud transcript` |
+| 정제 전사 (`transaction_polish`) — 화자 **실명** 반영 | ✅ | ✅ | ✅ `get_transcript block=transaction_polish` ← 2026-09-02 | ✅ | ✅ |
 | AI 요약 (`auto_sum_note`) | ✅ | ✅ | ✅ `get_note` | ✅ `summary.sh` | ✅ `plaud summary` |
-| 다중 요약 (`sum_multi_note`) — Multidimensional | ✅ | ✅ | ❌ | ✅ | ✅ |
-| Outline | ✅ | ✅ | △ raw 포함 | ✅ | ✅ `plaud outline` |
-| Highlight (`high_light`) | ✅ | ✅ | ❌ | ✅ | ✅ (`plaud contents`) |
-| MarkMemo / Consumer Note (사용자 메모) | ✅ | ✅ | ❌ | ✅ | ✅ |
+| 다중 요약 / 템플릿 탭 (`consumer_note`) — Multidimensional | ✅ | ✅ | ✅ `get_note` 탭 배열 ← 2026-09-02 | ✅ | ✅ |
+| Outline | ✅ | ✅ | ✅ `get_transcript block=outline` | ✅ | ✅ `plaud outline` |
+| Highlight (`high_light`) | ✅ | ✅ | △ `block=mark_memo` (누른 녹음만) ← 2026-09-02 | ✅ | ✅ (`plaud contents`) |
+| MarkMemo / Consumer Note (사용자 메모) | ✅ | ✅ | △ 템플릿 탭은 `get_note`로 ✅ · markMemo는 `block=mark_memo` | ✅ | ✅ |
 | 오디오 MP3 | ✅ | ✅ + 로컬 캐시 | △ 24h presigned URL | ✅ `download-file.sh` | ✅ `plaud download` |
 | 스크린샷 (Desktop 녹음 시 첨부된 이미지) | ✅ | ✅ | ❌ | ❌ | ❌ |
-| **Ask Plaud** (자연어 Q&A, 인용 포함) | ✅ | ✅ | △ MCP 도구 조합으로 유사 구현 | ❌ | △ `plaud cmds-summarize` 등으로 우회 |
+| **Ask Plaud** (자연어 Q&A, 인용 포함) | ✅ | ✅ | △ 도구 조합으로 유사 구현 · **저장된 답변 탭**은 `get_note`로 읽기 | ❌ | △ `plaud cmds-summarize` 등으로 우회 |
 | 폴더 트리 (`/filetag/`) | ✅ | ✅ | ❌ | ❌ | ✅ `plaud folders` |
-| 인증 사용자 정보 | ✅ | ✅ | ✅ `get_current_user` | ❌ | △ `.env` 기반 |
+| 인증 사용자 정보 | ✅ | ✅ | ✅ `get_current_user` (+`workspace_id`/`member_id` ← 2026-09-02) | ❌ | △ `.env` 기반 |
 
 ## 4. 쓰기 / 편집 능력
 
@@ -170,7 +171,20 @@ serial_number · source_list · start_at
 ```
 - **폴더 / 태그 / `filetag_id_list` 가 전혀 노출되지 않음** → MCP만으로는 폴더 구조 무지.
 - `source_list[*].data_type`: `transaction` (트랜스크립트) · `outline`
-- `note_list[*].data_type`: `auto_sum_note` · 잠재적으로 `sum_multi_note` · `mark_memo` · `consumer_note` · `high_light` (세션마다 가변)
+- `note_list[*].data_type`: `auto_sum_note` · `consumer_note` (템플릿 탭 · Ask Plaud 저장 답변 — 탭당 1건, `data_tab_name`으로 구분) — 세션마다 가변
+
+### 8.2.1 MCP 확장 (2026-09-02 실측)
+
+MCP는 여전히 7 tools · read-only 지만, 두 도구의 범위가 넓어졌다.
+
+- **`get_transcript(block=…)`** — `transaction`(기본) · `transaction_polish` · `outline` · `mark_memo`.
+  - `transaction_polish`: 문장 정제 + **`speaker`에 실명** (`original_speaker`는 `Speaker N` 유지) → §8.3의 "MCP는 화자 익명" 한계가 부분 해소.
+  - `mark_memo`: 디바이스 하이라이트 버튼을 누른 녹음에만 존재. 미보유 시 가용 블록 목록을 응답으로 알려줌 (탐색에 활용 가능).
+  - 커서 페이지네이션: `limit`(≤500) · `next_cursor` · `total`/`offset`/`returned` → 장시간 녹음의 페이로드 제어 가능.
+- **`get_note` 멀티탭** — 앱 탭 하나당 배열 항목 하나. 실측 예(1개 강의 파일): `auto_sum_note`/Summary + `consumer_note`/Intent Analysis + Lecture Summary + Speech Summary = 4탭. `consumer_note`엔 `data_link`(presigned **300초**)가 붙고 `data_error_code`가 문자열 `"1"` (auto_sum은 정수 `10`).
+- **`get_current_user`에 `workspace_id`/`member_id`** — App이 리버스한 2-tier workspace 구조(§10)가 공식 채널에도 노출.
+
+여전히 미노출: 폴더/태그(`filetag_id_list`) · `is_trans`/`is_summary` 플래그 · 스크린샷 첨부물.
 
 ### 8.3 스피커 정보 구조
 - 각 transcript segment: `{ start_time, end_time, content, speaker, original_speaker }`
@@ -213,25 +227,43 @@ App 에서 사용:
 | MCP | `~/.plaud/tokens-mcp.json` (자동 refresh) |
 | Plaud CLI (`plfetch` 외부 도구) | `~/.plaud/tokens.json` |
 | Skill `plaud-cloud-tools` | `~/.claude/skills/plaud-cloud-tools/.env` |
-| App `plaud-note-manager` | `<repo>/.env` (PLAUD_COOKIE · PLAUD_WS_REFRESH_TOKEN 포함 · 0600 권한) |
+| App `plaud-note-manager` | workspace 자격증: macOS Keychain 단일 항목 · 계정 HttpOnly 세션: 영속 WebKit store |
 
 **App 헤드리스 자동 갱신 (2026-07 신규)**: Plaud web 인증은 2-tier OAuth이며
 `POST {domain}/user-app/auth/workspace/refresh/{wid}` 가 24h 토큰을 재발급한다.
 워크스페이스 refresh token을 1회 부트스트랩하면 (Embedded Web Login이 자동
 캡쳐, 또는 devtools `copy(localStorage.getItem("workspaceList"))` →
 `plaud ws-bootstrap`) 이후 모든 CLI 명령이 만료 6h 전에 토큰을 자동 갱신한다.
-refresh token은 매 사용 시 로테이션 → `.env`에 원자적으로 영속화, 동시 갱신은
-`.env.lock` flock으로 직렬화. 수동 강제: `plaud ws-refresh`. 끄기:
+refresh token은 매 사용 시 로테이션 → Keychain 단일 JSON 항목에 원자적으로
+영속화, 동시 갱신은 공용 `auth.lock` flock으로 직렬화. 수동 강제:
+`plaud ws-refresh`. 끄기:
 `PLAUD_AUTO_REFRESH=0`.
 
-**App Tier-1 복구 (2026-08 신규)**: refresh 체인 자체가 끊겼을 때
-(`not_bootstrapped` / `rejected`) `uv run plaud auth-recover`가 cmux
-브라우저에 이미 로그인돼 있는 web.plaud.ai 세션에서 `workspaceList`를
-재수확해 (`localStorage` 읽기 — 비밀번호 입력 없음) `ws-bootstrap`을
-재가동한다. 앱 Auth 시트 최상단 "Recover Now" 버튼과 동일. aside 등 MCP
-브라우저를 가진 Claude 세션은 `core/auth_recover.py`의 `CAPTURE_JS`를 직접
-실행해 `uv run plaud ws-bootstrap --stdin`으로 파이프하면 된다. cmux
-세션도 죽었으면 Tier 2 (Embedded Web Login, 사용자 1회 로그인).
+**App 계정-세션 무인 복구 (2026-08-27)**: Plaud가 workspace refresh chain을
+표시 만료일 전에 `-419/-420`으로 폐기해도, 앱은 필요할 때만 숨은
+`WKWebsiteDataStore.default()`를 띄워 HttpOnly 계정 세션으로 새 workspace
+token 쌍을 발급한다. 새 쌍은 WebKit localStorage와 Keychain에 같은 세대로
+저장하고 원래 명령을 1회 재시도한다. 계정 세션까지 만료된 경우에만
+상호작이 필요한 Plaud Web Login을 연다. `pld_ut`/`pld_urt`는 WebKit 밖으로
+복사하지 않는다.
+
+**App Tier-1 복구 (2026-08 신규 · 2026-08-17 무인화)**: refresh 체인이 끊겼을 때
+(`not_bootstrapped` / `rejected`) `uv run plaud auth-recover`가 브라우저에 이미
+로그인돼 있는 web.plaud.ai 세션에서 `workspaceList`를 재수확해 (localStorage
+읽기 — 비밀번호 입력 없음) `ws-bootstrap`을 재가동한다. 드라이버 사다리는
+매 단계 capture → bootstrap 검증이며, 한 단계가 실패해도 다음으로 넘어간다:
+
+| 순위 | 드라이버 | 조건 | 비고 |
+|---|---|---|---|
+| 1 | `chrome-disk` | 없음 (완전 무인) | Chrome localStorage LevelDB를 **읽기 전용** 파싱 (`ccl_chromium_reader`). Chrome 실행/설정 불필요. 전 프로필 스캔 후 `refreshExpiresAt` 최신값 채택 |
+| 2 | `chrome` | Chrome 실행 + View→Developer→"Allow JavaScript from Apple Events" | AppleScript `execute javascript` — 라이브 세션이라 디스크 사본이 로테이션돼 낡았을 때의 보루 |
+| 3 | `cmux` | cmux 브라우저에 Plaud 로그인 | `cmux browser open/wait/eval` |
+| 4 | Tier 2 | 사용자 1회 로그인 | 앱 Auth 시트 Embedded Web Login |
+
+앱은 만료를 감지하면 **사용자에게 배너를 띄우기 전에 스스로** `ws-refresh` →
+`auth-recover`를 시도한다 (`FileStore+Auth.selfHealAuthIfNeeded`, 세션당 1회).
+aside 등 MCP 브라우저를 가진 Claude 세션은 `core/auth_recover.py`의 `CAPTURE_JS`를
+직접 실행해 `uv run plaud ws-bootstrap --stdin`으로 파이프해도 된다.
 
 401 발생 시:
 - MCP → `login` 도구 호출
@@ -301,6 +333,11 @@ DevTools 캡쳐(`Copy as cURL`)로 확인. 인증은 기존 cURL 헤더 그대�
 
 ## 13. 변경 이력
 
+- **2026-09-02**: MCP 채널 능력 확장 반영 (문서만 갱신 — 코드 변경 없음)
+  - `get_transcript`에 `block` 파라미터 + 커서 페이지네이션, `get_note` 탭 배열,
+    `get_current_user`의 `workspace_id`/`member_id` 를 라이브 호출로 검증 (§3 · §8.2.1)
+  - 기존 표기 정정: MCP 열의 다중 요약 ❌ → ✅, Outline △ → ✅, Highlight ❌ → △
+  - 보고서: 볼트 `70. Outputs/74. Projects/Plaud Note Manager/2026-08-29-plaud-mcp-scope-report.md`
 - **2026-08-15**: v0.6 — 자동 메타데이터 + Tier-1 인증 복구 (`docs/PLAN-v0.6.md`)
   - `plaud metadata-auto` + sync-content 훅: 신규 파일 메타데이터 상시 자동 생성
     (`auto_metadata` 기본 on · 소스 해시 멱등 · 실패 백오프 · 폴더는 제안만 ·
