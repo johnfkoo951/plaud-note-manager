@@ -1,6 +1,6 @@
 # plaud.cmdspace.work
 
-> Public landing page for the **Plaud 5축 가이드** — Web · Desktop · MCP · Skill · App.
+> Public landing page for the **Plaud 6채널 가이드** — Web · Desktop · MCP · CLI · Skill · App.
 > Lives as a `web/` subfolder of the main `plaud-note-manager` repo so that the page, the App code, and the docs travel together.
 
 - **Live**: <https://plaud.cmdspace.work>
@@ -8,7 +8,7 @@
 - **DNS**: Cloudflare zone `cmdspace.work` · `CNAME plaud → cname.vercel-dns.com` (proxied=False)
 - **Template**: cmdspace-web-builder v4.3 Landing
 - **Content SSOT**: [`../docs/PLAUD-ACCESS-LAYERS.md`](../docs/PLAUD-ACCESS-LAYERS.md)
-- **Obsidian summary**: `00. Inbox/03. AI Agent/03-1. Claude Code (MBP)/2026-05-20-plaud-access-layers.md`
+- **Obsidian summary**: `70. Outputs/74. Projects/Plaud Note Manager/2026-05-20-plaud-access-layers.md` (2026-05 이후 이동됨)
 
 ## Edit & redeploy
 

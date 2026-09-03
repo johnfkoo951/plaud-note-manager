@@ -3,32 +3,32 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Plaud 5축 가이드</title>
-    <meta name="description" content="Plaud Cloud에 접근하는 다섯 가지 채널 — Web, Desktop, MCP, Skill, App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분과 실전 워크플로우 패턴 포함.">
+    <title>Plaud 6채널 가이드</title>
+    <meta name="description" content="Plaud Cloud를 다루는 여섯 가지 채널 — Web · Desktop · MCP · CLI · Skill · App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분, 채널별 천장, 실전 워크플로우 패턴 포함.">
     <link rel="icon" type="image/png" href="/assets/logos/cmds-logo-round.png">
     <link rel="apple-touch-icon" href="/assets/logos/cmds-logo-round.png">
 
     <!-- Open Graph (1200×630 dedicated OG image) -->
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="CMDSPACE">
-    <meta property="og:title" content="Plaud 5축 가이드">
-    <meta property="og:description" content="Plaud Cloud에 접근하는 다섯 가지 채널 — Web, Desktop, MCP, Skill, App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분과 실전 워크플로우 패턴 포함.">
+    <meta property="og:title" content="Plaud 6채널 가이드">
+    <meta property="og:description" content="Plaud Cloud를 다루는 여섯 가지 채널 — Web · Desktop · MCP · CLI · Skill · App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분, 채널별 천장, 실전 워크플로우 패턴 포함.">
     <meta property="og:url" content="https://plaud.cmdspace.work">
     <meta property="og:image" content="https://plaud.cmdspace.work/assets/og/og-web.png">
     <meta property="og:image:secure_url" content="https://plaud.cmdspace.work/assets/og/og-web.png">
     <meta property="og:image:type" content="image/png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
-    <meta property="og:image:alt" content="Plaud 5축 가이드">
+    <meta property="og:image:alt" content="Plaud 6채널 가이드">
     <meta property="og:locale" content="ko_KR">
     <meta property="og:locale:alternate" content="en_US">
 
     <!-- Twitter / X -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Plaud 5축 가이드">
-    <meta name="twitter:description" content="Plaud Cloud에 접근하는 다섯 가지 채널 — Web, Desktop, MCP, Skill, App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분과 실전 워크플로우 패턴 포함.">
+    <meta name="twitter:title" content="Plaud 6채널 가이드">
+    <meta name="twitter:description" content="Plaud Cloud를 다루는 여섯 가지 채널 — Web · Desktop · MCP · CLI · Skill · App — 의 능력 비교와 채널 선택 가이드. Capture vs Manage 구분, 채널별 천장, 실전 워크플로우 패턴 포함.">
     <meta name="twitter:image" content="https://plaud.cmdspace.work/assets/og/og-web.png">
-    <meta name="twitter:image:alt" content="Plaud 5축 가이드">
+    <meta name="twitter:image:alt" content="Plaud 6채널 가이드">
 
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/static/pretendard.min.css" />
 
@@ -722,6 +722,8 @@
             line-height: 1.7;
             color: #dfe5e2;
             overflow-x: auto;
+            white-space: pre;
+            -webkit-overflow-scrolling: touch;
         }
         .teaser-code .yaml-key { color: #5bc79d; }
         .teaser-code .yaml-str { color: #d9c7a0; }
@@ -876,13 +878,14 @@
 <header class="site-header">
     <a class="brand" href="/">
         <img class="brand-mark" src="/assets/logos/cmds-logo-round.png" alt="CMDS" width="28" height="28">
-        <span>Plaud 5축 가이드</span>
+        <span>Plaud 6채널 가이드</span>
     </a>
     <nav class="header-nav">
-        <a href="#channels">5 Channels</a>
+        <a href="#channels">6 Channels</a>
         <a href="#roles">Capture · Manage</a>
         <a href="#routing">Routing</a>
         <a href="#workflows">Workflows</a>
+        <a href="#changelog"><span class="en-only">What's new</span><span class="ko-only">변경점</span></a>
         <a href="https://web.plaud.ai" target="_blank" rel="noopener">Plaud Web ↗</a>
     </nav>
     <div class="header-actions">
@@ -900,20 +903,20 @@
     <div class="hero-bg"></div>
     <div class="hero-inner">
         <div class="hero-eyebrow">
-            <span class="en-only">Plaud Access Layers · Updated 2026-06-15</span>
-            <span class="ko-only">Plaud 접근 5축 · 2026-06-15 업데이트</span>
+            <span class="en-only">Plaud Access Layers · Updated 2026-09-03</span>
+            <span class="ko-only">Plaud 접근 6채널 · 2026-09-03 업데이트</span>
         </div>
         <h1 class="hero-title">
-            <span class="en-only">One Plaud account.<br><span class="grad">Five channels</span> to use it.</span>
-            <span class="ko-only">하나의 Plaud 계정,<br><span class="grad">다섯 가지 채널</span>로 다루는 법.</span>
+            <span class="en-only">One Plaud account.<br><span class="grad">Six channels</span> to use it.</span>
+            <span class="ko-only">하나의 Plaud 계정,<br><span class="grad">여섯 가지 채널</span>로 다루는 법.</span>
         </h1>
         <p class="hero-lede">
-            <span class="en-only">Web · Desktop · MCP · Skill · App — each channel has a different ceiling on what you can read, edit, and automate. This page is the decision SSOT for picking the right one.</span>
-            <span class="ko-only">Web · Desktop · MCP · Skill · App — 각 채널마다 읽기·편집·자동화 가능 범위가 다릅니다. 어떤 채널을 언제 써야 하는지 결정하는 SSOT.</span>
+            <span class="en-only">Web · Desktop · MCP · CLI · Skill · App — each channel has a different ceiling on what you can read, edit, and automate. Plaud shipped an official CLI in August 2026, so read-only automation no longer needs reverse engineering. This page is the decision SSOT for picking the right door.</span>
+            <span class="ko-only">Web · Desktop · MCP · CLI · Skill · App — 각 채널마다 읽기·편집·자동화 가능 범위가 다릅니다. 2026년 8월 <strong>공식 CLI</strong>가 나오면서 읽기 전용 자동화는 더 이상 리버스 엔지니어링이 필요 없어졌습니다. 어떤 채널을 언제 써야 하는지 결정하는 SSOT.</span>
         </p>
         <div class="hero-cta">
             <a class="btn btn-primary" href="#channels">
-                <span class="en-only">See the 5 channels</span><span class="ko-only">5축 비교 보기</span>
+                <span class="en-only">See the 6 channels</span><span class="ko-only">6채널 비교 보기</span>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
             </a>
             <a class="btn btn-secondary" href="#routing">
@@ -927,10 +930,10 @@
         </div>
 
         <div class="hero-meta">
-            <div class="hero-meta-item"><div class="val">5</div><div class="lbl en-only">channels</div><div class="lbl ko-only">채널</div></div>
+            <div class="hero-meta-item"><div class="val">6</div><div class="lbl en-only">channels</div><div class="lbl ko-only">채널</div></div>
             <div class="hero-meta-item"><div class="val">2</div><div class="lbl en-only">roles</div><div class="lbl ko-only">역할</div></div>
-            <div class="hero-meta-item"><div class="val">9</div><div class="lbl en-only">API endpoints</div><div class="lbl ko-only">API 엔드포인트</div></div>
-            <div class="hero-meta-item"><div class="val">14</div><div class="lbl en-only">auto-classify</div><div class="lbl ko-only">자동 분류</div></div>
+            <div class="hero-meta-item"><div class="val">4</div><div class="lbl en-only">official</div><div class="lbl ko-only">공식 채널</div></div>
+            <div class="hero-meta-item"><div class="val">3</div><div class="lbl en-only">can write</div><div class="lbl ko-only">쓰기 가능</div></div>
         </div>
     </div>
 </section>
@@ -948,25 +951,25 @@
                 </h2>
             </div>
             <div class="idea-body">
-                <p class="en-only">After Plaud announced its official MCP server (2026-05-13), three more channels became visible: a public OAuth MCP, an unofficial bash skill, and a self-hosted Python·SwiftUI app that already wraps the web API. Add the official Web and Desktop apps, and you get <em>five</em>.</p>
-                <p class="en-only">They are not interchangeable. MCP is read-only. Skill exposes content MCP can't see (markMemo, highlight). The App is the only channel that creates folders, auto-classifies recordings with AI, searches across every transcript, organizes by tags, and pushes to Obsidian. Desktop is the only channel that can <em>record live meetings</em> from system audio.</p>
-                <p class="ko-only">2026-05-13 Plaud가 공식 MCP 서버를 발표하면서 세 가지 채널이 더 가시화됐습니다 — OAuth MCP, 비공식 bash 스킬, 그리고 web API를 직접 감싸는 자체 Python·SwiftUI 앱. 거기에 공식 Web·Desktop을 더하면 <em>다섯 축</em>이 됩니다.</p>
-                <p class="ko-only">이들은 서로 대체재가 아닙니다. MCP는 read-only. 스킬은 MCP가 못 보는 콘텐츠(markMemo, highlight)를 노출합니다. 앱은 폴더 생성·AI 자동 분류·전체 전사본 검색·태그 정리·Obsidian 송출이 가능한 유일한 채널. Desktop은 시스템 오디오로 <em>회의를 실시간 녹음</em>할 수 있는 유일한 채널입니다.</p>
+                <p class="en-only">Plaud opened its official MCP server in May 2026 and an official CLI in August. Around those sit an unofficial bash skill and a self-hosted Python·SwiftUI app that wrap the web API directly. Add the official Web and Desktop apps and you get <em>six</em> — four official, two of my own.</p>
+                <p class="en-only">They are not interchangeable, and the line that matters is not official-vs-unofficial but <em>read-vs-write</em>. MCP, the CLI and the Skill cannot change a single thing on the server. Only Web, Desktop and the App write — and only the App auto-classifies with AI, searches inside every transcript, organizes by tags and pushes to Obsidian. Desktop alone can <em>record a live meeting</em> from system audio.</p>
+                <p class="ko-only">Plaud는 2026년 5월 공식 MCP 서버를, 8월엔 공식 CLI를 열었습니다. 그 옆에 web API를 직접 감싸는 비공식 bash 스킬과 자체 Python·SwiftUI 앱이 있고, 공식 Web·Desktop을 더하면 <em>여섯 채널</em> — 공식 넷, 직접 만든 둘입니다.</p>
+                <p class="ko-only">이들은 서로 대체재가 아닙니다. 그리고 진짜 경계선은 공식이냐 아니냐가 아니라 <em>읽기냐 쓰기냐</em>입니다. MCP · CLI · 스킬은 서버의 어떤 것도 바꾸지 못합니다. 쓰는 건 Web · Desktop · 앱뿐이고, AI 자동 분류 · 전사본 전체 검색 · 태그 정리 · Obsidian 송출은 앱만 할 수 있습니다. 시스템 오디오로 <em>회의를 실시간 녹음</em>하는 건 Desktop만 가능합니다.</p>
             </div>
         </div>
     </div>
 </section>
 
-<!-- ARCHITECTURE — 5 CHANNELS -->
+<!-- ARCHITECTURE — 6 CHANNELS -->
 <section class="block" id="channels">
     <div class="block-inner reveal">
         <div class="block-eyebrow">
-            <span class="en-only">The 5 Channels</span>
-            <span class="ko-only">5축</span>
+            <span class="en-only">The 6 Channels</span>
+            <span class="ko-only">6채널</span>
         </div>
         <h2 class="block-title">
-            <span class="en-only">Five doors into the <span class="accent-word">same cloud</span>.</span>
-            <span class="ko-only">같은 클라우드로 들어가는 <span class="accent-word">다섯 개의 문</span>.</span>
+            <span class="en-only">Six doors into the <span class="accent-word">same cloud</span>.</span>
+            <span class="ko-only">같은 클라우드로 들어가는 <span class="accent-word">여섯 개의 문</span>.</span>
         </h2>
         <p class="block-lede">
             <span class="en-only">Each row shows where the channel lives, how it authenticates, and what its primary surface looks like. Tagged ✅ for official Plaud surfaces and ⚠️ for unofficial reverse-engineered ones.</span>
@@ -996,13 +999,22 @@
                 <div class="file-precedence">3</div>
                 <div>
                     <div class="file-name"><code>MCP</code><span class="file-tag">✅ Official</span></div>
-                    <div class="file-desc en-only"><code>mcp__plaud__*</code> via Claude Code / Cursor / Zed — OAuth, read-only, 7 tools.</div>
-                    <div class="file-desc ko-only">Claude Code · Cursor · Zed 등에서 호출하는 <code>mcp__plaud__*</code> — OAuth, read-only, 7개 도구.</div>
+                    <div class="file-desc en-only"><code>mcp__plaud__*</code> via Claude Code / Cursor / Zed — OAuth, read-only, 7 tools. Quietly expanded in 2026-09: <code>get_transcript</code> gained a <code>block</code> parameter (polished transcript with <em>real speaker names</em>, outline, markMemo) with pagination, and <code>get_note</code> now returns every tab.</div>
+                    <div class="file-desc ko-only">Claude Code · Cursor · Zed 등에서 호출하는 <code>mcp__plaud__*</code> — OAuth, 읽기 전용, 7개 도구. 2026-09 조용히 확장: <code>get_transcript</code>에 <code>block</code> 파라미터(정제 전사 — <em>화자 실명</em> 포함 · 아웃라인 · markMemo)와 페이지네이션이, <code>get_note</code>에 탭 전량 반환이 추가됐습니다.</div>
                 </div>
                 <div class="file-audience">Manage (LLM)</div>
             </div>
             <div class="file-row">
                 <div class="file-precedence">4</div>
+                <div>
+                    <div class="file-name"><code>CLI</code><span class="file-tag">✅ Official</span><span class="file-tag" style="background: color-mix(in srgb, var(--cmds-green) 14%, transparent);">NEW · 2026-08</span></div>
+                    <div class="file-desc en-only"><code>@plaud-ai/cli</code> (npm, v0.3.11) — 13 commands on the <em>official developer API</em> (<code>platform.plaud.ai</code>), OAuth, read-only. The only official way to script Plaud from a terminal, cron job, or headless server.</div>
+                    <div class="file-desc ko-only"><code>@plaud-ai/cli</code> (npm, v0.3.11) — <em>공식 개발자 API</em>(<code>platform.plaud.ai</code>) 위의 13개 명령, OAuth, 읽기 전용. 터미널·크론·헤드리스 서버에서 Plaud를 스크립팅하는 <strong>유일한 공식 수단</strong>.</div>
+                </div>
+                <div class="file-audience">Manage (shell)</div>
+            </div>
+            <div class="file-row">
+                <div class="file-precedence">5</div>
                 <div>
                     <div class="file-name"><code>Skill</code><span class="file-tag" style="background: color-mix(in srgb, var(--cmds-green) 10%, transparent);">⚠️ Unofficial</span></div>
                     <div class="file-desc en-only"><code>~/.claude/skills/plaud-cloud-tools/</code> — bash wrappers over the captured web cURL. Exposes markMemo · highlight that MCP can't.</div>
@@ -1011,11 +1023,11 @@
                 <div class="file-audience">Manage (CLI)</div>
             </div>
             <div class="file-row">
-                <div class="file-precedence">5</div>
+                <div class="file-precedence">6</div>
                 <div>
                     <div class="file-name"><code>App</code><span class="file-tag" style="background: color-mix(in srgb, var(--cmds-green) 10%, transparent);">⚠️ Unofficial</span></div>
-                    <div class="file-desc en-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS app. The only write-capable channel: folder CRUD, title &amp; server-transcript speaker rename, safe AI auto-classify (preview + undo), full-content search (FTS5, Korean substring), tag organization, multi-model AI summaries (Claude/Codex/Gemini/Grok via subscription), and Obsidian export.</div>
-                    <div class="file-desc ko-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS 앱. 쓰기 권한을 가진 유일한 비공식 채널: 폴더 CRUD · 제목/서버 전사본 화자 변경 · 안전한 AI 자동 분류(미리보기·되돌리기) · 전체 내용 검색(FTS5, 한국어 부분 일치) · 태그 정리 · 멀티모델 AI 요약(Claude·Codex·Gemini·Grok 구독 활용) · Obsidian 송출.</div>
+                    <div class="file-desc en-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS app. The only write-capable channel: folder CRUD, title &amp; server-transcript speaker rename, safe AI auto-classify (preview + undo), full-content search (FTS5, Korean substring), tag organization, multi-model AI summaries (Claude/Codex/Gemini/Grok via subscription), and Obsidian export. v0.8 (2026-09) made auto-foldering two-stage — deterministic rules first, an LLM arbitrating only low-confidence cases from a closed folder menu.</div>
+                    <div class="file-desc ko-only"><code>~/DEV/plaud-note-manager/</code> — Python CLI + SwiftUI macOS 앱. 쓰기 권한을 가진 유일한 비공식 채널: 폴더 CRUD · 제목/서버 전사본 화자 변경 · 안전한 AI 자동 분류(미리보기·되돌리기) · 전체 내용 검색(FTS5, 한국어 부분 일치) · 태그 정리 · 멀티모델 AI 요약(Claude·Codex·Gemini·Grok 구독 활용) · Obsidian 송출. v0.8(2026-09)에서 자동 폴더링이 2단계로 — 규칙이 먼저 판단하고, 확신이 낮을 때만 LLM이 <em>정해진 폴더 메뉴 안에서</em> 중재합니다.</div>
                 </div>
                 <div class="file-audience">Manage + Power</div>
             </div>
@@ -1063,10 +1075,10 @@
             </div>
             <div class="process-stage">
                 <div class="stage-dot">M</div>
-                <div class="stage-name">Web · MCP · Skill · App</div>
+                <div class="stage-name">Web · MCP · CLI · Skill · App</div>
                 <div class="stage-category">Manage only</div>
-                <div class="stage-desc en-only">Browse, read, summarize, classify, export. Cannot create new recordings.</div>
-                <div class="stage-desc ko-only">브라우징 · 읽기 · 요약 · 분류 · 송출. 신규 녹음 생성은 불가.</div>
+                <div class="stage-desc en-only">Browse, read, summarize, classify, export. Five of the six channels can never create a recording.</div>
+                <div class="stage-desc ko-only">브라우징 · 읽기 · 요약 · 분류 · 송출. 6채널 중 5개는 신규 녹음을 만들 수 없습니다.</div>
             </div>
         </div>
     </div>
@@ -1091,12 +1103,13 @@
                 </div>
                 <div class="aud-title en-only">Read — everyone reads, but unevenly</div>
                 <div class="aud-title ko-only">읽기 — 모두가 읽지만 깊이가 다름</div>
-                <p class="aud-desc en-only">List · transcript · AI summary are universal. highlight · markMemo · sum_multi_note are exposed by Skill / App but hidden by MCP. Outline is only partially exposed by MCP (raw via get_file). Folder tree visible to Web / Desktop / App only.</p>
-                <p class="aud-desc ko-only">파일 리스트 · 트랜스크립트 · AI 요약은 보편. highlight · markMemo · 다중 요약은 Skill / App만 노출, MCP는 숨김. Outline은 MCP에서 부분 노출(get_file 원본 경유). 폴더 트리는 Web · Desktop · App만 가시.</p>
+                <p class="aud-desc en-only">List · transcript · AI summary are universal — the official CLI covers exactly this much. Depth differs above that line: MCP now reads polished transcripts, outline and markMemo through its <code>block</code> parameter, and every note tab. Folder tree stays visible to Web / Desktop / App only, and body-text search exists only in the App.</p>
+                <p class="aud-desc ko-only">파일 리스트 · 트랜스크립트 · AI 요약은 보편 — 공식 CLI가 커버하는 범위가 딱 여기까지입니다. 그 위부터 깊이가 갈립니다: MCP는 <code>block</code> 파라미터로 정제 전사 · 아웃라인 · markMemo를, <code>get_note</code>로 모든 탭을 읽습니다. 폴더 트리는 Web · Desktop · App만, 본문 검색은 App만.</p>
                 <ul class="aud-list">
-                    <li>✅ <span class="en-only">All 5 — transcripts, summaries</span><span class="ko-only">5축 모두 — 트랜스크립트 · 요약</span></li>
-                    <li>⚠️ <span class="en-only">Skill / App only — markMemo, highlight</span><span class="ko-only">Skill · App만 — markMemo · highlight</span></li>
-                    <li>⚠️ <span class="en-only">Web / Desktop / App — folder tree</span><span class="ko-only">Web · Desktop · App — 폴더 트리</span></li>
+                    <li>✅ <span class="en-only">All 6 — transcripts, summaries</span><span class="ko-only">6채널 모두 — 트랜스크립트 · 요약</span></li>
+                    <li>✅ <span class="en-only">MCP — polished transcript with real speaker names, all note tabs</span><span class="ko-only">MCP — 화자 실명 정제 전사 · 노트 전 탭</span></li>
+                    <li>⚠️ <span class="en-only">Skill / App / MCP — markMemo &amp; highlight (MCP: only if the button was pressed)</span><span class="ko-only">Skill · App · MCP — markMemo · highlight (MCP는 버튼을 누른 녹음만)</span></li>
+                    <li>⚠️ <span class="en-only">Web / Desktop / App — folder tree · App only — body-text search</span><span class="ko-only">Web · Desktop · App — 폴더 트리 · App만 — 본문 검색</span></li>
                     <li>⚠️ <span class="en-only">Desktop / Web — Ask Plaud (cited Q&A)</span><span class="ko-only">Desktop · Web — Ask Plaud (인용 Q&A)</span></li>
                 </ul>
             </div>
@@ -1104,15 +1117,15 @@
                 <div class="aud-icon">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                 </div>
-                <div class="aud-title en-only">Write — only 3 of 5 can write</div>
-                <div class="aud-title ko-only">쓰기 — 5축 중 3축만 가능</div>
-                <p class="aud-desc en-only">Web and Desktop have full edit (rename, folder CRUD, speaker labels, delete). App matches rename + folder, renames speakers in the <em>server transcript</em>, and is the <em>only</em> channel that adds AI auto-classification, full-content search, and tag organization. MCP and Skill are read-only.</p>
-                <p class="aud-desc ko-only">Web · Desktop은 풀 편집 (제목 · 폴더 CRUD · 스피커 라벨 · 삭제). 앱은 제목 · 폴더에 더해 <em>서버 전사본</em> 화자 변경, 그리고 AI 자동 분류 · 전체 내용 검색 · 태그 정리는 <em>유일</em>. MCP · Skill은 read-only.</p>
+                <div class="aud-title en-only">Write — only 3 of 6 can write</div>
+                <div class="aud-title ko-only">쓰기 — 6채널 중 3개만 가능</div>
+                <p class="aud-desc en-only">Web and Desktop have full edit (rename, folder CRUD, speaker labels, delete). App matches rename + folder, renames speakers in the <em>server transcript</em>, and is the <em>only</em> channel that adds AI auto-classification, full-content search, and tag organization. MCP, the official CLI and the Skill are all read-only — no channel outside Web / Desktop / App can change anything on the server.</p>
+                <p class="aud-desc ko-only">Web · Desktop은 풀 편집 (제목 · 폴더 CRUD · 스피커 라벨 · 삭제). 앱은 제목 · 폴더에 더해 <em>서버 전사본</em> 화자 변경, 그리고 AI 자동 분류 · 전체 내용 검색 · 태그 정리는 <em>유일</em>. MCP · 공식 CLI · Skill은 모두 읽기 전용 — Web · Desktop · App 밖에서는 서버의 어떤 것도 바꿀 수 없습니다.</p>
                 <ul class="aud-list">
                     <li>✅ <span class="en-only">Web · Desktop — full edit</span><span class="ko-only">Web · Desktop — 풀 편집</span></li>
                     <li>✅ <span class="en-only">App — rename · folder CRUD · move · speaker rename</span><span class="ko-only">App — 제목 변경 · 폴더 CRUD · 이동 · 화자 변경</span></li>
                     <li>⭐ <span class="en-only">App only — safe AI auto-classify (preview + undo) · full-content search · tags</span><span class="ko-only">App만 — 안전한 AI 자동 분류(미리보기·되돌리기) · 전체 내용 검색 · 태그</span></li>
-                    <li>❌ <span class="en-only">MCP · Skill — no write at all</span><span class="ko-only">MCP · Skill — 쓰기 0건</span></li>
+                    <li>❌ <span class="en-only">MCP · CLI · Skill — no write at all</span><span class="ko-only">MCP · CLI · Skill — 쓰기 0건</span></li>
                 </ul>
             </div>
         </div>
@@ -1139,6 +1152,8 @@
             <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Capture</div><div class="cat-name">Online meeting</div><div class="cat-sub">Desktop (Zoom · Meet · Teams 자동 감지 + 시스템 오디오)</div></div>
             <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Capture</div><div class="cat-name">In-person talk</div><div class="cat-sub">Plaud Note HW (디바이스 휴대)</div></div>
             <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Browse</div><div class="cat-name">"최근 녹음 / 요약"</div><div class="cat-sub">MCP (Claude 대화 중 자연어 호출)</div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Script</div><div class="cat-name">크론 · 배치로 파일 뽑기</div><div class="cat-sub">CLI (공식) — <code>plaud summary &lt;id&gt; -o out.md</code></div></div>
+            <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Script</div><div class="cat-name">헤드리스 서버 · 공식 경로만</div><div class="cat-sub">CLI (리버스 엔지니어링 없이 OAuth로)</div></div>
             <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Browse</div><div class="cat-name">GUI 빠른 탐색</div><div class="cat-sub">Desktop 또는 Web (Ask Plaud 인용 Q&A 포함)</div></div>
             <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Edit</div><div class="cat-name">제목 / 폴더 변경</div><div class="cat-sub">Web · Desktop · App (셋 다 가능)</div></div>
             <div class="cat-cell"><div class="cat-num" style="font-size: 14px;">Edit</div><div class="cat-name">스피커 라벨</div><div class="cat-sub">Web 또는 Desktop (Plaud 서버 반영)</div></div>
@@ -1160,8 +1175,8 @@
             <span class="ko-only">실전 조합 패턴</span>
         </div>
         <h2 class="block-title">
-            <span class="en-only">A full meeting workflow <span class="accent-word">stitches all five</span>.</span>
-            <span class="ko-only">제대로 된 회의 워크플로우는 <span class="accent-word">5축을 모두</span> 엮습니다.</span>
+            <span class="en-only">A full meeting workflow <span class="accent-word">stitches several</span>.</span>
+            <span class="ko-only">제대로 된 회의 워크플로우는 <span class="accent-word">여러 채널을</span> 엮습니다.</span>
         </h2>
         <p class="block-lede">
             <span class="en-only">No single channel covers a serious workflow end-to-end. The fluent pattern is to <em>chain</em> them — each channel doing what it's best at.</span>
@@ -1186,9 +1201,70 @@ $ <span class="yaml-key">uv run plaud meeting-note</span> 07a961a46137012b9e1928
 <span class="yaml-com"># 4) MCP — Claude 대화 중 follow-up 이메일 초안</span>
 <span class="yaml-str">"이 회의로 follow-up 이메일 만들어줘"</span>  <span class="yaml-com"># → plaud-followup 자동 라우팅</span>
 
-<span class="yaml-com"># 5) Web — 외부 메모/노션에 박을 영구 URL</span>
+<span class="yaml-com"># 5) CLI(공식) — 크론으로 매일 요약본만 따로 아카이브</span>
+$ <span class="yaml-key">plaud today</span> --json | jq -r <span class="yaml-str">'.[].id'</span> \
+    | xargs -I{} <span class="yaml-key">plaud summary</span> {} -o ~/archive/{}.md
+<span class="yaml-com"># ↑ 전역 `plaud` = 공식 CLI · `uv run plaud` = 이 앱 (이름이 겹칩니다)</span>
+<span class="yaml-com"># 6) Web — 외부 메모/노션에 박을 영구 URL</span>
 $ <span class="yaml-key">uv run plaud web</span> 07a961a4... --copy
 <span class="yaml-str">https://web.plaud.ai/file/07a961a46137012b9e1928bb9c088f6c</span></div>
+        </div>
+    </div>
+</section>
+
+<!-- WHAT CHANGED -->
+<section class="block reveal" id="changelog" style="padding-top: 0;">
+    <div class="block-inner">
+        <div class="block-eyebrow">
+            <span class="en-only">What changed · Aug–Sep 2026</span>
+            <span class="ko-only">무엇이 바뀌었나 · 2026년 8–9월</span>
+        </div>
+        <h2 class="block-title">
+            <span class="en-only">This page said <span class="accent-word">five</span> for three months.</span>
+            <span class="ko-only">이 페이지는 석 달 동안 <span class="accent-word">다섯</span>이라고 적혀 있었습니다.</span>
+        </h2>
+        <p class="block-lede">
+            <span class="en-only">Two of the changes below arrived without an announcement — the tool count stayed the same while the tools themselves grew. If you built on this page earlier, these are the lines that moved.</span>
+            <span class="ko-only">아래 변화 중 둘은 공지 없이 왔습니다 — 도구 <em>개수</em>는 그대로인데 도구 <em>내부</em>가 넓어진 형태로. 이전 버전을 보고 설계하셨다면, 바뀐 건 이 줄들입니다.</span>
+        </p>
+        <div class="files-stack">
+            <div class="file-row">
+                <div class="file-precedence" style="font-size: 12px;">08-24</div>
+                <div>
+                    <div class="file-name"><code>CLI</code><span class="file-tag">✅ 신규 공식 채널</span></div>
+                    <div class="file-desc en-only">Plaud shipped <code>@plaud-ai/cli</code> on an official developer API. Read-only automation — list, transcript, summary, audio URL, search — no longer requires reverse engineering. Every "5 channels" doc became wrong that day.</div>
+                    <div class="file-desc ko-only">Plaud가 공식 개발자 API 위에서 <code>@plaud-ai/cli</code>를 출시. 읽기 전용 자동화(목록 · 전사 · 요약 · 오디오 URL · 검색)에 더는 리버스 엔지니어링이 필요 없어졌습니다. 이날부로 "5축" 문서는 전부 틀린 문서가 됐습니다.</div>
+                </div>
+                <div class="file-audience">신규</div>
+            </div>
+            <div class="file-row">
+                <div class="file-precedence" style="font-size: 12px;">09-02</div>
+                <div>
+                    <div class="file-name"><code>MCP</code><span class="file-tag">확장</span></div>
+                    <div class="file-desc en-only">Still 7 tools, but two of them grew. <code>get_transcript</code> takes a <code>block</code> (<code>transaction_polish</code> · <code>outline</code> · <code>mark_memo</code>) plus cursor pagination, and the polished block carries <strong>real speaker names</strong>. <code>get_note</code> returns every tab, template tabs included. Verified by live calls, not by docs.</div>
+                    <div class="file-desc ko-only">도구는 여전히 7개지만 그중 둘이 넓어졌습니다. <code>get_transcript</code>가 <code>block</code>(<code>transaction_polish</code> · <code>outline</code> · <code>mark_memo</code>)과 커서 페이지네이션을 받고, 정제 블록에는 <strong>화자 실명</strong>이 실려 옵니다. <code>get_note</code>는 템플릿 탭까지 전 탭을 반환합니다. 문서가 아니라 라이브 호출로 확인한 사실.</div>
+                </div>
+                <div class="file-audience">확장</div>
+            </div>
+            <div class="file-row">
+                <div class="file-precedence" style="font-size: 12px;">09-03</div>
+                <div>
+                    <div class="file-name"><code>App</code><span class="file-tag" style="background: color-mix(in srgb, var(--cmds-green) 10%, transparent);">v0.8</span></div>
+                    <div class="file-desc en-only">Auto-foldering became two-stage: deterministic rules decide first, and an LLM arbitrates only the low-confidence cases — choosing from a closed folder menu so it can never invent a destination. Placement still requires an explicit apply step.</div>
+                    <div class="file-desc ko-only">자동 폴더링이 2단계가 됐습니다. 규칙이 먼저 판단하고, 확신이 낮은 건에 대해서만 LLM이 <em>정해진 폴더 메뉴 안에서</em> 중재합니다 — 없는 폴더를 지어낼 수 없는 구조. 실제 배치는 여전히 명시적 적용 단계를 거칩니다.</div>
+                </div>
+                <div class="file-audience">v0.8</div>
+            </div>
+        </div>
+        <div class="teaser-box" style="margin-top: 28px;">
+            <div class="teaser-tabs">
+                <button class="teaser-tab active">⚠️ name collision</button>
+            </div>
+            <div class="teaser-code"><span class="yaml-com"># 공식 CLI와 이 앱의 실행 명령이 둘 다 `plaud` 입니다.</span>
+<span class="yaml-com"># transcript · summary · search 는 이름이 같고 동작이 다릅니다.</span>
+$ <span class="yaml-key">plaud</span> summary &lt;id&gt;           <span class="yaml-com"># → 전역 npm, 공식 CLI (읽기 전용)</span>
+$ <span class="yaml-key">uv run plaud</span> summary &lt;id&gt;    <span class="yaml-com"># → 이 저장소의 앱 (쓰기·분류·볼트 송출)</span>
+<span class="yaml-com"># 앱 명령에는 항상 `uv run` 을 붙이세요.</span></div>
         </div>
     </div>
 </section>
@@ -1201,8 +1277,8 @@ $ <span class="yaml-key">uv run plaud web</span> 07a961a4... --copy
             <span class="ko-only">알맞은 문을 고르세요.<br>필요하면 엮으세요.</span>
         </h2>
         <p class="cta-lede">
-            <span class="en-only">Full source-of-truth doc lives in the App repo. Summary lives in the Obsidian vault. Both are linked below so you can pick up from either side next session.</span>
-            <span class="ko-only">상세 SSOT는 App 저장소에, 요약본은 Obsidian 볼트에 있습니다. 두 경로 다 아래 링크 — 다음 세션은 어느 쪽에서도 이어가실 수 있어요.</span>
+            <span class="en-only">The full matrix — every read/write capability per channel, endpoint mappings, auth notes — lives in the open-source repo below. This page is its readable summary.</span>
+            <span class="ko-only">채널별 읽기·쓰기 능력 전체 표, 엔드포인트 매핑, 인증 노트까지 담긴 상세 SSOT는 아래 오픈소스 저장소에 있습니다. 이 페이지는 그 요약본입니다.</span>
         </p>
         <div class="cta-buttons">
             <a class="btn-white" href="https://web.plaud.ai" target="_blank" rel="noopener">
@@ -1212,7 +1288,10 @@ $ <span class="yaml-key">uv run plaud web</span> 07a961a4... --copy
             <a class="btn-outline" href="https://www.plaud.ai/pages/plaud-desktop" target="_blank" rel="noopener">
                 <span class="en-only">Get Desktop</span><span class="ko-only">Desktop 받기</span>
             </a>
-            <a class="btn-outline" href="https://docs.plaud.ai/mcp" target="_blank" rel="noopener">Plaud MCP docs ↗</a>
+            <a class="btn-outline" href="https://github.com/johnfkoo951/plaud-note-manager/blob/main/docs/PLAUD-ACCESS-LAYERS.md" target="_blank" rel="noopener">
+                <span class="en-only">Full matrix (SSOT) ↗</span><span class="ko-only">전체 비교표 (SSOT) ↗</span>
+            </a>
+            <a class="btn-outline" href="https://docs.plaud.ai/plaud-mcp-cli/mcp" target="_blank" rel="noopener">Plaud MCP docs ↗</a>
         </div>
     </div>
 </section>
@@ -1236,7 +1315,10 @@ $ <span class="yaml-key">uv run plaud web</span> 07a961a4... --copy
         <div class="footer-links">
             <a href="https://cmdspace.work" target="_blank" rel="noopener">cmdspace.work</a>
             <a href="https://web.plaud.ai" target="_blank" rel="noopener">Plaud Web ↗</a>
-            <a href="https://docs.plaud.ai/mcp" target="_blank" rel="noopener">MCP docs ↗</a>
+            <a href="https://docs.plaud.ai/plaud-mcp-cli/mcp" target="_blank" rel="noopener">MCP docs ↗</a>
+            <a href="https://docs.plaud.ai/plaud-mcp-cli/cli" target="_blank" rel="noopener">CLI docs ↗</a>
+            <a href="https://www.npmjs.com/package/@plaud-ai/cli" target="_blank" rel="noopener">Official CLI ↗</a>
+            <a href="https://github.com/johnfkoo951/plaud-note-manager" target="_blank" rel="noopener">GitHub ↗</a>
             <a href="https://www.plaud.ai/pages/plaud-desktop" target="_blank" rel="noopener">Desktop ↗</a>
         </div>
     </div>
