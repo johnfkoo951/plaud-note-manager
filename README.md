@@ -14,13 +14,13 @@ plaud-note-manager/
 ├── app/            # SwiftUI 네이티브 macOS 앱
 ├── data/           # SQLite, 다운로드, 메타 캐시 (gitignored)
 ├── web/            # 공개 랜딩 (plaud.cmdspace.work · Vercel)
-├── docs/           # PLAUD-ACCESS-LAYERS.md (5축 비교 SSOT) + STORAGE/REQUESTS/DISCLOSURE
+├── docs/           # PLAUD-ACCESS-LAYERS.md (6채널 비교 SSOT) + STORAGE/REQUESTS/DISCLOSURE
 └── tests/
 ```
 
 ## Public landing
 
-- <https://plaud.cmdspace.work> — Plaud 접근 5축 가이드 (Web · Desktop · MCP · Skill · App)
+- <https://plaud.cmdspace.work> — Plaud 접근 6축 가이드 (Web · Desktop · MCP · CLI · Skill · App)
 - 소스: `web/` (cmdspace-web-builder v4.3 Landing 템플릿)
 - 재배포: `cd web && vercel deploy --prod --yes`
 - 콘텐츠 SSOT: `docs/PLAUD-ACCESS-LAYERS.md`
@@ -37,7 +37,9 @@ uv sync
 # 2. 자격증명 설정
 #    macOS 앱: 툴바 Auth 버튼 → Authenticate with Plaud
 #    Plaud Web Login으로 1회 로그인하면 자동 갱신까지 검증·활성화됨.
-#    cURL import는 수동 비상 경로로만 지원
+#    cURL import는 내장 로그인이 멈출 때 쓰는 비상 경로입니다. Plaud가
+#    access token을 확인한 뒤 Keychain에 저장하고, 로그인된 Chrome 세션에서
+#    장기 갱신 토큰도 별도로 복구해 봅니다.
 #    CLI: web.plaud.ai에서 cURL 복사 후
 pbpaste | uv run plaud onboard
 #    + 자동 갱신 활성화(1회): devtools Application > Local Storage에서
@@ -55,8 +57,9 @@ uv run plaud metadata-generate <file-id>
 uv run plaud tag-add <file-id> "회의록"
 uv run plaud meeting-note <file-id>
 uv run plaud models
-uv run plaud folder-plan
-uv run plaud classify --apply
+uv run plaud folder-plan                 # taxonomy + CMDS(📚)/index(🏷) 매핑
+uv run plaud classify --apply            # 규칙 → 약한 판정만 LLM 중재 (--no-llm 으로 끔)
+uv run plaud llm-auth                    # Claude/ChatGPT/Gemini/Grok OAuth 로그인 상태
 ```
 
 모델 프리셋은 Obsidian 볼트의
@@ -69,14 +72,21 @@ Obsidian-style tags, `usage_status`, Plaud 폴더 분류를 함께 갱신합니�
 
 **토큰 갱신 — 자동 갱신이 기본입니다.** 워크스페이스 refresh token을
 한 번 부트스트랩하면 (앱 Plaud Web Login 1회, 또는 `plaud ws-bootstrap`)
-이후 24h 토큰은 모든 CLI 명령 실행 시 자동으로 갱신됩니다 — 브라우저 불필요.
+이후 24h 토큰은 모든 CLI 명령 실행 시 자동으로 갱신됩니다. Plaud가 회전
+체인을 조기 폐기하면 macOS 앱이 영속 WebKit 계정 세션으로 새 workspace
+token 쌍을 조용히 발급하며, 계정 세션까지 만료됐을 때만 로그인을 요청합니다.
 수동 강제 갱신은 `uv run plaud ws-refresh`. refresh token은 사용할 때마다
-로테이션되며 access token·cookie·workspace 정보와 함께 **macOS Keychain의 단일
+로테이션되며 access token·workspace 정보와 함께 **macOS Keychain의 단일
 원자적 항목**으로 저장됩니다. 기존 `.env` 평문 인증 정보는 첫 실행 시 Keychain
-read-back 검증 후 자동 삭제됩니다. `PLAUD_AUTO_REFRESH=0`으로 자동 갱신을 끌 수 있습니다.
+read-back 검증 후 자동 삭제됩니다. HttpOnly 계정 refresh cookie는 WebKit 밖으로
+내보내지 않습니다. `PLAUD_AUTO_REFRESH=0`으로 자동 갱신을 끌 수 있습니다.
 
 부트스트랩 전이라면 기존 경로도 그대로 동작합니다:
 `uv run plaud refresh-auth` (클립보드의 Plaud cURL 자동 파싱) 또는 앱 Auth 버튼.
+앱의 cURL 폴백은 Plaud 실서버 검증 전에 Keychain을 교체하지 않으며, access
+token 저장과 자동 갱신 준비 상태를 따로 표시합니다. Chrome에서 장기 갱신
+정보를 가져오지 못해도 현재 access token은 만료 전까지 사용할 수 있지만,
+이 경우에는 자동 갱신이 준비됐다고 표시하지 않습니다.
 자격증명 상태 확인은 `uv run plaud auth` (만료 카운트다운 + auto-refresh 상태,
 `--live`로 실 토큰 검증).
 
@@ -112,7 +122,7 @@ cd plaud-note-manager
 uv sync
 
 # 3. 자격증명 설정 — macOS 앱 툴바 Auth → Plaud Web Login (권장, 1회)
-#    앱이 namespaced workspace refresh token을 즉시 검증·회전해 Keychain에 저장.
+#    앱이 namespaced workspace token 쌍을 검증해 Keychain과 WebKit에 같은 세대로 저장.
 #    headless/CLI라면 web.plaud.ai에서 본인 cURL을 복사
 #    (DevTools → 요청 우클릭 → Copy as cURL)한 뒤
 pbpaste | uv run plaud onboard
@@ -137,7 +147,8 @@ export PLAUD_OBSIDIAN_VAULT="<your-obsidian-vault>"
 - [x] core: Plaud API 클라이언트, SQLite 메타/컨텐츠 캐시, 네트워크 실패 메시지 정제
 - [x] auth: 자동 갱신(`ws-bootstrap` 1회 → 모든 명령이 24h 토큰 자동
       리프레시, 전역 flock 직렬화 + Keychain 원자적 로테이션 영속화) + 앱 Auth 시트
-      (namespaced Plaud Web Login이 자동 갱신을 즉시 검증, cURL은 수동 fallback) +
+      (namespaced Plaud Web Login + HttpOnly 계정 세션 기반 무인 재발급,
+      cURL은 수동 fallback) +
       `plaud auth` / `refresh-auth` / `web-auth` / `ws-refresh` / `ws-bootstrap`,
       live 검증 + validate-before-write, legacy `.env` 인증 자동 이관
 - [x] cli: sync, content backfill, folder CRUD, download/export, Obsidian 송출
@@ -145,8 +156,12 @@ export PLAUD_OBSIDIAN_VAULT="<your-obsidian-vault>"
       usage status, auto folder routing, main-vault meeting note generation
 - [x] taxonomy: `core/classification.py` SSOT 기반 14개 카테고리 분류 +
       `folder-plan` / `classify --apply` CLI, 앱 사이드바 Work 섹션
+- [x] v0.8: 규칙이 약할 때만 LLM 중재하는 자동 폴더링(`core/auto_folder.py`),
+      taxonomy에 `CMDS:`/`index:` 매핑, 볼트 노트 프론트매터를 CMDS 표준 빌더
+      (`core/frontmatter.py`)로 통일 + `related:` 실존 노트 위키링크,
+      `plaud llm-auth`로 4사 CLI OAuth 상태 확인 (`docs/PLAN-v0.8.md`)
 - [x] CMDS: ElevenLabs Scribe 전사, speaker relabel, saved speakers
-- [x] AI: Claude/Codex/Gemini CLI/API + Grok API backend, CMDS 볼트
+- [x] AI: Claude/Codex/Gemini/Grok — 기본은 각 CLI의 구독 OAuth(API 키 0), API 모드 선택 가능, CMDS 볼트
       API Information frontmatter 기반 SOTA preset + custom model id,
       template/slot 기반 요약
 - [x] app: SwiftUI + GRDB 파일 브라우저, 오디오 스트리밍, AI inspector,

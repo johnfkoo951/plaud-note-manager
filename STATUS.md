@@ -1,6 +1,37 @@
 # Plaud Note Manager — Development Status
 
-마지막 업데이트: 2026-08-15
+마지막 업데이트: 2026-09-03
+
+> **v0.8 (2026-09-03)**: 자동 폴더링 v2 + CMDS 프론트매터 정합 + LLM OAuth 4사
+> (`docs/PLAN-v0.8.md` — 점검 레포트 겸 명세). ① 분류 = 규칙 → 약한 판정만
+> **LLM 중재**(닫힌 폴더 메뉴, `core/auto_folder.py`, `plaud classify --llm`),
+> taxonomy 규칙에 `cmds`/`index`/`vault_dest` (`plaud taxonomy-upgrade`),
+> ② 볼트 노트 프론트매터를 `core/frontmatter.py` 하나로 — 필수 7필드 +
+> `model/effort` + `CMDS:`/`index:` + `keywords`/`related`(실존 노트만 위키링크),
+> ③ `core/llm_auth.py` + `plaud llm-auth` + 앱 Settings › LLM OAuth login —
+> Claude/ChatGPT/Gemini/Grok 모두 CLI 구독 OAuth 기본(API 키 env는 자식에서 제거),
+> ④ 결함 수정: 테스트가 실제 `codex`를 스폰하던 문제(conftest 가드),
+> `classify --apply`의 usage_status 강등, 신뢰도 이중 계산, Gemini `-p` 플래그.
+> 후속(§7) 같은 날 완료: 회의록 빌더 통일 · 수동 태그 우선 · 위키 `mainVaultRelated` ·
+> `plaud vault-base`(Bases 뷰) · `plaud vault-lint --fix` · 앱 차점 폴더 드롭다운.
+> 공유용 배포판은 별도 레포 `~/DEV/plaud-note-manager-community` (0.2.1, AI/볼트 제외 제한판).
+
+> **인증 무인화 (2026-08-17)**: 반복되던 "또 만료" 문제의 근인은 headless
+> refresh가 한 번도 부트스트랩되지 않은 상태(`auto_refresh: not_bootstrapped`)로
+> 24h 토큰만 쓰고 있었던 것. 이제 (1) 워크스페이스 refresh 토큰을 무장해
+> 만료 6h 전 자동 갱신되고, (2) `plaud auth-recover`에 **chrome-disk 드라이버**를
+> 추가해 Chrome localStorage LevelDB를 읽기 전용 파싱 — 브라우저 실행·설정·로그인
+> 프롬프트 없이 무인 복구한다 (사다리: chrome-disk → chrome AppleScript → cmux →
+> Auth 시트, 각 단계 bootstrap 검증 후 실패 시 다음 단계로), (3) 앱이 만료를
+> 감지하면 배너 대신 **먼저 스스로 복구**한다 (`selfHealAuthIfNeeded`).
+
+> **v0.7 (2026-08-15)**: 듀얼 전사 원클릭 파이프라인 + Reuse 메타데이터
+> (`docs/PLAN-v0.7.md`, S1–S5 완주 · 실녹음 E2E 검증) —
+> `plaud dual <id>` 상태 머신 (transcribe → 실명 제안/확인 ⏸ → Plaud×CMDS
+> 교차분석 → 메타데이터 → 볼트 08-1. Plaud 레인 착륙), 화자 실명은 볼트
+> Transcription Context(로스터+오인식 교정표) 주입 LLM 제안 + 앱 확인 시트,
+> 콘텐츠 재사용 체크는 `note_reuse` (채널×flagged/drafted/published,
+> `plaud reuse` / `reuse-query`, 앱 체크칩, 볼트 frontmatter `reuse-channels`).
 
 > **v0.6 (2026-08-15)**: `docs/PLAN-v0.6.md`의 M1–M3 구현 완료 —
 > ① 메타데이터 기본 모델을 GPT(Codex CLI 구독 인증)로 분리
@@ -120,7 +151,10 @@ plaud-note-manager/
 │   ├── transcribe.py         ElevenLabs Scribe STT 파이프라인 (diarize + segment grouping)
 │   ├── summarize.py          Multi-model 추론 (CLI / API 두 모드)
 │   ├── model_registry.py     CMDS API Information 기반 SOTA model preset 로더
-│   ├── classification.py     녹음 분류 taxonomy + Plaud folder routing 규칙
+│   ├── classification.py     녹음 분류 taxonomy + Plaud folder routing 규칙 (+ cmds/index/vault_dest, lazy reload)
+│   ├── auto_folder.py        규칙이 약할 때만 LLM 중재 (닫힌 폴더 메뉴, templates/classify.md)
+│   ├── frontmatter.py        CMDS frontmatter-standard 준수 빌더 (vault_send · dual_vault 공용)
+│   ├── llm_auth.py           Claude/Codex/Gemini/Grok CLI OAuth 로그인 상태 조회 + 로그인 실행
 │   ├── metadata.py           stable Plaud id 기반 note metadata, tags, vault meeting 생성
 │   ├── tags.py               Obsidian-style tag normalization (# 제거, 공백 hyphen)
 │   ├── disclosure.py         progressive-disclosure 쿼리 API (L0 peek → L3 deep, 각 층 superset)

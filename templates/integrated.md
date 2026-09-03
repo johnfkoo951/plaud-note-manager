@@ -46,6 +46,10 @@ description: CMDS(ElevenLabs)와 Plaud 전사·요약을 통합해 완전한 최
 - 키워드: {keywords}
 - 화자: {speakers}
 
+## 전사 컨텍스트 (실명 로스터·자주 나오는 오인식 교정표 — 비어있을 수 있음)
+전사에서 아래 로스터의 이름이 잘못 표기된 경우("오류:" 표기 참조) 최종 전사에서 실명으로 교정하세요.
+{transcription_context}
+
 ## CMDS 전사 (ElevenLabs Scribe — 화자 구분 정확, 일부 누락 가능)
 
 {cmds_transcript}
