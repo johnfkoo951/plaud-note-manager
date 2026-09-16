@@ -4,6 +4,18 @@ Plaud Cloud의 녹음 파일을 동기화 · 관리 · 가공하는 통합 워�
 하나의 Python core를 CLI / skill / SwiftUI app이 공유하며, agent는 향후 자동화
 surface로 남아 있습니다.
 
+> **참고용 공개본입니다.**
+> 이 저장소는 개인 개발판의 소스를 읽을 수 있게 공개한 것으로, 제작자의 로컬 환경
+> (Obsidian 볼트 경로, 개인 인증 경로, 구독 기반 모델 CLI)을 전제로 동작합니다.
+> 패키징된 산출물이나 설치 안내는 제공하지 않으며, 코드와 설계를 참고하는 용도입니다.
+>
+> **바로 실행할 수 있는 릴리즈가 필요하시면
+> [Plaud Note Manager Community](https://github.com/johnfkoo951/plaud-note-manager-community)**
+> 를 이용하세요. macOS(arm64 · x86_64)와 Windows용 빌드를
+> [Releases](https://github.com/johnfkoo951/plaud-note-manager-community/releases)에서
+> 받을 수 있고, 개인 볼트·개인 인증 경로 없이 본인 계정과 본인 API key로만 동작하는
+> 제한판입니다.
+
 ## Architecture
 
 ```
