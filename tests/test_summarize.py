@@ -103,3 +103,64 @@ def test_zshrc_value_no_zshrc_file(monkeypatch, tmp_path) -> None:
     # No .zshrc written at all -> file does not exist -> None.
     monkeypatch.setattr(summarize.Path, "home", staticmethod(lambda: tmp_path))
     assert summarize._zshrc_value("ANYTHING") is None
+
+
+# -------- _cli_reason: why a vendor CLI actually failed --------
+
+
+class _Proc:
+    """Stand-in for subprocess.CompletedProcess."""
+
+    def __init__(self, stderr: str = "", stdout: str = "") -> None:
+        self.stderr = stderr
+        self.stdout = stdout
+
+
+CODEX_BANNER = """Reading prompt from stdin...
+OpenAI Codex v0.153.4
+--------
+workdir: /somewhere/project
+model: gpt-6-astra
+provider: openai
+approval: never
+sandbox: workspace-write [workdir, /tmp, $TMPDIR] (network access enabled)
+reasoning effort: ultra
+reasoning summaries: none
+session id: 01a0a89d-0820-7133-8483-b9278fb1bf19
+--------
+user
+
+당신은 녹음 전사의 화자 식별 전문가입니다.
+ERROR: You've hit your usage limit. Visit https://example.test/usage to purchase more credits."""
+
+
+def test_cli_reason_keeps_the_error_that_a_long_banner_used_to_truncate_away() -> None:
+    # The banner alone is over 400 characters, so taking the head of stderr cut
+    # the actual cause off the end.
+    assert len(CODEX_BANNER) > 400
+    reason = summarize._cli_reason(_Proc(stderr=CODEX_BANNER))
+    assert "usage limit" in reason
+    assert "OpenAI Codex v0.153.4" not in reason
+
+
+def test_cli_reason_falls_back_to_the_tail_when_nothing_looks_like_an_error() -> None:
+    reason = summarize._cli_reason(_Proc(stderr="line one\nline two\nline three\nline four"))
+    assert "line four" in reason
+    assert "line one" not in reason
+
+
+def test_cli_reason_reads_stdout_when_stderr_is_empty() -> None:
+    assert "boom" in summarize._cli_reason(_Proc(stdout="boom"))
+
+
+def test_cli_reason_deduplicates_a_line_written_to_both_streams() -> None:
+    dup = "ERROR: quota exceeded\nERROR: quota exceeded\nERROR: quota exceeded"
+    assert summarize._cli_reason(_Proc(stderr=dup)) == "ERROR: quota exceeded"
+
+
+def test_cli_reason_handles_a_silent_failure() -> None:
+    assert summarize._cli_reason(_Proc()) == "(no output)"
+
+
+def test_cli_reason_is_bounded() -> None:
+    assert len(summarize._cli_reason(_Proc(stderr="error: " + "x" * 5000))) <= 400

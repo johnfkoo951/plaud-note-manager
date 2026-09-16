@@ -182,6 +182,12 @@ struct NoteReferenceVM: Identifiable, Hashable, FetchableRecord {
 }
 
 /// One speaker → real-name candidate from the dual pipeline's proposal step.
+struct SpeakerHintsVM {
+    var samples: [String: [SpeakerSamples.Sample]] = [:]
+    var plaudMatches: [String: SpeakerSamples.Match] = [:]
+    var isEmpty: Bool { samples.isEmpty && plaudMatches.isEmpty }
+}
+
 struct SpeakerProposalVM: Identifiable, Hashable, Decodable {
     let speaker: String
     var name: String
@@ -1328,6 +1334,35 @@ final class Database: @unchecked Sendable {
             return seen
         }
         return (result ?? nil) ?? []
+    }
+
+    /// Deterministic hints for the speaker confirmation sheet: what each
+    /// ElevenLabs speaker said, plus the Plaud speaker sharing their timeline.
+    ///
+    /// Needs no model, so the sheet still works when the provider is
+    /// unreachable — which is exactly when the LLM proposal comes back blank.
+    func speakerHints(for fileID: String) -> SpeakerHintsVM {
+        let cmdsJSON: String = read { db -> String in
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT segments FROM cmds_transcripts
+                 WHERE file_id = ?
+                 ORDER BY fetched_at DESC LIMIT 1
+            """, arguments: [fileID]) else { return "[]" }
+            return row["segments"] ?? "[]"
+        } ?? "[]"
+
+        let plaudJSON: String = read { db -> String in
+            guard let row = try Row.fetchOne(db, sql:
+                "SELECT transcript FROM file_content WHERE file_id = ?",
+                arguments: [fileID]) else { return "[]" }
+            return row["transcript"] ?? "[]"
+        } ?? "[]"
+
+        return SpeakerHintsVM(
+            samples: SpeakerSamples.samples(segmentsJSON: cmdsJSON),
+            plaudMatches: SpeakerSamples.plaudMatches(
+                cmdsSegmentsJSON: cmdsJSON, plaudSegmentsJSON: plaudJSON)
+        )
     }
 
     /// Cheap EXISTS probe for a cached CMDS transcript — avoids decoding the

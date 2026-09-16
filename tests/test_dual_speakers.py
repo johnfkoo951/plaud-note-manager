@@ -133,3 +133,91 @@ def test_propose_aligns_to_actual_speaker_set(
     assert [p["speaker"] for p in proposal] == ["speaker_0", "speaker_1"]
     assert proposal[0]["name"] == "구요한"
     assert proposal[1]["name"] == ""  # gap filled, ghost dropped
+
+
+# ----- failure handling -------------------------------------------------
+
+
+def _seed_two_speakers(tmp_path: Path) -> Storage:
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_file(PlaudFile(id="f1", filename="세미나"), now=NOW)
+    storage.save_cmds_transcript(
+        file_id="f1",
+        model="scribe_v1",
+        language="ko",
+        text="…",
+        segments_json=json.dumps(
+            [
+                {"start_ms": 0, "speaker": "speaker_0", "content": "안녕하세요"},
+                {"start_ms": 1000, "speaker": "speaker_1", "content": "네 반갑습니다"},
+            ]
+        ),
+        now=NOW,
+    )
+    return storage
+
+
+def test_proposal_is_empty_distinguishes_a_failed_run_from_a_real_answer() -> None:
+    blank = [
+        {"speaker": "speaker_0", "name": "", "confidence": 0.0, "evidence": ""},
+        {"speaker": "speaker_1", "name": "", "confidence": 0.0, "evidence": ""},
+    ]
+    # The blank skeleton is truthy, which is exactly why `not proposal` was
+    # never enough to trigger a retry.
+    assert blank
+    assert ds.proposal_is_empty(blank) is True
+    assert ds.proposal_is_empty([{**blank[0], "name": "구요한"}, blank[1]]) is False
+    assert ds.proposal_is_empty([]) is True
+
+
+def test_speaker_skeleton_lists_every_real_speaker(tmp_path: Path) -> None:
+    storage = _seed_two_speakers(tmp_path)
+    skeleton = ds.speaker_skeleton(storage, "f1")
+    assert [p["speaker"] for p in skeleton] == ["speaker_0", "speaker_1"]
+    assert all(p["name"] == "" for p in skeleton)
+
+
+def test_unavailable_model_raises_instead_of_persisting_a_blank_answer(
+    tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = _seed_two_speakers(tmp_path)
+    from core import summarize
+
+    monkeypatch.setattr(summarize, "model_available", lambda m: False)
+    with pytest.raises(ds.SpeakerProposalUnavailable):
+        ds.propose_speaker_names(storage, "f1", model="codex")
+
+
+def test_model_failure_is_reported_as_unavailable(
+    tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = _seed_two_speakers(tmp_path)
+    from core import summarize
+
+    monkeypatch.setattr(summarize, "model_available", lambda m: True)
+
+    def out_of_quota(*a, **k):
+        raise summarize.ModelFailed("codex CLI failed (exit 1): You've hit your usage limit.")
+
+    monkeypatch.setattr(summarize, "run_model", out_of_quota)
+    with pytest.raises(ds.SpeakerProposalUnavailable, match="usage limit"):
+        ds.propose_speaker_names(storage, "f1", model="codex")
+
+
+def test_unparseable_reply_raises_rather_than_returning_blanks(
+    tmp_path: Path, vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = _seed_two_speakers(tmp_path)
+    from core import summarize
+
+    monkeypatch.setattr(summarize, "model_available", lambda m: True)
+    monkeypatch.setattr(summarize, "run_model", lambda *a, **k: "I cannot determine the speakers.")
+    with pytest.raises(ds.SpeakerProposalUnavailable):
+        ds.propose_speaker_names(storage, "f1", model="codex")
+
+
+def test_recording_without_a_cmds_transcript_has_nothing_to_propose(tmp_path: Path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_file(PlaudFile(id="empty", filename="x"), now=NOW)
+    # No speakers is not a failure — it returns empty rather than raising.
+    assert ds.propose_speaker_names(storage, "empty", model="codex") == []

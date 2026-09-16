@@ -145,6 +145,40 @@ def parse_proposal(raw: str) -> list[dict[str, Any]]:
     return out
 
 
+class SpeakerProposalUnavailable(RuntimeError):
+    """No proposal could be produced, for a reason the UI should show.
+
+    Distinct from "there is nothing to propose": a recording with no CMDS
+    transcript yet legitimately has no speakers, and that returns an empty
+    list instead of raising.
+    """
+
+
+def speaker_skeleton(storage: Storage, file_id: str) -> list[dict[str, Any]]:
+    """One blank entry per real CMDS speaker, in transcript order.
+
+    The confirmation sheet still needs the speaker list even when the model
+    could not suggest names — the user types them in, helped by the per-speaker
+    transcript samples.
+    """
+    from .dual_pipeline import cmds_speakers
+
+    return [
+        {"speaker": sp, "name": "", "confidence": 0.0, "evidence": ""}
+        for sp in cmds_speakers(storage, file_id)
+    ]
+
+
+def proposal_is_empty(proposal: list[dict[str, Any]]) -> bool:
+    """True when a stored proposal carries no usable suggestion.
+
+    A failed run persists one blank entry per speaker, which is truthy — so
+    callers that only test `not proposal` treat it as a real answer and never
+    retry. Check this instead.
+    """
+    return not any((p.get("name") or "").strip() for p in proposal)
+
+
 def propose_speaker_names(
     storage: Storage, file_id: str, *, model: str = ""
 ) -> list[dict[str, Any]]:
@@ -158,7 +192,9 @@ def propose_speaker_names(
         return []
     model = model or app_config.metadata_model()
     if not model_available(model):
-        return []
+        raise SpeakerProposalUnavailable(
+            f"model '{model}' unavailable (CLI missing or no API key)"
+        )
 
     file_row = storage.get_file_row(file_id)
     known = ", ".join(r["name"] for r in storage.list_speakers()) or "(없음)"
@@ -169,8 +205,16 @@ def propose_speaker_names(
         cmds_sample=_cmds_sample(storage, file_id),
         plaud_sample=_plaud_sample(storage, file_id) or "(없음)",
     )
-    raw = run_model(model, prompt, model_id=app_config.model_id_for(model) or None)
+    from .summarize import ModelFailed, ModelNotInstalled
+
+    try:
+        raw = run_model(model, prompt, model_id=app_config.model_id_for(model) or None)
+    except (ModelFailed, ModelNotInstalled) as exc:
+        # An exhausted subscription quota and a revoked token both land here.
+        raise SpeakerProposalUnavailable(str(exc)) from exc
     proposal = parse_proposal(raw)
+    if not proposal:
+        raise SpeakerProposalUnavailable("model reply contained no usable speaker JSON")
 
     # Align to the real speaker set: keep order, fill gaps, drop unknowns.
     by_speaker = {p["speaker"]: p for p in proposal}

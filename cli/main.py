@@ -1584,25 +1584,46 @@ def dual_speakers_cmd(
     import json as _json
 
     from core.dual_pipeline import mark
-    from core.dual_speakers import propose_speaker_names
+    from core.dual_speakers import (
+        SpeakerProposalUnavailable,
+        proposal_is_empty,
+        propose_speaker_names,
+        speaker_skeleton,
+    )
 
     storage = Storage()
     mark(storage, file_id)
     row = storage.get_dual(file_id)
     proposal = _json.loads(row["speaker_proposal"] or "[]") if row else []
-    if refresh or not proposal:
-        proposal = propose_speaker_names(storage, file_id)
+    unavailable = ""
+    # A failed run persists one blank entry per speaker. That is truthy, so
+    # testing `not proposal` alone would treat it as an answer and never retry.
+    if refresh or not proposal or proposal_is_empty(proposal):
+        try:
+            proposal = propose_speaker_names(storage, file_id)
+        except SpeakerProposalUnavailable as exc:
+            # Keep the speaker list so the confirmation sheet still works by
+            # hand, and record why no names were suggested.
+            unavailable = str(exc)
+            proposal = speaker_skeleton(storage, file_id)
         storage.upsert_dual(
             file_id,
             speaker_proposal=_json.dumps(proposal, ensure_ascii=False),
+            error=unavailable or None,
             now=int(time.time()),
         )
     if json_out:
-        _emit_json({"file_id": file_id, "proposal": proposal})
+        payload = {"file_id": file_id, "proposal": proposal}
+        if unavailable:
+            payload["unavailable"] = unavailable
+        _emit_json(payload)
         return
     if not proposal:
         console.print("[yellow]no proposal[/yellow] — run cmds-transcribe (or plaud dual) first")
         return
+    if unavailable:
+        console.print(f"[yellow]no suggestions[/yellow] — {unavailable}")
+        console.print("  speakers are listed below; confirm the names by hand")
     for p in proposal:
         name = p.get("name") or "?"
         conf = f" ({float(p.get('confidence') or 0):.0%})" if p.get("name") else ""
@@ -2688,6 +2709,20 @@ def cmds_summarize(
     if not transcript_text:
         console.print("[red]no transcript available[/red] — fetch detail or transcribe first")
         raise typer.Exit(1)
+
+    # Title and keywords describe the recording, not the transcript source. They
+    # were only filled on the Plaud fallback branch, so every template rendered
+    # `{title}`/`{keywords}` blank whenever a CMDS transcript existed.
+    if not title or not keywords:
+        row = storage.get_content_row(file_id)
+        if row:
+            title = title or (row["title"] or "")
+            if not keywords:
+                keywords = ", ".join(_json.loads(row["keywords"] or "[]")[:15])
+    if not title:
+        file_row = storage.get_file_row(file_id)
+        if file_row:
+            title = file_row["filename"] or ""
 
     # Also drop the transcript onto disk for CLI reference if not already there
     tdir = transcripts_dir(file_id)

@@ -128,6 +128,37 @@ def run_model(
 # -------- CLI mode --------
 
 
+def _cli_reason(proc: subprocess.CompletedProcess[str]) -> str:
+    """The part of a failed CLI's output that says why it failed.
+
+    Vendor CLIs print a banner (version, workdir, model, sandbox) and echo the
+    prompt before they fail, and the real cause — an exhausted quota, a revoked
+    token — is the LAST thing they write. Taking the head of stderr therefore
+    captured the banner and truncated the reason away, so read from the tail and
+    prefer lines that look like an error.
+    """
+    text = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+    if not text:
+        return "(no output)"
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    flagged = [
+        ln
+        for ln in lines
+        if any(
+            marker in ln.lower()
+            for marker in ("error", "usage limit", "quota", "unauthor", "forbidden", "expired")
+        )
+    ]
+    # Deduplicate: these CLIs often write the same line to both streams.
+    picked: list[str] = []
+    for ln in (flagged or lines)[::-1]:
+        if ln not in picked:
+            picked.append(ln)
+        if len(picked) >= 3:
+            break
+    return " | ".join(picked[::-1])[:400]
+
+
 def _run_cli(model: str, prompt: str, *, timeout: int) -> str:
     cmd = MODEL_COMMANDS.get(model)
     if not cmd:
@@ -160,9 +191,7 @@ def _run_cli(model: str, prompt: str, *, timeout: int) -> str:
         env=env,
     )
     if proc.returncode != 0:
-        raise ModelFailed(
-            f"{model} CLI failed (exit {proc.returncode}): {(proc.stderr or '')[:400]}"
-        )
+        raise ModelFailed(f"{model} CLI failed (exit {proc.returncode}): {_cli_reason(proc)}")
     return proc.stdout.strip()
 
 

@@ -3511,6 +3511,7 @@ private struct DualSpeakerSheet: View {
     let onDone: () -> Void
 
     @State private var names: [String: String] = [:]
+    @State private var hints = SpeakerHintsVM()
 
     var body: some View {
         VStack(alignment: .leading, spacing: AppUI.spacingM) {
@@ -3528,26 +3529,52 @@ private struct DualSpeakerSheet: View {
                 }
             }
 
-            VStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 14) {
                 ForEach(proposal) { p in
-                    HStack(spacing: AppUI.spacingS) {
-                        Text(p.speaker)
-                            .font(.system(size: 12, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .frame(width: 92, alignment: .leading)
-                        TextField("이름", text: binding(for: p))
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 140)
-                        if p.confidence > 0, !p.name.isEmpty {
-                            Text("\(Int(p.confidence * 100))%")
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: AppUI.spacingS) {
+                            Text(p.speaker)
+                                .font(.system(size: 12, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 92, alignment: .leading)
+                            TextField("이름", text: binding(for: p))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 150)
+                            if let match = hints.plaudMatches[p.speaker] {
+                                Label(
+                                    "Plaud: \(match.name) · \(Int(match.share * 100))%",
+                                    systemImage: "arrow.triangle.merge"
+                                )
                                 .font(.system(size: 10.5, weight: .semibold))
-                                .foregroundStyle(p.confidence >= 0.7 ? Color.green : .orange)
+                                .foregroundStyle(match.share >= 0.7 ? Color.green : .orange)
+                            } else if p.confidence > 0, !p.name.isEmpty {
+                                Text("\(Int(p.confidence * 100))%")
+                                    .font(.system(size: 10.5, weight: .semibold))
+                                    .foregroundStyle(p.confidence >= 0.7 ? Color.green : .orange)
+                            }
+                            Spacer(minLength: 0)
                         }
-                        Text(p.evidence)
-                            .font(AppUI.metaFont)
-                            .foregroundStyle(.tertiary)
-                            .lineLimit(1)
-                        Spacer(minLength: 0)
+                        // What this speaker actually said — the hint that lets
+                        // the user decide when no name could be suggested.
+                        ForEach(hints.samples[p.speaker] ?? [], id: \.self) { sample in
+                            HStack(alignment: .top, spacing: 6) {
+                                Text(sample.timestamp)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                                    .frame(width: 92, alignment: .trailing)
+                                Text(sample.text)
+                                    .font(AppUI.metaFont)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: 0)
+                            }
+                        }
+                        if (hints.samples[p.speaker] ?? []).isEmpty, !p.evidence.isEmpty {
+                            Text(p.evidence)
+                                .font(AppUI.metaFont)
+                                .foregroundStyle(.tertiary)
+                                .padding(.leading, 98)
+                        }
                     }
                 }
             }
@@ -3569,7 +3596,22 @@ private struct DualSpeakerSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 560)
+        .frame(width: 620)
+        .task {
+            let fid = fileID
+            let loaded = await Task.detached(priority: .userInitiated) {
+                Database.shared.speakerHints(for: fid)
+            }.value
+            guard !Task.isCancelled else { return }
+            hints = loaded
+            // Prefill from the timeline match when the model suggested nothing,
+            // so a provider outage no longer means typing every name by hand.
+            for p in proposal where (names[p.speaker] ?? "").isEmpty {
+                if let match = loaded.plaudMatches[p.speaker] {
+                    names[p.speaker] = match.name
+                }
+            }
+        }
         .onAppear {
             for p in proposal where names[p.speaker] == nil {
                 names[p.speaker] = p.name
