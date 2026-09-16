@@ -1,6 +1,9 @@
+import json
+
 import httpx
 import pytest
 
+import core.auth_status as auth_status_mod
 from core.client import PlaudAPIError, PlaudClient
 from core.config import PlaudConfig
 
@@ -55,3 +58,25 @@ def test_client_classifies_http_200_business_status_minus_419_as_auth_rejection(
 
     assert excinfo.value.api_status == -419
     assert excinfo.value.is_auth_rejection is True
+    assert json.loads(auth_status_mod.REJECTION_FILE.read_text(encoding="utf-8"))["status"] == -419
+
+
+def test_client_can_probe_candidate_without_changing_existing_rejection_memo() -> None:
+    cfg = PlaudConfig(authorization="Bearer candidate", x_device_id="device")
+    previous = b'{"rejected_at":123,"status":"stored-generation"}\n'
+    auth_status_mod.REJECTION_FILE.write_bytes(previous)
+    client = PlaudClient(cfg, record_auth_rejections=False)
+
+    def rejected(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, request=request, json={"detail": "candidate rejected"})
+
+    client._client = httpx.Client(
+        base_url=cfg.base_url,
+        headers=cfg.headers(),
+        transport=httpx.MockTransport(rejected),
+    )
+
+    with pytest.raises(PlaudAPIError):
+        client.list_files(limit=1)
+
+    assert auth_status_mod.REJECTION_FILE.read_bytes() == previous

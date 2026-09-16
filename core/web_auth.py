@@ -9,7 +9,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from cli.onboard import DEFAULTS
 
-from .auth_status import _decode_jwt_payload
+from .auth_status import _decode_jwt_payload, auth_rejected_at
 from .client import PlaudAPIError, PlaudClient
 from .config import PlaudConfig, resolve_env_path
 from .secret_store import (
@@ -18,11 +18,7 @@ from .secret_store import (
     load_credential_values,
     update_credential_values,
 )
-from .ws_refresh import (
-    _disarm,
-    _refresh_workspace_token_locked,
-    credential_env_updates,
-)
+from .ws_refresh import credential_env_updates
 
 
 class WebAuthCapture(BaseModel):
@@ -97,55 +93,79 @@ def _parse_capture(capture: CaptureInput) -> WebAuthCapture | WebAuthResult:
 
 
 def _write_env(
-    values: Mapping[str, str], env_path: Path, *, workspace_list_json: str | None = None
+    values: Mapping[str, str],
+    env_path: Path,
+    *,
+    workspace_list_json: str | None = None,
+    retire_auth_rejection: bool = True,
 ) -> tuple[bool, str]:
-    """Atomically save capture and immediately prove/rotate a refresh token."""
+    """Atomically save one WebKit credential generation.
+
+    The captured access token has already passed a non-mutating API probe.  Do
+    not consume the accompanying rotating refresh token merely to "prove" it:
+    doing so leaves WebKit localStorage one generation behind Keychain and is
+    the root of the recurring -420 loop.  A later real refresh rotates the
+    Keychain generation; if another browser wins the chain first, the app's
+    persistent account session can mint a new pair silently.
+    """
 
     with credential_lock(env_path):
-        existing_refresh = load_credential_values(env_path, already_locked=True).get(
-            "PLAUD_WS_REFRESH_TOKEN"
+        existing = load_credential_values(env_path, already_locked=True)
+        existing_refresh = existing.get("PLAUD_WS_REFRESH_TOKEN")
+        stored_claims = _authorization_claims(existing.get("PLAUD_AUTHORIZATION", ""))
+        captured_claims = _authorization_claims(values.get("PLAUD_AUTHORIZATION", ""))
+        stored_iat = _numeric_claim(stored_claims, "iat")
+        captured_iat = _numeric_claim(captured_claims, "iat")
+        rejected_at = auth_rejected_at(existing.get("PLAUD_AUTHORIZATION"))
+        stored_generation_rejected = bool(
+            existing_refresh
+            and rejected_at is not None
+            and (stored_iat is None or rejected_at >= stored_iat)
         )
-        candidate_needs_verification = bool(workspace_list_json and not existing_refresh)
+        captured_generation_is_newer = bool(
+            existing_refresh
+            and captured_iat is not None
+            and (stored_iat is None or captured_iat > stored_iat)
+        )
+        replace_workspace_refresh = stored_generation_rejected or captured_generation_is_newer
         updates = credential_env_updates(
             values,
             env_path,
             workspace_list_json=workspace_list_json,
+            replace_workspace_refresh=replace_workspace_refresh,
             already_locked=True,
         )
-        update_credential_values(updates, env_path, already_locked=True)
-
-        refresh_detail = ""
-        if workspace_list_json:
-            outcome = _refresh_workspace_token_locked(
-                env_path=env_path, now=int(time.time()), only_if_needed=False
-            )
-            # A same-workspace Keychain token may already have rotated beyond
-            # WebKit's copy.  Try it first; only if it is conclusively rejected
-            # do we arm and verify the newly captured browser candidate.
-            if outcome.status == "rejected" and existing_refresh:
-                candidate_needs_verification = True
-                retry_updates = credential_env_updates(
-                    values,
-                    env_path,
-                    workspace_list_json=workspace_list_json,
-                    already_locked=True,
-                )
-                update_credential_values(retry_updates, env_path, already_locked=True)
-                outcome = _refresh_workspace_token_locked(
-                    env_path=env_path, now=int(time.time()), only_if_needed=False
-                )
-            if outcome.status not in ("ok", "fresh"):
-                refresh_detail = outcome.detail or outcome.status
-                if candidate_needs_verification:
-                    # Do not advertise or retain an unproved browser token as
-                    # ready. The access session remains saved; WebKit can retry.
-                    _disarm(env_path, already_locked=True)
-
-        token_present = bool(
-            load_credential_values(env_path, already_locked=True).get("PLAUD_WS_REFRESH_TOKEN")
+        if stored_generation_rejected and "PLAUD_WS_REFRESH_TOKEN" not in updates:
+            # A live access capture without a matching workspace candidate must
+            # not leave the conclusively dead refresh token marked as ready.
+            updates["PLAUD_WS_REFRESH_TOKEN"] = None
+            updates["PLAUD_WS_REFRESH_EXPIRES_AT"] = None
+        update_credential_values(
+            updates,
+            env_path,
+            already_locked=True,
+            retire_auth_rejection=retire_auth_rejection,
         )
-        armed = token_present and (not candidate_needs_verification or not refresh_detail)
-        return armed, refresh_detail
+        from .ws_refresh import workspace_refresh_is_armed
+
+        token_present = workspace_refresh_is_armed(
+            load_credential_values(env_path, already_locked=True)
+        )
+        return token_present, ""
+
+
+def _authorization_claims(authorization: str) -> Mapping[str, object]:
+    token = authorization.strip()
+    for prefix in ("bearer ", "Bearer "):
+        if token.startswith(prefix):
+            token = token[len(prefix) :].strip()
+            break
+    return _decode_jwt_payload(token) or {}
+
+
+def _numeric_claim(claims: Mapping[str, object], key: str) -> int | None:
+    value = claims.get(key)
+    return int(value) if isinstance(value, (int, float)) else None
 
 
 def _token_expired(authorization: str, *, now: int | None = None) -> bool:
@@ -181,7 +201,14 @@ def _default_live_validator(values: Mapping[str, str]) -> str:
     )
     try:
         # 10s timeout keeps the app's 40s watchdog comfortable.
-        with PlaudClient(cfg, timeout=10.0) as client:
+        with PlaudClient(
+            cfg,
+            timeout=10.0,
+            # This credential is only a candidate. A rejection must not mark
+            # the currently stored Keychain generation dead and trigger its
+            # self-heal path.
+            record_auth_rejections=False,
+        ) as client:
             client.list_files(limit=1)
     except PlaudAPIError as exc:
         # HTTP 401/403 and Plaud's HTTP-200 business status -419 are genuine
@@ -249,6 +276,24 @@ def import_web_auth(
             cookie_captured=cookie is not None,
         )
 
+    workspace_list = _clean(parsed.workspace_list)
+    if workspace_list:
+        from .ws_refresh import parse_workspace_list, select_workspace_entry
+
+        wid = _authorization_claims(values["PLAUD_AUTHORIZATION"]).get("wid")
+        try:
+            entry = select_workspace_entry(
+                parse_workspace_list(workspace_list), wid=str(wid) if wid else None
+            )
+        except ValueError:
+            entry = None
+        if not wid or entry is None:
+            return WebAuthResult(
+                "invalid_payload",
+                "workspace renewal capture does not match the access token; Keychain unchanged",
+                cookie_captured=cookie is not None,
+            )
+
     status = "ok"
     detail = "credentials refreshed from Plaud Web Login"
     if validate_live:
@@ -260,19 +305,24 @@ def import_web_auth(
                 cookie_captured=cookie is not None,
             )
         if verdict == "unreachable":
-            # Non-destructive: save the capture anyway, but flag it unverified.
-            status = "live_check_unavailable"
-            detail = "credentials saved but could not be verified — check your network connection"
+            return WebAuthResult(
+                "live_check_unavailable",
+                "could not verify the captured credentials; Keychain unchanged — check your network",
+                cookie_captured=cookie is not None,
+            )
 
     try:
         armed, refresh_detail = _write_env(
-            values, env_path, workspace_list_json=_clean(parsed.workspace_list)
+            values,
+            env_path,
+            workspace_list_json=workspace_list,
+            retire_auth_rejection=status == "ok",
         )
     except (OSError, CredentialStoreError) as exc:
         return WebAuthResult("write_failed", str(exc), cookie_captured=cookie is not None)
 
     if armed and status == "ok":
-        detail += " — automatic renewal verified and stored in macOS Keychain"
+        detail += " — automatic renewal captured and stored in macOS Keychain"
     elif status == "ok":
         detail += " — connected, but automatic renewal is not ready"
         if refresh_detail:

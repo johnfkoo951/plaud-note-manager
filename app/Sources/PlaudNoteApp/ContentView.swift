@@ -219,6 +219,9 @@ private enum AuthStateStyle {
         case "valid": self = .valid
         case "expiring": self = .expiring
         case "expired": self = .expired
+        // Server refused the token even though its JWT still claims time —
+        // same user-visible severity as an outright expiry.
+        case "rejected": self = .expired
         case "unconfigured": self = .unconfigured
         default: self = .unknown
         }
@@ -278,6 +281,12 @@ private struct AuthStatusIndicator: View {
     @State private var verifying = false
 
     private var style: AuthStateStyle { AuthStateStyle(store.auth?.state) }
+    private var presentation: AuthIndicatorStatus {
+        AuthIndicatorStatus(accessState: store.auth?.state,
+                            autoRefresh: store.auth?.autoRefresh,
+                            liveState: store.auth?.liveState, liveOK: store.auth?.liveOK)
+    }
+    private var indicatorColor: Color { presentation.hasWarning ? .orange : style.color }
 
     /// Compact trailing text: remaining time for valid/expiring, else "auth".
     private var compactText: String {
@@ -286,24 +295,24 @@ private struct AuthStatusIndicator: View {
         case .valid, .expiring:
             if let human = auth.remainingHuman, !human.isEmpty {
                 // "21h 36m" -> "21h" keeps the toolbar tight.
-                return human.split(separator: " ").first.map(String.init) ?? human
+                let remaining = human.split(separator: " ").first.map(String.init) ?? human
+                return [remaining, presentation.compactSuffix].compactMap { $0 }.joined(separator: " · ")
             }
-            return "auth"
+            return presentation.compactSuffix ?? "auth"
         default:
             return "auth"
         }
     }
 
     private var tooltip: String {
-        guard let auth = store.auth else { return "Plaud auth status (loading…)" }
-        var parts = ["Plaud auth: \(AuthStateStyle(auth.state).label)"]
-        if let human = auth.remainingHuman, !human.isEmpty,
-           AuthStateStyle(auth.state).needsReauth == false {
-            parts.append("\(human) left")
+        guard let auth = store.auth else { return "Plaud 인증 상태 확인 중…" }
+        var parts = ["Plaud 로그인: \(presentation.accessLabel)"]
+        if let human = auth.remainingHuman, !human.isEmpty { parts.append("\(human) 남음") }
+        if auth.expiresAt != nil { parts.append("만료 \(formatAuthEpoch(auth.expiresAt))") }
+        if let warning = presentation.renewalWarning {
+            parts.append("\(warning) — 현재 로그인은 사용할 수 있지만 만료 후 유지되지 않을 수 있습니다")
         }
-        if auth.expiresAt != nil {
-            parts.append("expires \(formatAuthEpoch(auth.expiresAt))")
-        }
+        if presentation.networkUnavailable { parts.append("네트워크 연결 불가 — 인증 거부가 아닙니다") }
         return parts.joined(separator: " · ")
     }
 
@@ -313,7 +322,7 @@ private struct AuthStatusIndicator: View {
         } label: {
             HStack(spacing: 5) {
                 Circle()
-                    .fill(style.color)
+                    .fill(indicatorColor)
                     .frame(width: 9, height: 9)
                 Text(compactText)
                     .font(AppUI.metaFont)
@@ -335,22 +344,40 @@ private struct AuthStatusIndicator: View {
                 showPopover = false
             }
         }
+        .onChange(of: store.authRecoveryPhase) { _, phase in
+            guard phase == .needsInteractive else { return }
+            showPopover = false
+            showAuthSheet = true
+            Task { @MainActor in store.markInteractiveAuthPresented() }
+        }
     }
 
     private var popoverContent: some View {
         VStack(alignment: .leading, spacing: AppUI.spacingM) {
             HStack(spacing: 8) {
-                Image(systemName: style.symbolName)
+                Image(systemName: presentation.hasWarning ? "exclamationmark.shield.fill" : style.symbolName)
                     .font(.system(size: 16, weight: .semibold))
                     .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(style.color)
-                Text("Plaud Auth — \(style.label)")
+                    .foregroundStyle(indicatorColor)
+                Text("Plaud 인증 — \(presentation.accessLabel)")
                     .font(.headline)
                 Spacer(minLength: 12)
             }
 
             if let auth = store.auth {
                 VStack(alignment: .leading, spacing: 6) {
+                    if let warning = presentation.renewalWarning {
+                        Text("\(warning). 현재 로그인은 사용 가능합니다. 만료 후에도 연결을 유지하려면 Plaud 로그인에서 자동 갱신을 연결해주세요.")
+                            .font(AppUI.metaFont)
+                            .foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    if presentation.networkUnavailable {
+                        Text("네트워크 응답을 받지 못했습니다. 연결을 복구한 뒤 다시 확인해주세요.")
+                            .font(AppUI.metaFont)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if let detail = auth.detail.isEmpty ? nil : auth.detail {
                         Text(detail)
                             .font(AppUI.metaFont)
@@ -365,8 +392,8 @@ private struct AuthStatusIndicator: View {
                     if let human = auth.remainingHuman, !human.isEmpty {
                         detailRow("Remaining", human)
                     }
-                    if let live = auth.liveOK {
-                        detailRow("Live ping", live ? "reachable" : "rejected")
+                    if let live = presentation.liveLabel {
+                        detailRow("연결 확인", live)
                     }
                     if auth.autoRefresh != nil {
                         detailRow("Auto-refresh", autoRefreshText(auth))
@@ -411,9 +438,9 @@ private struct AuthStatusIndicator: View {
                 }
             } else {
                 VStack(alignment: .leading, spacing: 6) {
-                    Text(style.needsReauth ? "Re-authenticate" : "Update credentials")
+                    Text(presentation.usable ? "자동 갱신 연결" : "Plaud 로그인")
                         .font(AppUI.controlFont)
-                    Text("One-time setup: sign in once with Plaud Web Login. The verified rotating session is kept in macOS Keychain; after that no browser is needed.")
+                    Text("cURL은 현재 읽기·쓰기 접속을 연결합니다. 앱 로그인으로 계정 세션도 연결하면 토큰 만료 전에 자동 갱신을 시도합니다.")
                         .font(AppUI.metaFont)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -421,7 +448,7 @@ private struct AuthStatusIndicator: View {
                         showAuthSheet = true
                     } label: {
                         Label(
-                            style.needsReauth ? "Authenticate with Plaud" : "Update Plaud Credentials",
+                            presentation.usable ? "자동 갱신 연결하기" : "Plaud에 로그인",
                             systemImage: "key.viewfinder"
                         )
                     }
@@ -514,12 +541,18 @@ struct ContentView: View {
     @StateObject private var store = FileStore()
     @State private var showSettings: Bool = false
     @State private var showCommandPalette: Bool = false
+    @AppStorage(WorkspaceLayout.sidebarKey) private var sidebarWidth: Double = Double(WorkspaceLayout.sidebarDefault)
+    @AppStorage(WorkspaceLayout.libraryKey) private var libraryWidth: Double = Double(WorkspaceLayout.libraryDefault)
     @AppStorage("appearanceMode") private var appearanceModeRaw: String =
         AppearanceMode.system.rawValue
 
     var body: some View {
         ZStack {
             mainSplitView
+
+            if store.authRecoveryPhase == .webSession {
+                PlaudSilentRecoveryView(store: store)
+            }
 
             // ⌘K command palette, floating above the whole split view.
             if showCommandPalette {
@@ -544,14 +577,26 @@ struct ContentView: View {
         // detail pane takes the rest so the source tab row never wraps.
         NavigationSplitView {
             SidebarView(store: store)
-                .navigationSplitViewColumnWidth(min: 200, ideal: 230, max: 280)
+                .navigationSplitViewColumnWidth(
+                    min: WorkspaceLayout.sidebarRange.lowerBound,
+                    ideal: WorkspaceLayout.clamped(CGFloat(sidebarWidth), to: WorkspaceLayout.sidebarRange,
+                                                   fallback: WorkspaceLayout.sidebarDefault),
+                    max: WorkspaceLayout.sidebarRange.upperBound
+                )
+                .background(WorkspaceSplitWidths(role: .navigation))
                 // 2026 Liquid Glass: .backgroundExtensionEffect() on macOS 26+ for floating sidebar
         } content: {
             FileListView(store: store)
-                .navigationSplitViewColumnWidth(min: 300, ideal: 340, max: 420)
+                .navigationSplitViewColumnWidth(
+                    min: WorkspaceLayout.libraryRange.lowerBound,
+                    ideal: WorkspaceLayout.clamped(CGFloat(libraryWidth), to: WorkspaceLayout.libraryRange,
+                                                   fallback: WorkspaceLayout.libraryDefault),
+                    max: WorkspaceLayout.libraryRange.upperBound
+                )
         } detail: {
             DetailView(store: store)
         }
+        .navigationSplitViewStyle(.balanced)
         .toolbar {
             ToolbarItemGroup {
                 Button { showSettings = true } label: {
@@ -570,7 +615,7 @@ struct ContentView: View {
                         ToolbarIconLabel(systemName: "square.and.arrow.down")
                     }
                 }
-                .help("Pre-cache transcripts + summaries for every file so clicks are instant.")
+                .help(store.cacheSyncNotice ?? "Pre-cache transcripts + summaries for every file so clicks are instant.")
 
                 Button {
                     Task { await store.classifyPreview() }
@@ -651,6 +696,8 @@ private struct ClassifyPreviewSheet: View {
 
     /// File ids the user has selected to apply. Seeded from confidence >= 0.5.
     @State private var checked: Set<String> = []
+    /// fileID → folder the user picked instead of the proposal (runner-up menu).
+    @State private var overrides: [String: String] = [:]
 
     private var lowConfidenceCount: Int {
         plans.filter { $0.confidence < 0.5 }.count
@@ -700,8 +747,9 @@ private struct ClassifyPreviewSheet: View {
                 Spacer()
                 Button("적용 (\(checked.count)개)") {
                     let ids = Array(checked)
+                    let chosen = overrides.filter { ids.contains($0.key) }
                     dismiss()
-                    Task { await store.applyClassify(fileIDs: ids) }
+                    Task { await store.applyClassify(fileIDs: ids, overrides: chosen) }
                 }
                 .keyboardShortcut(.defaultAction)
                 .controlSize(.large)
@@ -738,13 +786,45 @@ private struct ClassifyPreviewSheet: View {
                         Image(systemName: "arrow.right")
                             .font(.system(size: 9, weight: .bold))
                             .foregroundStyle(.tertiary)
-                        Label(plan.folderName, systemImage: "folder.fill")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                        if plan.alternatives.isEmpty {
+                            Label(plan.folderName, systemImage: "folder.fill")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        } else {
+                            Menu {
+                                Button(plan.folderName) { overrides[plan.fileID] = nil }
+                                Divider()
+                                ForEach(plan.alternatives, id: \.self) { alt in
+                                    Button(alt) { overrides[plan.fileID] = alt }
+                                }
+                            } label: {
+                                Label(overrides[plan.fileID] ?? plan.folderName, systemImage: "folder.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(overrides[plan.fileID] == nil ? Color.secondary : Color.accentColor)
+                                    .lineLimit(1)
+                            }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .help("차점 폴더로 바꾸기")
+                        }
+                        if !plan.cmds.isEmpty || !plan.index.isEmpty {
+                            Text("· \([plan.cmds, plan.index].filter { !$0.isEmpty }.joined(separator: " · "))")
+                                .font(.system(size: 10))
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
                     }
                 }
                 Spacer(minLength: 8)
+                if plan.isLLM {
+                    Text("LLM")
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.purple.opacity(0.15), in: Capsule())
+                        .foregroundStyle(.purple)
+                        .help("규칙 신뢰도가 낮아 모델이 중재한 결과")
+                }
                 confidencePill(plan.confidence)
             }
             .padding(.horizontal, 10)
@@ -775,7 +855,7 @@ private struct SettingsSheet: View {
     let dismiss: () -> Void
 
     @State private var config: Database.AppConfig = Database.shared.loadAppConfig()
-    @State private var presets: [ModelPresetVM] = Database.shared.loadModelPresets()
+    @State private var presets: [ModelPresetVM] = []
     @AppStorage("defaultContentViewMode") private var defaultViewModeRaw: String =
         ContentViewMode.rendered.rawValue
     @AppStorage("appearanceMode") private var appearanceModeRaw: String =
@@ -850,13 +930,50 @@ private struct SettingsSheet: View {
                             }
                         }
                         Text("CLI mode uses `claude` / `codex` / `gemini` / `grok` shell "
-                             + "commands (OAuth or whatever the CLI is logged in with — "
-                             + "Grok via Grok Build `grok -p` with a SuperGrok subscription, "
-                             + "no API cost). API mode uses the env key shown next to each "
-                             + "row. Presets are read from the CMDS API Information folder.")
+                             + "commands with each vendor's OAuth / subscription login "
+                             + "(Claude Max · ChatGPT · Google · SuperGrok — no API cost; "
+                             + "the matching API-key env var is hidden from the CLI). "
+                             + "API mode uses the env key shown next to each row. "
+                             + "Presets are read from the CMDS API Information folder.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    section("LLM OAuth login") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            if store.llmAuth.isEmpty {
+                                Text(store.llmAuthLoading ? "checking…" : "not checked yet")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            ForEach(store.llmAuth) { row in
+                                HStack(spacing: 8) {
+                                    Image(systemName: row.ready ? "checkmark.circle.fill" : "xmark.circle")
+                                        .foregroundStyle(row.ready ? Color.green : Color.red)
+                                    Text(row.label).font(.system(size: 12, weight: .medium))
+                                        .frame(width: 70, alignment: .leading)
+                                    Text(row.backend).font(.caption.monospaced())
+                                        .foregroundStyle(.secondary)
+                                    Text(llmAuthDetail(row))
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                    Spacer()
+                                    if !row.ready {
+                                        Text(row.cliInstalled ? row.loginCommand : "install \(row.provider) CLI")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.orange)
+                                            .help(row.note)
+                                    }
+                                }
+                            }
+                            HStack {
+                                Button("Refresh") { Task { await store.refreshLLMAuth() } }
+                                    .disabled(store.llmAuthLoading)
+                                Text("Log in from a terminal with the command shown; the app never handles provider passwords.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
 
                     section("Auto-classify") {
@@ -944,9 +1061,14 @@ private struct SettingsSheet: View {
             .padding(.vertical, 14)
         }
         .frame(width: 760, height: 640)
-        .onAppear {
-            presets = Database.shared.loadModelPresets()
+        .task {
+            let loaded = await Task.detached(priority: .userInitiated) {
+                Database.shared.loadModelPresets()
+            }.value
+            guard !Task.isCancelled else { return }
+            presets = loaded
         }
+        .task { await store.refreshLLMAuth() }
     }
 
     /// Which subscription/API the configured classify model will bill,
@@ -1013,6 +1135,18 @@ private struct SettingsSheet: View {
             Spacer(minLength: 0)
         }
         .font(AppUI.bodyFont)
+    }
+
+    private func llmAuthDetail(_ row: FileStore.LLMAuthRow) -> String {
+        if row.backend == "api" {
+            return row.apiKeySet ? "\(row.apiKeyEnv) set" : "\(row.apiKeyEnv) unset"
+        }
+        if !row.cliInstalled { return "CLI missing" }
+        switch row.oauthLoggedIn {
+        case .some(true): return row.account.isEmpty ? "logged in" : row.account
+        case .some(false): return "not logged in"
+        case .none: return "unknown"
+        }
     }
 
     private func backendRow(_ model: String) -> some View {
@@ -1140,8 +1274,20 @@ private struct SidebarView: View {
     @AppStorage("tagSortMode") private var tagSortModeRaw: String =
         TagSortMode.frequency.rawValue
     @AppStorage("tagNestedView") private var tagNestedView: Bool = false
-    /// Collapsed parent prefixes in the nested tag tree (default: expanded).
-    @State private var collapsedTagParents: Set<String> = []
+    /// A bounded flat row list keeps macOS outline diffing responsive for large
+    /// libraries. Parent groups start closed; search can reach every tag.
+    @State private var expandedTagParents: Set<String> = []
+    @State private var tagQuery = ""
+    @State private var tagRows: [SidebarTags.Row] = []
+    @State private var tagRowLimit = 80
+
+    private var tagRequest: SidebarTags.Request {
+        SidebarTags.Request(
+            entries: store.tagCounts.map { SidebarTags.Entry(tag: $0.tag, count: $0.count) },
+            pinned: store.pinnedTags, alphabetical: tagSortMode == .alphabetical,
+            nested: tagNestedView, expanded: expandedTagParents, query: tagQuery
+        )
+    }
 
     private var tagSortMode: TagSortMode {
         TagSortMode(rawValue: tagSortModeRaw) ?? .frequency
@@ -1231,18 +1377,21 @@ private struct SidebarView: View {
 
             if !store.tagCounts.isEmpty {
                 Section {
-                    // Pinned tags stay flat at the very top (no nesting).
-                    ForEach(pinnedTagEntries, id: \.tag) { entry in
-                        tagRow(entry.tag, count: entry.count, pinned: true)
+                    TextField("태그 검색", text: $tagQuery)
+                        .textFieldStyle(.roundedBorder)
+                        .help("전체 태그에서 검색")
+                    // Exactly one row per stable id. The old nested ForEach
+                    // returned a variable number of rows per parent and made
+                    // NSOutlineView recursively walk the entire tag tree.
+                    ForEach(Array(tagRows.prefix(tagRowLimit))) { entry in
+                        sidebarTagRow(entry)
                     }
-                    if tagNestedView {
-                        ForEach(tagTree, id: \.id) { node in
-                            nestedTagRows(node)
+                    if tagRows.count > tagRowLimit {
+                        Button("더 보기 (\(tagRows.count - tagRowLimit)개 남음)") {
+                            tagRowLimit += 80
                         }
-                    } else {
-                        ForEach(unpinnedSortedTags, id: \.tag) { entry in
-                            tagRow(entry.tag, count: entry.count, pinned: false)
-                        }
+                        .buttonStyle(.borderless)
+                        .font(AppUI.metaFont)
                     }
                 } header: {
                     HStack(spacing: 6) {
@@ -1274,6 +1423,18 @@ private struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .task(id: tagRequest) {
+            let request = tagRequest
+            let rows = await Task.detached(priority: .userInitiated) {
+                SidebarTags.rows(for: request)
+            }.value
+            guard !Task.isCancelled, tagRequest == request else { return }
+            if tagRows != rows { tagRows = rows }
+        }
+        .onChange(of: tagQuery) { _, _ in tagRowLimit = 80 }
+        .onChange(of: tagNestedView) { _, _ in tagRowLimit = 80 }
+        .onChange(of: tagSortModeRaw) { _, _ in tagRowLimit = 80 }
+
         .safeAreaInset(edge: .bottom) {
             HStack {
                 Text(AppVersion.shortLine)
@@ -1337,169 +1498,58 @@ private struct SidebarView: View {
         .tag(item)
     }
 
-    /// Pinned tags in config order (each with its current count), shown flat at
-    /// the top of the section.
-    private var pinnedTagEntries: [(tag: String, count: Int)] {
-        let counts = Dictionary(store.tagCounts.map { ($0.tag, $0.count) },
-                                uniquingKeysWith: { a, _ in a })
-        return store.pinnedTags.map { (tag: $0, count: counts[$0] ?? 0) }
-    }
-
-    /// Non-pinned tags, ordered by the active sort mode. The DB already returns
-    /// them count-desc / NOCASE-tie-broken, so frequency is the identity and
-    /// alphabetical is a NOCASE re-sort.
-    private var unpinnedSortedTags: [(tag: String, count: Int)] {
-        let pinnedSet = Set(store.pinnedTags)
-        let rest = store.tagCounts.filter { !pinnedSet.contains($0.tag) }
-        switch tagSortMode {
-        case .frequency:
-            return rest
-        case .alphabetical:
-            return rest.sorted {
-                $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending
-            }
-        }
-    }
-
-    /// A node in the nested tag tree. A top-level segment (e.g. `AI`) with its
-    /// summed count (itself + all `AI/...` descendants) and the full child tag
-    /// strings under it. A tag with no `/` is a childless leaf at top level.
-    private struct TagNode {
-        let id: String          // top-level segment, also the parent prefix
-        let totalCount: Int     // self + descendants
-        let selfCount: Int      // exact-`id` tag count (0 if only descendants)
-        /// Full child tags (e.g. `AI/agent`), sorted per the active mode.
-        let children: [(tag: String, count: Int)]
-        var hasChildren: Bool { !children.isEmpty }
-    }
-
-    /// Build the parent/child tree from the non-pinned tags, ordered by the
-    /// active sort mode at both levels.
-    private var tagTree: [TagNode] {
-        let entries = unpinnedSortedTags
-        // Group by the first `/`-segment, preserving the (already-sorted)
-        // order of first appearance for parents.
-        var order: [String] = []
-        var groups: [String: [(tag: String, count: Int)]] = [:]
-        for entry in entries {
-            let parent = entry.tag.split(separator: "/", maxSplits: 1)
-                .first.map(String.init) ?? entry.tag
-            if groups[parent] == nil { order.append(parent) }
-            groups[parent, default: []].append(entry)
-        }
-
-        return order.map { parent in
-            let members = groups[parent] ?? []
-            let total = members.reduce(0) { $0 + $1.count }
-            let selfCount = members.first { $0.tag == parent }?.count ?? 0
-            // Children are every member that isn't the bare parent tag.
-            var children = members.filter { $0.tag != parent }
-            if tagSortMode == .alphabetical {
-                children.sort {
-                    $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending
-                }
-            }  // frequency: members already came in count-desc order
-            return TagNode(id: parent, totalCount: total, selfCount: selfCount,
-                           children: children)
-        }
-    }
-
-    /// Render one parent node and (when expanded) its children.
-    @ViewBuilder
-    private func nestedTagRows(_ node: TagNode) -> some View {
-        if node.hasChildren {
-            let collapsed = collapsedTagParents.contains(node.id)
-            parentTagRow(node, collapsed: collapsed)
-            if !collapsed {
-                ForEach(node.children, id: \.tag) { child in
-                    tagRow(child.tag, count: child.count, pinned: false,
-                           indent: 1, displayName: leafSegment(child.tag))
-                }
-            }
-        } else {
-            // Childless top-level tag: a plain leaf (exact match).
-            tagRow(node.id, count: node.totalCount, pinned: false)
-        }
-    }
-
-    /// A parent row: disclosure triangle + summed count, selecting the prefix
-    /// filter (`.tagPrefix`). The triangle toggles expand/collapse.
-    @ViewBuilder
-    private func parentTagRow(_ node: TagNode, collapsed: Bool) -> some View {
+    private func sidebarTagRow(_ entry: SidebarTags.Row) -> some View {
         HStack(spacing: 4) {
-            Button {
-                if collapsed { collapsedTagParents.remove(node.id) }
-                else { collapsedTagParents.insert(node.id) }
-            } label: {
-                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 12)
+            if entry.indent {
+                Spacer().frame(width: 28)
             }
-            .buttonStyle(.plain)
-            Image(systemName: "tag")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(Color.secondary)
-                .frame(width: 16)
-            Text("#\(node.id)")
-                .font(AppUI.rowTitleFont)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Spacer()
-            Text("\(node.totalCount)")
-                .font(AppUI.metaFont)
-                .foregroundStyle(.tertiary)
-                .frame(width: 34, alignment: .trailing)
-        }
-        .padding(.vertical, 2)
-        .tag(SidebarItem.tagPrefix(node.id))
-    }
-
-    /// Last `/`-segment of a tag, used as the indented child label.
-    private func leafSegment(_ tag: String) -> String {
-        tag.split(separator: "/").last.map(String.init) ?? tag
-    }
-
-    @ViewBuilder
-    private func tagRow(_ tag: String, count: Int, pinned: Bool,
-                        indent: Int = 0, displayName: String? = nil) -> some View {
-        HStack {
-            if indent > 0 {
-                // Align the child label under the parent's tag glyph.
-                Spacer().frame(width: CGFloat(indent) * 16 + 12)
+            if entry.isParent {
+                Button {
+                    if expandedTagParents.contains(entry.tag) {
+                        expandedTagParents.remove(entry.tag)
+                    } else {
+                        expandedTagParents.insert(entry.tag)
+                    }
+                } label: {
+                    Image(systemName: entry.expanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(.tertiary)
+                        .frame(width: 12)
+                }
+                .buttonStyle(.plain)
+                .help(entry.expanded ? "태그 그룹 접기" : "태그 그룹 펼치기")
             }
-            Image(systemName: pinned ? "pin.fill" : "tag")
+            Image(systemName: entry.pinned ? "pin.fill" : "tag")
                 .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(pinned ? FileRow.starGold : Color.secondary)
+                .foregroundStyle(entry.pinned ? FileRow.starGold : Color.secondary)
                 .frame(width: 18)
-            Text("#\(displayName ?? tag)")
+            Text("#\(entry.title)")
                 .font(AppUI.rowTitleFont)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer()
-            Text("\(count)")
+            Text("\(entry.count)")
                 .font(AppUI.metaFont)
                 .foregroundStyle(.tertiary)
                 .frame(width: 34, alignment: .trailing)
         }
         .padding(.vertical, 2)
-        .tag(SidebarItem.tag(tag))
+        .tag(entry.isParent ? SidebarItem.tagPrefix(entry.tag) : SidebarItem.tag(entry.tag))
         .contextMenu {
-            if pinned {
+            if !entry.isParent {
                 Button {
-                    Task { await store.unpinTag(tag) }
+                    Task {
+                        if entry.pinned { await store.unpinTag(entry.tag) }
+                        else { await store.pinTag(entry.tag) }
+                    }
                 } label: {
-                    Label("고정 해제", systemImage: "pin.slash")
-                }
-            } else {
-                Button {
-                    Task { await store.pinTag(tag) }
-                } label: {
-                    Label("고정", systemImage: "pin")
+                    Label(entry.pinned ? "고정 해제" : "고정",
+                          systemImage: entry.pinned ? "pin.slash" : "pin")
                 }
             }
         }
     }
+
 }
 
 // MARK: - Folder radio menu
@@ -1962,6 +2012,8 @@ private struct LibraryOverview: View {
                     color: AppUI.accentPink
                 )
             }
+
+            elevenLabsLine
         }
         .padding(12)
         // 2026 Liquid Glass inspired: regularMaterial + brand tint overlay + glass stroke
@@ -1973,6 +2025,45 @@ private struct LibraryOverview: View {
             RoundedRectangle(cornerRadius: AppUI.glassRadius)
                 .stroke(AppUI.glassStroke, lineWidth: 0.6)
         )
+    }
+
+    /// ElevenLabs STT credit balance + next reset — the budget behind
+    /// CMDS transcription and the dual pipeline. Hidden until fetched;
+    /// turns orange under 10% remaining.
+    @ViewBuilder
+    private var elevenLabsLine: some View {
+        if let el = store.elevenLabs, el.status == "ok",
+           let remaining = el.remaining, let limit = el.limit, limit > 0 {
+            let low = Double(remaining) / Double(limit) < 0.1
+            HStack(spacing: 5) {
+                Image(systemName: "waveform.circle")
+                    .font(.system(size: 10.5, weight: .semibold))
+                Text("ElevenLabs \(Self.compact(remaining)) / \(Self.compact(limit)) 크레딧")
+                    .font(.system(size: 10.5, weight: .semibold))
+                if let reset = el.resetAt, reset > 0 {
+                    Text("· 갱신 \(Self.resetLabel(reset))")
+                        .font(.system(size: 10.5, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .foregroundStyle(low ? Color.orange : Color.secondary)
+            .help(
+                "CMDS 전사(ElevenLabs Scribe)·듀얼 파이프라인이 소비하는 크레딧"
+                + (el.tier.map { " — \($0) 플랜" } ?? "")
+            )
+        }
+    }
+
+    private static func compact(_ n: Int) -> String {
+        n >= 10_000 ? "\(Int((Double(n) / 1000).rounded()))k" : "\(n)"
+    }
+
+    private static func resetLabel(_ unix: Int) -> String {
+        let date = Date(timeIntervalSince1970: TimeInterval(unix))
+        let fmt = DateFormatter()
+        fmt.dateFormat = "M/d"
+        return fmt.string(from: date)
     }
 }
 
@@ -2037,7 +2128,7 @@ private struct FileRow: View {
     /// Leading inset for line 2 so it aligns with the title after the
     /// 11pt state-dot slot + 8pt spacing.
     private static let metaIndent: CGFloat = 19
-    private static let metaFont = Font.system(size: 11)
+    private static let metaFont = Font.system(size: 11.5)
     /// Warm gold for the starred state — pretty in dark mode, not neon.
     static let starGold = Color(red: 0.95, green: 0.72, blue: 0.25)
 
@@ -2046,9 +2137,11 @@ private struct FileRow: View {
             HStack(spacing: 8) {
                 stateDot
                 Text(file.filename ?? "(untitled)")
-                    .font(.system(size: 13.5, weight: .semibold))
+                    .font(.system(size: comfortable ? 15 : 14, weight: .semibold))
                     .lineLimit(comfortable ? 2 : 1)
                     .truncationMode(.tail)
+                    .layoutPriority(1)
+                    .help(file.filename ?? "(untitled)")
                     .foregroundStyle(Color.primary)
                 Spacer(minLength: 8)
                 if let date = file.createdAt {
@@ -2056,6 +2149,7 @@ private struct FileRow: View {
                         .font(Self.metaFont)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .help(formatRecordingTimestampFull(date))
                 }
             }
@@ -2139,15 +2233,35 @@ private struct FileRow: View {
         return "읽음 (리뷰 완료)"
     }
 
+    /// ⚡ dual-transcribe stage marker for list rows: gray while in progress,
+    /// orange when waiting on speaker confirmation, blue when vault-ready,
+    /// green once the final note is in the vault.
+    private var dualColor: Color? {
+        switch file.dualStatus {
+        case nil: return nil
+        case "relabel-pending": return .orange
+        case "vault-ready": return .blue
+        case "vault-sent": return .green
+        default: return .secondary
+        }
+    }
+
     @ViewBuilder
     private var metaLine: some View {
         if file.durationMs != nil || folderLabel != nil
-            || meaningfulUsage != nil || !file.primaryTags.isEmpty {
+            || meaningfulUsage != nil || !file.primaryTags.isEmpty
+            || dualColor != nil {
             HStack(spacing: 6) {
                 if file.durationMs != nil {
                     Text(formatRecordingDurationFull(file.durationMs))
                         .font(Self.metaFont)
                         .foregroundStyle(.secondary)
+                }
+                if let dualColor {
+                    Image(systemName: "bolt.badge.waveform")
+                        .font(.system(size: 9.5, weight: .semibold))
+                        .foregroundStyle(dualColor)
+                        .help("Dual: \(file.dualStatus ?? "")")
                 }
                 if let folderLabel {
                     if file.durationMs != nil { dotSeparator }
@@ -2386,6 +2500,10 @@ private enum AnuPalette {
 private struct ViewModeSegment: View {
     @Binding var rawValue: String
     let width: CGFloat
+    /// Shared across every raw pane — flipping it once applies everywhere,
+    /// which is what you want when a wide markdown table is the reason you
+    /// reached for the toggle.
+    @AppStorage("rawWrapLines") private var wrapLines: Bool = true
 
     init(rawValue: Binding<String>, width: CGFloat = 142) {
         self._rawValue = rawValue
@@ -2393,16 +2511,35 @@ private struct ViewModeSegment: View {
     }
 
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(ContentViewMode.allCases) { mode in
-                segmentButton(mode.title, isSelected: rawValue == mode.rawValue) {
-                    rawValue = mode.rawValue
+        HStack(spacing: 6) {
+            HStack(spacing: 2) {
+                ForEach(ContentViewMode.allCases) { mode in
+                    segmentButton(mode.title, isSelected: rawValue == mode.rawValue) {
+                        rawValue = mode.rawValue
+                    }
                 }
             }
+            .padding(3)
+            .background(AppUI.subtleFill, in: RoundedRectangle(cornerRadius: AppUI.radius))
+            .frame(width: width)
+
+            // Only meaningful in Raw mode — Rendered has its own layout rules.
+            if rawValue == ContentViewMode.raw.rawValue {
+                Button {
+                    wrapLines.toggle()
+                } label: {
+                    Image(systemName: wrapLines
+                          ? "text.alignleft"
+                          : "arrow.left.and.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(wrapLines ? .secondary : AnuPalette.teal)
+                }
+                .buttonStyle(.plain)
+                .help(wrapLines
+                      ? "줄바꿈 켜짐 — 클릭하면 가로 스크롤 (표·코드용)"
+                      : "가로 스크롤 켜짐 — 클릭하면 줄바꿈")
+            }
         }
-        .padding(3)
-        .background(AppUI.subtleFill, in: RoundedRectangle(cornerRadius: AppUI.radius))
-        .frame(width: width)
     }
 
     private func segmentButton(
@@ -2426,14 +2563,37 @@ private struct ViewModeSegment: View {
     }
 }
 
+/// Monospaced raw view for transcripts / markdown source.
+///
+/// Raw mode is for reading structure — long timestamped lines, markdown
+/// tables, code fences. Soft-wrapping those at the (narrow) middle-pane width
+/// shreds the alignment that makes them readable, so lines keep their real
+/// length and the pane scrolls sideways instead. `wrap` flips back to the old
+/// behavior for prose-heavy transcripts.
 private struct RawTextView: View {
+    /// Bound to the shared `rawWrapLines` preference the Raw/Rendered
+    /// control toggles. Wrapping is the default because most raw content
+    /// here is prose; horizontal scroll is for tables, code, and long
+    /// timestamped lines whose alignment matters.
+    var wrapLines: Bool = true
     let text: String
 
     var body: some View {
-        Text(text)
-            .font(.system(.body, design: .monospaced))
-            .textSelection(.enabled)
+        if wrapLines {
+            Text(text)
+                .font(.system(.body, design: .monospaced))
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            ScrollView(.horizontal, showsIndicators: true) {
+                Text(text)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: true, vertical: true)
+                    .padding(.trailing, 12)
+            }
             .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -2470,36 +2630,35 @@ private struct CenteredStateView: View {
 private struct MarkdownDocumentView: View {
     let text: String
 
-    private enum Kind {
-        case heading(Int, String)
-        case bullet(String)
-        case quote(String)
-        case paragraph(String)
-        case code(String)
-        case rule
-        case blank
-    }
-
-    private struct Block: Identifiable {
-        let id: Int
-        let kind: Kind
-    }
+    @State private var document: MarkdownDocument?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            ForEach(Self.blocks(from: text)) { block in
-                blockView(block.kind)
+        LazyVStack(alignment: .leading, spacing: 7) {
+            if let document, document.source == text {
+                ForEach(document.blocks) { block in
+                    blockView(block.kind)
+                }
+            } else if !text.isEmpty {
+                ProgressView().controlSize(.small)
             }
         }
         .textSelection(.enabled)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: text) {
+            let source = text
+            let parsed = await Task.detached(priority: .userInitiated) {
+                MarkdownDocument(text: source)
+            }.value
+            guard !Task.isCancelled else { return }
+            document = parsed
+        }
     }
 
     @ViewBuilder
-    private func blockView(_ kind: Kind) -> some View {
+    private func blockView(_ kind: MarkdownDocument.Kind) -> some View {
         switch kind {
         case .heading(let level, let body):
-            Text(inline(body))
+            Text(body)
                 .font(headingFont(level))
                 .foregroundStyle(headingColor(level))
                 .padding(.top, level <= 2 ? 8 : 4)
@@ -2515,7 +2674,7 @@ private struct MarkdownDocumentView: View {
                 Text("•")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(AnuPalette.teal)
-                Text(inline(body))
+                Text(body)
                     .font(.body)
                     .foregroundStyle(.primary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -2525,14 +2684,14 @@ private struct MarkdownDocumentView: View {
                 Rectangle()
                     .fill(AnuPalette.rosewater.opacity(0.65))
                     .frame(width: 3)
-                Text(inline(body))
+                Text(body)
                     .font(.body)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             .padding(.vertical, 2)
         case .paragraph(let body):
-            Text(inline(body))
+            Text(body)
                 .font(.body)
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -2572,105 +2731,39 @@ private struct MarkdownDocumentView: View {
         }
     }
 
-    private func inline(_ raw: String) -> AttributedString {
-        let cleaned = escapeSingleTildes(raw)
-        return (try? AttributedString(
-            markdown: cleaned,
-            options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-        )) ?? AttributedString(raw)
-    }
-
-    private func escapeSingleTildes(_ raw: String) -> String {
-        var output = ""
-        var index = raw.startIndex
-        while index < raw.endIndex {
-            if raw[index] == "~" {
-                let next = raw.index(after: index)
-                if next < raw.endIndex, raw[next] == "~" {
-                    output.append("~~")
-                    index = raw.index(after: next)
-                } else {
-                    output.append("\\~")
-                    index = next
-                }
-            } else {
-                output.append(raw[index])
-                index = raw.index(after: index)
-            }
-        }
-        return output
-    }
-
-    private static func blocks(from text: String) -> [Block] {
-        var blocks: [Block] = []
-        var codeLines: [String] = []
-        var inCode = false
-
-        func append(_ kind: Kind) {
-            blocks.append(Block(id: blocks.count, kind: kind))
-        }
-
-        for rawLine in text.components(separatedBy: .newlines) {
-            let trimmed = rawLine.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("```") {
-                if inCode {
-                    append(.code(codeLines.joined(separator: "\n")))
-                    codeLines.removeAll()
-                }
-                inCode.toggle()
-                continue
-            }
-            if inCode {
-                codeLines.append(rawLine)
-                continue
-            }
-            if trimmed.isEmpty {
-                append(.blank)
-            } else if trimmed == "---" || trimmed == "***" || trimmed == "___" {
-                append(.rule)
-            } else if let heading = parseHeading(trimmed) {
-                append(.heading(heading.level, heading.text))
-            } else if trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") {
-                append(.bullet(String(trimmed.dropFirst(2))))
-            } else if trimmed.hasPrefix(">") {
-                append(.quote(
-                    String(trimmed.dropFirst()).trimmingCharacters(in: .whitespaces)
-                ))
-            } else {
-                append(.paragraph(rawLine))
-            }
-        }
-        if !codeLines.isEmpty {
-            append(.code(codeLines.joined(separator: "\n")))
-        }
-        return blocks
-    }
-
-    private static func parseHeading(_ line: String) -> (level: Int, text: String)? {
-        let hashes = line.prefix { $0 == "#" }.count
-        guard hashes > 0, hashes <= 6,
-              line.dropFirst(hashes).first == " " else { return nil }
-        return (
-            hashes,
-            String(line.dropFirst(hashes + 1))
-                .trimmingCharacters(in: .whitespaces)
-        )
-    }
 }
 
 private struct TranscriptBubbleList: View {
     let text: String
+    /// Lowercased `is_self` speaker names, resolved once by `FileStore`.
+    /// Previously each bubble ran its own `SELECT … FROM speakers` during
+    /// layout — ~1,400 locked SQLite reads per render on a long recording.
+    var selfNames: [String] = []
 
     private struct Message: Identifiable {
         let id: Int
         let timestamp: String
         let speaker: String
         var body: String
+        /// Resolved at parse time so the render path stays pure layout.
+        let isSelf: Bool
+        let color: Color
+    }
+
+    /// Parsing 166KB of transcript is done once per distinct `text` and
+    /// cached, because SwiftUI re-evaluates `body` on every ancestor publish
+    /// (hover, sync tick, search keystroke) and the old code re-split and
+    /// re-parsed the whole string each time.
+    private var messages: [Message] {
+        Self.cache.messages(for: text, selfNames: selfNames)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            ForEach(Self.messages(from: text)) { message in
+        // Lazy: only the bubbles near the viewport get built and laid out.
+        // A plain VStack materialized all ~1,400 of them up front, which is
+        // what made opening a long recording feel like a stall.
+        LazyVStack(alignment: .leading, spacing: 9) {
+            ForEach(messages) { message in
                 bubble(message)
             }
         }
@@ -2678,9 +2771,28 @@ private struct TranscriptBubbleList: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
+    /// Single-entry memo — the detail pane shows one transcript at a time, so
+    /// a one-slot cache keyed by (text identity, self-names) hits ~100%.
+    private final class MessageCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private var key: (text: String, names: [String])?
+        private var value: [Message] = []
+
+        func messages(for text: String, selfNames: [String]) -> [Message] {
+            lock.lock(); defer { lock.unlock() }
+            if let key, key.text == text, key.names == selfNames { return value }
+            let parsed = TranscriptBubbleList.parse(text, selfNames: selfNames)
+            key = (text, selfNames)
+            value = parsed
+            return parsed
+        }
+    }
+
+    private static let cache = MessageCache()
+
     private func bubble(_ message: Message) -> some View {
-        let selfSpeaker = isSelfSpeaker(message.speaker)
-        let color = selfSpeaker ? AnuPalette.teal : speakerColor(message.speaker)
+        let selfSpeaker = message.isSelf
+        let color = message.color
         return HStack(alignment: .bottom) {
             if selfSpeaker { Spacer(minLength: 44) }
             VStack(alignment: selfSpeaker ? .trailing : .leading, spacing: 4) {
@@ -2704,12 +2816,12 @@ private struct TranscriptBubbleList: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
                     .background(
-                        color.opacity(selfSpeaker ? 0.22 : 0.15),
+                        color.opacity(selfSpeaker ? 0.22 : 0.18),
                         in: RoundedRectangle(cornerRadius: 16)
                     )
                     .overlay(
                         RoundedRectangle(cornerRadius: 16)
-                            .stroke(color.opacity(0.18), lineWidth: 1)
+                            .stroke(color.opacity(0.38), lineWidth: 1)
                     )
             }
             .frame(maxWidth: 620, alignment: selfSpeaker ? .trailing : .leading)
@@ -2718,8 +2830,38 @@ private struct TranscriptBubbleList: View {
         .frame(maxWidth: .infinity)
     }
 
-    private static func messages(from text: String) -> [Message] {
+    /// Parse the flat `[mm:ss] speaker: body` transcript into bubbles,
+    /// resolving self-flag and color per *distinct speaker* (memoized in
+    /// `styles`) rather than per line.
+    private static func parse(_ text: String, selfNames: [String]) -> [Message] {
         var out: [Message] = []
+        var styles: [String: (isSelf: Bool, color: Color)] = [:]
+
+        // Palette slots already taken by a speaker in THIS transcript, so two
+        // people in the same conversation never share a color.
+        var usedSlots = Set<Int>()
+
+        func style(_ speaker: String) -> (isSelf: Bool, color: Color) {
+            if let cached = styles[speaker] { return cached }
+            let isSelf = isSelfSpeaker(speaker, selfNames: selfNames)
+            let color: Color
+            if isSelf {
+                color = AnuPalette.teal
+            } else {
+                let slot = claimSlot(for: speaker, used: &usedSlots)
+                color = AnuPalette.speakerColors[slot]
+            }
+            let resolved = (isSelf, color)
+            styles[speaker] = resolved
+            return resolved
+        }
+
+        func append(timestamp: String, speaker: String, body: String) {
+            let s = style(speaker)
+            out.append(Message(id: out.count, timestamp: timestamp, speaker: speaker,
+                               body: body, isSelf: s.isSelf, color: s.color))
+        }
+
         for line in text.components(separatedBy: .newlines) {
             guard !line.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else { continue }
@@ -2730,18 +2872,15 @@ private struct TranscriptBubbleList: View {
                     last.body += "\n" + parsed.body
                     out[out.count - 1] = last
                 } else {
-                    out.append(Message(
-                        id: out.count,
-                        timestamp: parsed.timestamp,
-                        speaker: parsed.speaker,
-                        body: parsed.body
-                    ))
+                    append(timestamp: parsed.timestamp,
+                           speaker: parsed.speaker,
+                           body: parsed.body)
                 }
             } else if var last = out.last {
                 last.body += "\n" + line
                 out[out.count - 1] = last
             } else {
-                out.append(Message(id: 0, timestamp: "", speaker: "Unknown", body: line))
+                append(timestamp: "", speaker: "Unknown", body: line)
             }
         }
         return out
@@ -2769,28 +2908,52 @@ private struct TranscriptBubbleList: View {
         return speaker.isEmpty ? "Unknown" : speaker
     }
 
-    private func isSelfSpeaker(_ speaker: String) -> Bool {
-        let trimmed = speaker.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return false }
-        let selfNames = Database.shared.savedSpeakers()
-            .filter { $0.isSelf }
-            .map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        // No configured self-speaker → no self-styling. Match the transcript's
-        // speaker label against any saved self speaker (case-insensitive,
-        // substring either direction to tolerate "Me · Name" style labels).
-        let lower = trimmed.lowercased()
+    /// No configured self-speaker → no self-styling. Match the transcript's
+    /// speaker label against any saved self speaker (case-insensitive,
+    /// substring either direction to tolerate "Me · Name" style labels).
+    /// `selfNames` arrives already trimmed + lowercased from `FileStore`.
+    private static func isSelfSpeaker(_ speaker: String, selfNames: [String]) -> Bool {
+        let lower = speaker.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !lower.isEmpty else { return false }
         return selfNames.contains { name in
-            let nameLower = name.lowercased()
-            return lower == nameLower
-                || lower.contains(nameLower)
-                || nameLower.contains(lower)
+            lower == name || lower.contains(name) || name.contains(lower)
         }
     }
 
-    private func speakerColor(_ speaker: String) -> Color {
-        let value = speaker.unicodeScalars.reduce(0) { $0 + Int($1.value) }
-        return AnuPalette.speakerColors[value % AnuPalette.speakerColors.count]
+    /// Pick a palette slot for `speaker`: their stable preferred slot when it
+    /// is free, otherwise the next free one.
+    ///
+    /// Stability matters (the same person keeps their color across
+    /// recordings), but *distinctness within one conversation* matters more —
+    /// the whole point of the color is telling two speakers apart on screen.
+    /// Probing gives both: collisions only shift the later arrival.
+    private static func claimSlot(for speaker: String, used: inout Set<Int>) -> Int {
+        let count = AnuPalette.speakerColors.count
+        let preferred = stableHash(speaker) % count
+        if used.count >= count {
+            // More speakers than colors — reuse is unavoidable; stay stable.
+            return preferred
+        }
+        var slot = preferred
+        while used.contains(slot) { slot = (slot + 1) % count }
+        used.insert(slot)
+        return slot
+    }
+
+    /// FNV-1a over the UTF-8 bytes.
+    ///
+    /// The previous hash summed code points, which collides constantly for
+    /// Korean names: 전창대 and 안창현 both summed to a multiple-of-8 offset
+    /// and landed on the same slot, so every non-self speaker looked alike.
+    /// FNV-1a mixes each byte into the whole word, so single-character
+    /// differences move the result.
+    private static func stableHash(_ text: String) -> Int {
+        var hash: UInt64 = 0xcbf2_9ce4_8422_2325
+        for byte in text.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x1000_0000_01b3
+        }
+        return Int(hash % UInt64(Int.max))
     }
 }
 
@@ -2799,6 +2962,7 @@ private struct TranscriptBubbleList: View {
 private enum SourceTab: String, CaseIterable, Identifiable {
     case plaud = "Plaud"
     case cmds = "CMDS"
+    case final = "Final"
     var id: String { rawValue }
 }
 
@@ -2839,13 +3003,16 @@ private struct SidebarTogglePill: View {
 /// Integrated (any integrated .md on disk) > Transcribed (cmds_transcripts
 /// row) > Cached (file_content row) > New. Computed for the *selected* file
 /// only — one directory scan + one EXISTS query — never per list row.
-private enum PipelineStage {
+enum PipelineStage {
     case integrated, transcribed, cached, new
 
-    static func derive(for file: PlaudFileVM) -> PipelineStage {
-        if Database.shared.integratedAnyExists(fileID: file.id) { return .integrated }
-        if Database.shared.cmdsTranscriptExists(for: file.id) { return .transcribed }
-        if file.hasContent { return .cached }
+    /// Called from `FileStore.loadContent` on a background task — it touches
+    /// the filesystem (`data/integrated/<id>/`) and SQLite, neither of which
+    /// belongs in a view body.
+    static func derive(fileID: String, hasContent: Bool) -> PipelineStage {
+        if Database.shared.integratedAnyExists(fileID: fileID) { return .integrated }
+        if Database.shared.cmdsTranscriptExists(for: fileID) { return .transcribed }
+        if hasContent { return .cached }
         return .new
     }
 
@@ -2960,10 +3127,9 @@ private struct DetailView: View {
     @State private var statusObserver: NSKeyValueObservation?
     @State private var sourceTab: SourceTab = .plaud
     @AppStorage("showRightWorkSidebar") private var showRightWorkSidebar: Bool = true
-    /// Persisted Work Sidebar width. HSplitView never saves its divider, so
-    /// without this the sidebar snaps back to its ideal width every launch.
-    /// Defaults to the minimum (360) — sidebar minimized, content maximized.
-    @AppStorage("workSidebarWidth") private var workSidebarWidth: Double = 360
+    /// Default 350pt follows the Sep 6 reference. New preferences retain
+    /// deliberate divider drags without preserving the previous cramped layout.
+    @AppStorage(WorkspaceLayout.workKey) private var workSidebarWidth: Double = Double(WorkspaceLayout.workDefault)
     /// Inline title editing (detail header). Click the title (or the hover
     /// pencil) to edit; Enter commits, Esc/blur cancels.
     @State private var editingTitle = false
@@ -2977,7 +3143,7 @@ private struct DetailView: View {
                 if showRightWorkSidebar {
                     HSplitView {
                         mainContent(file: file)
-                            .frame(minWidth: 420)
+                            .frame(minWidth: WorkspaceLayout.detailMinimum)
                             .frame(
                                 maxWidth: .infinity,
                                 maxHeight: .infinity,
@@ -2987,20 +3153,14 @@ private struct DetailView: View {
                         AIInspectorPanel(store: store) {
                             showRightWorkSidebar = false
                         }
-                        // Min keeps slot cards from squishing; ideal restores
-                        // the user's last dragged width (default = minimized).
                         .frame(
-                            minWidth: 360,
-                            idealWidth: max(360, min(520, workSidebarWidth)),
-                            maxWidth: 520
+                            minWidth: WorkspaceLayout.workRange.lowerBound,
+                            idealWidth: WorkspaceLayout.clamped(CGFloat(workSidebarWidth),
+                                                               to: WorkspaceLayout.workRange,
+                                                               fallback: WorkspaceLayout.workDefault),
+                            maxWidth: WorkspaceLayout.workRange.upperBound
                         )
-                        .background(
-                            GeometryReader { proxy in
-                                Color.clear.onChange(of: proxy.size.width) { _, width in
-                                    workSidebarWidth = Double(width)
-                                }
-                            }
-                        )
+                        .background(WorkspaceSplitWidths(role: .work))
                     }
                 } else {
                     mainContent(file: file)
@@ -3075,6 +3235,7 @@ private struct DetailView: View {
             switch sourceTab {
             case .plaud: PlaudPanel(store: store)
             case .cmds: CmdsPanel(store: store)
+            case .final: FinalPanel(store: store)
             }
         }
     }
@@ -3229,10 +3390,10 @@ private struct DetailView: View {
                     .help("Show AI summaries and Obsidian actions")
                 }
             }
-            // Stage is derived here (not inside the strip) so it recomputes on
-            // every store publish — e.g. right after a transcription or
-            // integration finishes — instead of only when the file row changes.
-            DetailMetricStrip(file: file, stage: .derive(for: file))
+            // Stage comes from the store, refreshed off-main whenever the
+            // selection or the library changes (transcription / integration
+            // finishing both land through `reload()` -> `loadContent`).
+            DetailMetricStrip(file: file, stage: store.selectedStage)
             MetadataBar(store: store, file: file)
         }
         .padding(14)
@@ -3340,11 +3501,96 @@ private struct DetailView: View {
     }
 }
 
+/// Speaker real-name confirmation — the dual pipeline's one required human
+/// checkpoint. Shows the LLM proposal (name + confidence + evidence) with
+/// editable fields; Apply resumes the pipeline with the confirmed map.
+private struct DualSpeakerSheet: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+    let proposal: [SpeakerProposalVM]
+    let onDone: () -> Void
+
+    @State private var names: [String: String] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: AppUI.spacingM) {
+            HStack(spacing: 8) {
+                Image(systemName: "person.wave.2")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(AppUI.accentPink)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("화자 실명 확인")
+                        .font(.title3.weight(.semibold))
+                    Text("제안된 이름을 수정하거나 비워두세요 (빈 칸은 speaker 번호 유지). 확정한 이름은 다음 녹음의 제안 정확도를 높입니다.")
+                        .font(AppUI.metaFont)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            VStack(spacing: 8) {
+                ForEach(proposal) { p in
+                    HStack(spacing: AppUI.spacingS) {
+                        Text(p.speaker)
+                            .font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 92, alignment: .leading)
+                        TextField("이름", text: binding(for: p))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 140)
+                        if p.confidence > 0, !p.name.isEmpty {
+                            Text("\(Int(p.confidence * 100))%")
+                                .font(.system(size: 10.5, weight: .semibold))
+                                .foregroundStyle(p.confidence >= 0.7 ? Color.green : .orange)
+                        }
+                        Text(p.evidence)
+                            .font(AppUI.metaFont)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                }
+            }
+
+            HStack {
+                Button("Cancel") { onDone() }
+                Spacer()
+                Button {
+                    let map = names.filter {
+                        !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
+                    }
+                    onDone()
+                    Task { await store.runDual(fileID, speakerMap: map) }
+                } label: {
+                    Label("Apply & Continue", systemImage: "bolt.badge.waveform")
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(store.dualRunningIDs.contains(fileID))
+            }
+        }
+        .padding(20)
+        .frame(width: 560)
+        .onAppear {
+            for p in proposal where names[p.speaker] == nil {
+                names[p.speaker] = p.name
+            }
+        }
+    }
+
+    private func binding(for p: SpeakerProposalVM) -> Binding<String> {
+        Binding(
+            get: { names[p.speaker] ?? p.name },
+            set: { names[p.speaker] = $0 }
+        )
+    }
+}
+
 private struct MetadataBar: View {
     @ObservedObject var store: FileStore
     let file: PlaudFileVM
     @State private var newTag: String = ""
     @State private var showStatusPicker: Bool = false
+    @State private var showSpeakerSheet: Bool = false
 
     private var metadata: NoteMetadataVM? {
         guard store.noteMetadata?.fileID == file.id else { return nil }
@@ -3490,6 +3736,8 @@ private struct MetadataBar: View {
                 Spacer(minLength: 0)
             }
 
+            dualReuseRow
+
             if let description = metadata?.description, !description.isEmpty {
                 Text(description)
                     .font(AppUI.metaFont)
@@ -3497,7 +3745,20 @@ private struct MetadataBar: View {
                     .lineLimit(2)
             }
         }
+        .sheet(isPresented: $showSpeakerSheet) {
+            if let dual = dualForFile {
+                DualSpeakerSheet(store: store, fileID: file.id, proposal: dual.proposal) {
+                    showSpeakerSheet = false
+                }
+            }
+        }
         .onChange(of: file.id) { _, _ in newTag = "" }
+        .onChange(of: store.dualState?.status) { _, status in
+            // Auto-open the confirmation sheet the moment names are ready.
+            if status == "relabel-pending", store.selectedID == file.id {
+                showSpeakerSheet = true
+            }
+        }
     }
 
     /// Name of the file's single assigned folder, preferring the live folder
@@ -3589,6 +3850,170 @@ private struct MetadataBar: View {
         .frame(width: 190)
     }
 
+    // MARK: Dual pipeline + reuse marks row
+
+    private var dualForFile: DualStateVM? {
+        guard store.dualState?.fileID == file.id else { return nil }
+        return store.dualState
+    }
+
+    private var isDualRunning: Bool { store.dualRunningIDs.contains(file.id) }
+
+    private static let reuseChannels = [
+        "newsletter", "lecture", "shorts", "sns", "consulting", "research",
+    ]
+
+    private var dualReuseRow: some View {
+        HStack(spacing: AppUI.spacingS) {
+            dualControl
+            Divider().frame(height: 14)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 5) {
+                    ForEach(Self.reuseChannels, id: \.self) { channel in
+                        reuseChip(channel)
+                    }
+                }
+                .padding(.vertical, 1)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var dualControl: some View {
+        if isDualRunning {
+            HStack(spacing: 5) {
+                ProgressView().controlSize(.small)
+                Text(dualForFile.map { Self.dualStageLabel($0.status) } ?? "Dual…")
+                    .font(AppUI.metaFont)
+                    .foregroundStyle(.secondary)
+            }
+        } else if let dual = dualForFile {
+            HStack(spacing: 5) {
+                dualBadge(dual)
+                switch dual.status {
+                case "relabel-pending":
+                    Button("Confirm Speakers…") { showSpeakerSheet = true }
+                        .font(AppUI.metaFont)
+                        .buttonStyle(.link)
+                case "vault-ready":
+                    Button("Send to Vault") {
+                        Task { await store.dualSend(file.id) }
+                    }
+                    .font(AppUI.metaFont)
+                    .buttonStyle(.link)
+                case "vault-sent":
+                    if let path = dual.vaultPath, !path.isEmpty {
+                        Button {
+                            store.openPath(path)
+                        } label: {
+                            Image(systemName: "arrow.up.forward.app")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.plain)
+                        .help("Open the vault transcript note")
+                    }
+                default:
+                    // marked / parked-with-error: resume from where it stopped.
+                    Button {
+                        Task { await store.runDual(file.id) }
+                    } label: {
+                        Image(systemName: "play.circle")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Resume the dual pipeline")
+                }
+            }
+            .contextMenu {
+                Button("Re-run stage") { Task { await store.runDual(file.id) } }
+                Button("Remove from pipeline") { Task { await store.dualUnmark(file.id) } }
+            }
+        } else {
+            // Never run: an unmistakable call-to-action pill (vs the colored
+            // stage badge shown once the pipeline has state).
+            Button {
+                Task { await store.runDual(file.id) }
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "bolt.badge.waveform")
+                        .font(.system(size: 10, weight: .semibold))
+                    Text("Dual Transcribe")
+                        .font(.system(size: 10.5, weight: .semibold))
+                }
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .overlay(Capsule().stroke(AppUI.accentPink.opacity(0.55), lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AppUI.accentPink)
+            .help("아직 실행 전 — ElevenLabs 전사 → 실명 매핑 → Plaud×CMDS 교차분석 → 볼트")
+        }
+    }
+
+    private func dualBadge(_ dual: DualStateVM) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "bolt.badge.waveform")
+                .font(.system(size: 10, weight: .semibold))
+            Text(Self.dualStageLabel(dual.status))
+                .font(.system(size: 10.5, weight: .semibold))
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Self.dualStageColor(dual.status, hasError: dual.error != nil).opacity(0.16),
+                    in: Capsule())
+        .foregroundStyle(Self.dualStageColor(dual.status, hasError: dual.error != nil))
+        .help(dual.error ?? Self.dualStageLabel(dual.status))
+    }
+
+    private static func dualStageLabel(_ status: String) -> String {
+        switch status {
+        case "marked": return "Dual: marked"
+        case "transcribing": return "Transcribing…"
+        case "relabel-pending": return "Speakers?"
+        case "integrating": return "Integrating…"
+        case "vault-ready": return "Vault Ready"
+        case "vault-sent": return "In Vault"
+        default: return status
+        }
+    }
+
+    private static func dualStageColor(_ status: String, hasError: Bool) -> Color {
+        if hasError { return .red }
+        switch status {
+        case "relabel-pending": return .orange
+        case "vault-ready": return .blue
+        case "vault-sent": return .green
+        default: return .secondary
+        }
+    }
+
+    /// Reuse chips: tap cycles none → flagged → drafted → published → none.
+    private func reuseChip(_ channel: String) -> some View {
+        let mark = store.reuseMarks.first { $0.channel == channel }
+        let color: Color = switch mark?.status {
+        case "flagged": .orange
+        case "drafted": .blue
+        case "published": .green
+        default: .secondary
+        }
+        return Button {
+            Task { await store.cycleReuse(file.id, channel: channel) }
+        } label: {
+            Text(channel)
+                .font(.system(size: 10.5, weight: mark == nil ? .regular : .semibold))
+                .padding(.horizontal, 7)
+                .padding(.vertical, 3)
+                .background(
+                    (mark == nil ? Color.secondary.opacity(0.08) : color.opacity(0.16)),
+                    in: Capsule()
+                )
+                .foregroundStyle(mark == nil ? Color.secondary : color)
+        }
+        .buttonStyle(.plain)
+        .help(mark.map { "\(channel): \($0.status)\($0.note.map { n in " — \(n)" } ?? "")" }
+              ?? "Mark as \(channel) material")
+    }
+
     private func tagChip(_ tag: NoteTagVM) -> some View {
         HStack(spacing: 4) {
             Text("#\(tag.tag)")
@@ -3612,7 +4037,153 @@ private struct MetadataBar: View {
 
 // MARK: - Plaud Panel
 
+/// Source › Final: the dual pipeline's cross-analyzed final transcript +
+/// comprehensive summary, with one-click clipboard copy for downstream
+/// content work (newsletter, lecture, …).
+private struct FinalPanel: View {
+    /// Shared with `ViewModeSegment`'s wrap toggle: wrap prose, or let
+    /// column-structured raw content scroll sideways.
+    @AppStorage("rawWrapLines") private var wrapLines: Bool = true
+
+    @ObservedObject var store: FileStore
+    @State private var tab: Tab = .transcript
+    @State private var copied: String?
+    @AppStorage("defaultContentViewMode") private var viewModeRaw: String =
+        ContentViewMode.rendered.rawValue
+
+    enum Tab: Hashable { case transcript, summary }
+
+    private var integrated: IntegratedContentVM? {
+        guard store.integratedContent?.fileID == store.selectedID else { return nil }
+        return store.integratedContent
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            if let integrated {
+                ScrollView {
+                    content(integrated)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                }
+            } else {
+                emptyState
+            }
+        }
+        .onChange(of: store.selectedID) { _, _ in tab = .transcript; copied = nil }
+    }
+
+    private var header: some View {
+        HStack(spacing: AppUI.spacingS) {
+            Label("최종본 · Dual (Plaud × ElevenLabs 교차분석)",
+                  systemImage: "bolt.badge.waveform")
+                .font(AppUI.sectionFont)
+                .foregroundStyle(.secondary)
+            if let label = integrated?.label {
+                Text(label)
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer()
+            if integrated != nil {
+                Picker("", selection: $tab) {
+                    Text("Transcript").tag(Tab.transcript)
+                    Text("Summary").tag(Tab.summary)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 190)
+                copyMenu
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    /// Copy for downstream context use: current tab, or both stitched.
+    private var copyMenu: some View {
+        Menu {
+            Button("Copy Transcript") { copy(integrated?.transcript ?? "", tag: "transcript") }
+            Button("Copy Summary") { copy(integrated?.summary ?? "", tag: "summary") }
+            Button("Copy Both (context block)") {
+                guard let i = integrated else { return }
+                copy("## Summary\n\n\(i.summary)\n\n## Final Transcript\n\n\(i.transcript)",
+                     tag: "both")
+            }
+        } label: {
+            Label(copied == nil ? "Copy" : "Copied ✓",
+                  systemImage: copied == nil ? "doc.on.doc" : "checkmark.circle.fill")
+                .font(AppUI.metaFont)
+                .foregroundStyle(copied == nil ? Color.primary : Color.green)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("최종본을 클립보드로 — 다른 콘텐츠 작업의 컨텍스트로 붙여넣기")
+    }
+
+    private func copy(_ text: String, tag: String) {
+        guard !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+        copied = tag
+        Task {
+            try? await Task.sleep(nanoseconds: 1_600_000_000)
+            copied = nil
+        }
+    }
+
+    @ViewBuilder
+    private func content(_ integrated: IntegratedContentVM) -> some View {
+        let mode = ContentViewMode(rawValue: viewModeRaw) ?? .rendered
+        switch tab {
+        case .transcript:
+            if integrated.transcript.isEmpty {
+                CenteredStateView(message: "최종 전사본 섹션이 비어 있습니다.",
+                                  systemImage: "bolt.badge.waveform")
+            } else if mode == .raw {
+                RawTextView(wrapLines: wrapLines, text: integrated.transcript)
+            } else {
+                TranscriptBubbleList(text: integrated.transcript,
+                                     selfNames: store.selfSpeakerNames)
+            }
+        case .summary:
+            if integrated.summary.isEmpty {
+                CenteredStateView(message: "종합 요약 섹션이 비어 있습니다.",
+                                  systemImage: "text.badge.xmark")
+            } else if mode == .raw {
+                RawTextView(wrapLines: wrapLines, text: integrated.summary)
+            } else {
+                MarkdownDocumentView(text: integrated.summary)
+            }
+        }
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: AppUI.spacingM) {
+            CenteredStateView(
+                message: "아직 듀얼 최종본이 없습니다.\n메타데이터 줄의 ⚡ Dual Transcribe로 생성하세요\n(ElevenLabs 전사 → 실명 확인 → Plaud×CMDS 교차분석).",
+                systemImage: "bolt.badge.waveform"
+            )
+            if let id = store.selectedID {
+                Button {
+                    Task { await store.runDual(id) }
+                } label: {
+                    Label("Dual Transcribe 시작", systemImage: "bolt.badge.waveform")
+                }
+                .disabled(store.dualRunningIDs.contains(id))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+}
+
 private struct PlaudPanel: View {
+    /// Shared with `ViewModeSegment`'s wrap toggle: wrap prose, or let
+    /// column-structured raw content scroll sideways.
+    @AppStorage("rawWrapLines") private var wrapLines: Bool = true
+
     @ObservedObject var store: FileStore
     @State private var tab: Tab = .summary
     @State private var summaryIndex: Int = 0
@@ -3782,16 +4353,17 @@ private struct PlaudPanel: View {
             case .transcript:
                 let transcript = plaudContent.transcript
                 if mode == .raw {
-                    RawTextView(text: transcript)
+                    RawTextView(wrapLines: wrapLines, text: transcript)
                 } else {
-                    TranscriptBubbleList(text: transcript)
+                    TranscriptBubbleList(text: transcript,
+                                         selfNames: store.selfSpeakerNames)
                 }
             case .summary:
                 if !plaudContent.summaries.isEmpty,
                    summaryIndex < plaudContent.summaries.count {
                     let body = plaudContent.summaries[summaryIndex].body
                     if mode == .raw {
-                        RawTextView(text: body)
+                        RawTextView(wrapLines: wrapLines, text: body)
                     } else {
                         MarkdownDocumentView(text: body)
                     }
@@ -3813,7 +4385,7 @@ private struct PlaudPanel: View {
             case .outline:
                 let outline = plaudContent.outline
                 if mode == .raw {
-                    RawTextView(text: outline)
+                    RawTextView(wrapLines: wrapLines, text: outline)
                 } else {
                     MarkdownDocumentView(text: outline)
                 }
@@ -3979,6 +4551,10 @@ private struct PlaudSpeakerRenameSheet: View {
 // MARK: - CMDS Panel
 
 private struct CmdsPanel: View {
+    /// Shared with `ViewModeSegment`'s wrap toggle: wrap prose, or let
+    /// column-structured raw content scroll sideways.
+    @AppStorage("rawWrapLines") private var wrapLines: Bool = true
+
     @ObservedObject var store: FileStore
 
     @State private var numSpeakers: Int = 0
@@ -3988,6 +4564,19 @@ private struct CmdsPanel: View {
     @State private var savedSpeakers: [Database.Speaker] = []
     @State private var managingSpeakers: Bool = false
     @State private var gapSeconds: Double = 10
+    @State private var refreshRevision = 0
+
+    private struct SectionRequest: Equatable {
+        let fileID: String?
+        let transcript: String?
+        let gapSeconds: Double
+        let revision: Int
+    }
+
+    private var sectionRequest: SectionRequest {
+        SectionRequest(fileID: store.selectedID, transcript: store.cmdsTranscript,
+                       gapSeconds: gapSeconds, revision: refreshRevision)
+    }
     @AppStorage("defaultContentViewMode") private var viewModeRaw: String =
         ContentViewMode.rendered.rawValue
 
@@ -4006,9 +4595,10 @@ private struct CmdsPanel: View {
                             flatRelabelBar
                         }
                         if (ContentViewMode(rawValue: viewModeRaw) ?? .rendered) == .raw {
-                            RawTextView(text: cmds)
+                            RawTextView(wrapLines: wrapLines, text: cmds)
                         } else {
-                            TranscriptBubbleList(text: cmds)
+                            TranscriptBubbleList(text: cmds,
+                                                 selfNames: store.selfSpeakerNames)
                         }
                     } else if let fid = store.selectedID,
                               store.transcribingIDs.contains(fid) {
@@ -4026,14 +4616,28 @@ private struct CmdsPanel: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .onAppear { refresh() }
-        .onChange(of: store.selectedID) { _, _ in refresh() }
-        .onChange(of: store.cmdsTranscript) { _, _ in refresh() }
-        .onChange(of: gapSeconds) { _, _ in refresh() }
+        .task(id: sectionRequest) {
+            let request = sectionRequest
+            let result = await Task.detached(priority: .userInitiated) {
+                let speakers = Database.shared.savedSpeakers()
+                let sections = request.fileID.map {
+                    Database.shared.cmdsSections(for: $0, gapSec: request.gapSeconds)
+                } ?? []
+                return (speakers, sections)
+            }.value
+            guard !Task.isCancelled, sectionRequest == request else { return }
+            savedSpeakers = result.0
+            sections = result.1
+        }
+        .onChange(of: store.selectedID) { _, _ in
+            sections = []
+            sectionMap = [:]
+        }
+        .onChange(of: gapSeconds) { _, _ in sectionMap = [:] }
         .sheet(isPresented: $managingSpeakers) {
             SpeakersManagerSheet(store: store) {
                 managingSpeakers = false
-                savedSpeakers = Database.shared.savedSpeakers()
+                refresh()
             }
         }
     }
@@ -4091,12 +4695,7 @@ private struct CmdsPanel: View {
     }
 
     private func refresh() {
-        savedSpeakers = Database.shared.savedSpeakers()
-        if let id = store.selectedID {
-            sections = Database.shared.cmdsSections(for: id, gapSec: gapSeconds)
-        } else {
-            sections = []
-        }
+        refreshRevision &+= 1
     }
 
     private var controlBar: some View {
@@ -4168,13 +4767,23 @@ private struct CmdsPanel: View {
                     .font(.caption2).foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
+            // A conversation with 6+ speakers needs ~900pt of pickers, which
+            // the middle pane never has — they used to clip and collide with
+            // the Apply button. Scroll the pickers horizontally and keep
+            // Apply pinned outside the scroll area so it stays reachable.
             HStack(spacing: 8) {
-                ForEach(section.speakers, id: \.self) { raw in
-                    speakerPicker(sectionId: section.id, raw: raw)
+                ScrollView(.horizontal, showsIndicators: true) {
+                    HStack(alignment: .bottom, spacing: 8) {
+                        ForEach(section.speakers, id: \.self) { raw in
+                            speakerPicker(sectionId: section.id, raw: raw)
+                        }
+                    }
+                    .padding(.bottom, 4)
                 }
                 Button("Apply") {
                     applySection(section)
                 }
+                .fixedSize()
             }
         }
     }
@@ -4199,8 +4808,8 @@ private struct CmdsPanel: View {
 
     /// Relabel a single section, clear its map, and refresh — inline (awaitable)
     /// so callers can serialize multiple sections without overlapping writes.
-    private func applySectionAsync(_ section: Database.CmdsSection) async {
-        guard let fid = store.selectedID else { return }
+    private func applySectionAsync(_ section: Database.CmdsSection, fileID fid: String) async {
+        guard store.selectedID == fid else { return }
         var map: [String: String] = [:]
         for raw in section.speakers {
             let key = "\(section.id)::\(raw)"
@@ -4213,6 +4822,7 @@ private struct CmdsPanel: View {
             startSec: section.startSec,
             endSec: section.endSec + 0.5
         )
+        guard store.selectedID == fid else { return }
         // clear that section's map after apply
         for raw in section.speakers {
             sectionMap["\(section.id)::\(raw)"] = ""
@@ -4221,17 +4831,20 @@ private struct CmdsPanel: View {
     }
 
     private func applySection(_ section: Database.CmdsSection) {
-        Task { await applySectionAsync(section) }
+        guard let fid = store.selectedID else { return }
+        Task { await applySectionAsync(section, fileID: fid) }
     }
 
     private func applyAllSections() {
         // Serialize: relabel writes share the same SQLite rows + sectionMap.
         // Firing overlapping Tasks let later relabels race the earlier ones.
         // A single Task that awaits each section in turn keeps them ordered.
+        guard let fid = store.selectedID else { return }
         let snapshot = sections
         Task {
             for section in snapshot {
-                await applySectionAsync(section)
+                guard store.selectedID == fid else { break }
+                await applySectionAsync(section, fileID: fid)
             }
         }
     }
@@ -4342,6 +4955,10 @@ struct VaultSendMenu: View {
 /// The slot row exposes a mode picker (Summary / Integrated) so the user can
 /// flip between both kinds of output for the same file.
 private struct AIInspectorPanel: View {
+    /// Shared with `ViewModeSegment`'s wrap toggle: wrap prose, or let
+    /// column-structured raw content scroll sideways.
+    @AppStorage("rawWrapLines") private var wrapLines: Bool = true
+
     @ObservedObject var store: FileStore
     let collapse: () -> Void
 
@@ -4357,6 +4974,24 @@ private struct AIInspectorPanel: View {
     /// Per-slot view: which integrated subsection to show (all / transcript / summary).
     @State private var viewMap: [String: Database.IntegratedKind] = [:]
     @State private var refreshTick: Int = 0
+    @State private var slotOutputs: SlotOutputSnapshot?
+    @State private var loadingSlots = true
+
+    private struct OutputRequest: Equatable {
+        let fileID: String
+        let slots: [Database.Slot]
+        let runningKeys: Set<String>
+        let revision: UInt64
+    }
+
+    private var outputRequest: OutputRequest {
+        OutputRequest(fileID: store.selectedID ?? "", slots: slots,
+                      runningKeys: store.summarizingKeys,
+                      revision: store.contentRevision)
+    }
+    /// "Ask about this recording…" prompt sheet (Claude Code bridge).
+    @State private var askingClaude: Bool = false
+    @State private var claudeQuestion: String = ""
     @AppStorage("defaultContentViewMode") private var viewModeRaw: String =
         ContentViewMode.rendered.rawValue
 
@@ -4388,9 +5023,13 @@ private struct AIInspectorPanel: View {
                 VStack(alignment: .leading, spacing: 8) {
                     quickActions
                     if slots.isEmpty {
-                        Text("No summary slots configured.")
-                            .foregroundStyle(.secondary)
-                            .padding(12)
+                        if loadingSlots {
+                            CenteredStateView(message: "Loading summary slots…", loading: true)
+                        } else {
+                            Text("No summary slots configured.")
+                                .foregroundStyle(.secondary)
+                                .padding(12)
+                        }
                     } else {
                         ForEach(slots) { slot in
                             slotCard(slot)
@@ -4403,23 +5042,65 @@ private struct AIInspectorPanel: View {
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(Color(NSColor.windowBackgroundColor))
-        .id(refreshTick)
-        .onAppear { reload() }
+        .task(id: refreshTick) {
+            let loaded = await Task.detached(priority: .userInitiated) {
+                (Database.shared.loadSlots(), Database.shared.listTemplates())
+            }.value
+            guard !Task.isCancelled else { return }
+            slots = loaded.0
+            templates = loaded.1
+            loadingSlots = false
+        }
+        .task(id: outputRequest) {
+            let request = outputRequest
+            let snapshot = await Task.detached(priority: .userInitiated) {
+                SlotOutputSnapshot.load(fileID: request.fileID, slots: request.slots)
+            }.value
+            guard !Task.isCancelled, outputRequest == request else { return }
+            slotOutputs = snapshot
+        }
         .onChange(of: store.selectedID) { _, _ in
-            reload()
             expanded.removeAll()
             expandedSlot = nil
             modeMap.removeAll()  // re-derive integrated-first defaults per file
             store.lastVaultSend = nil
-        }
-        .onChange(of: store.summarizingKeys.count) { _, _ in
-            refreshTick &+= 1
         }
         .sheet(isPresented: $addingSlot) {
             AddSlotSheet(templates: templates, store: store) {
                 addingSlot = false
                 reload()
             }
+        }
+        .sheet(isPresented: $askingClaude) {
+            VStack(alignment: .leading, spacing: AppUI.spacingM) {
+                Label("Ask Claude about this recording", systemImage: "asterisk.circle")
+                    .font(.title3.weight(.semibold))
+                Text("Terminal에서 Claude Code 세션이 열립니다 — plaud 스킬·MCP·CLI가 모두 사용 가능한 환경에서 이 녹음의 전사/요약을 근거로 답합니다.")
+                    .font(AppUI.metaFont)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                TextEditor(text: $claudeQuestion)
+                    .font(.system(size: 13))
+                    .frame(height: 90)
+                    .overlay(RoundedRectangle(cornerRadius: 6)
+                        .stroke(Color(NSColor.separatorColor), lineWidth: 1))
+                HStack {
+                    Button("Cancel") { askingClaude = false }
+                    Spacer()
+                    Button("Open Claude Code") {
+                        let question = claudeQuestion
+                        askingClaude = false
+                        claudeQuestion = ""
+                        if let fid = store.selectedID {
+                            Task { await store.launchClaude(fid, task: "ask", prompt: question) }
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(claudeQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+            }
+            .padding(20)
+            .frame(width: 460)
         }
         .sheet(item: $expandedSlot) { slot in
             slotOutputSheet(slot)
@@ -4445,7 +5126,7 @@ private struct AIInspectorPanel: View {
                 ViewModeSegment(rawValue: $viewModeRaw, width: 120)
                 Spacer()
                 Button {
-                    store.openProjectFolder("data/integrated/\(store.selectedID ?? "")")
+                    store.openPath((Database.shared.outputBaseDir(kind: "integrated") as NSString).appendingPathComponent(store.selectedID ?? ""))
                 } label: {
                     ToolbarIconLabel(systemName: "folder")
                 }
@@ -4492,6 +5173,7 @@ private struct AIInspectorPanel: View {
                         Label("Metadata", systemImage: "sparkles")
                     }
                 }
+                .fixedSize()
                 .disabled(fid.isEmpty || metadataRunning)
             }
             HStack(spacing: 6) {
@@ -4512,6 +5194,7 @@ private struct AIInspectorPanel: View {
                         Label("Meeting Note", systemImage: "doc.badge.plus")
                     }
                 }
+                .fixedSize()
                 .disabled(fid.isEmpty || meetingRunning)
 
                 Button {
@@ -4519,8 +5202,10 @@ private struct AIInspectorPanel: View {
                 } label: {
                     Label("Summary Slot", systemImage: "plus")
                 }
+                .fixedSize()
                 .disabled(fid.isEmpty)
-
+            }
+            HStack(spacing: 12) {
                 Button {
                     // Kick every slot's Integrated generation concurrently —
                     // each runs as its own CLI process; per-card spinners come
@@ -4538,12 +5223,33 @@ private struct AIInspectorPanel: View {
                 } label: {
                     Label("Generate All", systemImage: "arrow.triangle.merge")
                 }
+                .fixedSize()
                 .disabled(fid.isEmpty || slots.isEmpty || !store.summarizingKeys.isEmpty)
                 .help("모든 슬롯의 Integrated 결과를 한 번에 생성")
+
+                // CLI/MCP bridge: open a Claude Code session preloaded with
+                // this recording's context — plaud-* skills + Plaud MCP +
+                // this repo's CLI all available in that session.
+                Menu {
+                    Button("Ask about this recording…") { askingClaude = true }
+                    Button("Follow-up draft (plaud-followup)") {
+                        Task { await store.launchClaude(fid, task: "followup") }
+                    }
+                    Button("Recent digest (plaud-digest)") {
+                        Task { await store.launchClaude("", task: "digest") }
+                    }
+                } label: {
+                    Label("Claude", systemImage: "asterisk.circle")
+                }
+                .fixedSize()
+                .disabled(fid.isEmpty)
+                .help("Claude Code 세션을 이 녹음 컨텍스트로 열기 (Terminal)")
             }
             vaultSendFeedback(fid)
         }
         .buttonStyle(.borderless)
+        .lineLimit(1)
+        .fixedSize(horizontal: false, vertical: true)
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .font(AppUI.controlFont)
@@ -4564,8 +5270,11 @@ private struct AIInspectorPanel: View {
     }
 
     private func reload() {
-        slots = Database.shared.loadSlots()
-        templates = Database.shared.listTemplates()
+        refreshTick &+= 1
+    }
+
+    private func output(for slot: Database.Slot) -> SlotOutputSnapshot.Output? {
+        slotOutputs?.output(for: slot.id, selectedID: store.selectedID)
     }
 
     /// Vault-send progress/result strip under the action buttons: spinner
@@ -4604,11 +5313,7 @@ private struct AIInspectorPanel: View {
         if slot.template == "integrated" { return .integrated }
         // Integrated-first: when a fused output already exists for this slot,
         // surface it by default — it is the artifact the user actually uses.
-        let fid = store.selectedID ?? ""
-        if !fid.isEmpty,
-           Database.shared.integratedExists(
-               fileID: fid, model: slot.outputModel, template: slot.template
-           ) {
+        if output(for: slot)?.hasIntegrated == true {
             return .integrated
         }
         return .summary
@@ -4628,11 +5333,9 @@ private struct AIInspectorPanel: View {
         let hasOutput: Bool = {
             switch m {
             case .summary:
-                return Database.shared.summaryBody(
-                    fileID: fid, model: slot.outputModel, template: slot.template) != nil
+                return output(for: slot)?.summary != nil
             case .integrated:
-                return Database.shared.integratedExists(
-                    fileID: fid, model: slot.outputModel, template: slot.template)
+                return output(for: slot)?.hasIntegrated == true
             }
         }()
 
@@ -4807,19 +5510,15 @@ private struct AIInspectorPanel: View {
 
     @ViewBuilder
     private func outputBody(slot: Database.Slot, mode m: SlotMode) -> some View {
-        let fid = store.selectedID ?? ""
         switch m {
         case .summary:
-            if let body = Database.shared.summaryBody(
-                fileID: fid, model: slot.outputModel, template: slot.template) {
+            if let body = output(for: slot)?.summary {
                 renderMarkdown(body)
             }
         case .integrated:
             VStack(alignment: .leading, spacing: 6) {
                 integratedKindControl(slot)
-                if let body = Database.shared.integratedBody(
-                    fileID: fid, model: slot.outputModel, template: slot.template,
-                    kind: viewKind(for: slot)) {
+                if let body = output(for: slot)?.integrated[viewKind(for: slot)] {
                     renderMarkdown(body)
                 }
             }
@@ -4887,7 +5586,7 @@ private struct AIInspectorPanel: View {
     private func renderMarkdown(_ body: String) -> some View {
         Group {
             if (ContentViewMode(rawValue: viewModeRaw) ?? .rendered) == .raw {
-                RawTextView(text: body)
+                RawTextView(wrapLines: wrapLines, text: body)
             } else {
                 MarkdownDocumentView(text: body)
             }
@@ -4901,44 +5600,29 @@ private struct AIInspectorPanel: View {
     /// Copy menu: Summary mode → just "Copy". Integrated mode → All / Transcript / Summary.
     @ViewBuilder
     private func copyMenu(slot: Database.Slot, mode m: SlotMode) -> some View {
-        let fid = store.selectedID ?? ""
         switch m {
         case .summary:
             Button("Copy") {
-                store.copyToClipboard(
-                    Database.shared.summaryBody(
-                        fileID: fid, model: slot.outputModel, template: slot.template) ?? ""
-                )
+                store.copyToClipboard(output(for: slot)?.summary ?? "")
             }
             .buttonStyle(.borderless)
         case .integrated:
             Menu("Copy") {
                 Button("Copy all") {
-                    store.copyToClipboard(
-                        Database.shared.integratedBody(
-                            fileID: fid, model: slot.outputModel,
-                            template: slot.template, kind: .all) ?? ""
-                    )
+                    store.copyToClipboard(output(for: slot)?.integrated[.all] ?? "")
                 }
                 Button("Copy transcript") {
-                    store.copyToClipboard(
-                        Database.shared.integratedBody(
-                            fileID: fid, model: slot.outputModel,
-                            template: slot.template, kind: .transcript) ?? ""
-                    )
+                    store.copyToClipboard(output(for: slot)?.integrated[.transcript] ?? "")
                 }
                 Button("Copy summary") {
-                    store.copyToClipboard(
-                        Database.shared.integratedBody(
-                            fileID: fid, model: slot.outputModel,
-                            template: slot.template, kind: .summary) ?? ""
-                    )
+                    store.copyToClipboard(output(for: slot)?.integrated[.summary] ?? "")
                 }
             }
             .menuStyle(.borderlessButton)
             .fixedSize()
         }
     }
+
 }
 
 private struct AddSlotSheet: View {
@@ -4948,9 +5632,9 @@ private struct AddSlotSheet: View {
 
     @State private var name: String = ""
     @State private var model: String = "claude"
-    @State private var modelID: String = Database.fallbackModelIDs["claude"] ?? "claude-opus-4-7"
+    @State private var modelID: String = Database.fallbackModelIDs["claude"] ?? "claude-fable-5"
     @State private var template: String = "integrated"
-    @State private var presets: [ModelPresetVM] = Database.shared.loadModelPresets()
+    @State private var presets: [ModelPresetVM] = []
 
     private let models = ["claude", "codex", "gemini", "grok"]
 
@@ -5020,12 +5704,17 @@ private struct AddSlotSheet: View {
         }
         .padding(20)
         .frame(minWidth: 460)
-        .onAppear {
-            let loaded = Database.shared.loadModelPresets()
+        .task {
+            let initialModel = model
+            let initialModelID = modelID
+            let loaded = await Task.detached(priority: .userInitiated) {
+                Database.shared.loadModelPresets()
+            }.value
+            guard !Task.isCancelled else { return }
             presets = loaded
-            let currentProviderPresets = loaded.filter { $0.provider == model }
-            if let preset = currentProviderPresets.first,
-               modelID.isEmpty || !currentProviderPresets.contains(where: { $0.apiName == modelID }) {
+            // A delayed preset response must not replace an ID the user typed.
+            if model == initialModel, modelID == initialModelID,
+               let preset = loaded.first(where: { $0.provider == model }) {
                 modelID = preset.apiName
             }
         }

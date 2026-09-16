@@ -36,6 +36,10 @@ struct PlaudFileVM: Identifiable, Hashable, FetchableRecord {
     var seenAt: Int64?
     /// LOCAL-ONLY star flag.
     var starred: Bool
+    /// Dual-transcribe pipeline stage (nil = never marked). Drives the ⚡
+    /// indicator in list rows. Only populated by the masterFiles() query;
+    /// the older files(for:) path leaves it nil.
+    let dualStatus: String?
 
     init(row: Row) {
         self.id = row["id"]
@@ -55,6 +59,7 @@ struct PlaudFileVM: Identifiable, Hashable, FetchableRecord {
         // Safe defaults when the columns don't exist yet (pre-migration DB).
         self.seenAt = row["seen_at"]
         self.starred = (row["starred"] as Int64? ?? 0) != 0
+        self.dualStatus = row["dual_status"]
     }
 
     private static func splitList(_ raw: String?) -> [String] {
@@ -176,6 +181,48 @@ struct NoteReferenceVM: Identifiable, Hashable, FetchableRecord {
     }
 }
 
+/// One speaker → real-name candidate from the dual pipeline's proposal step.
+struct SpeakerProposalVM: Identifiable, Hashable, Decodable {
+    let speaker: String
+    var name: String
+    let confidence: Double
+    let evidence: String
+    var id: String { speaker }
+}
+
+/// Dual-transcribe pipeline state for one recording (`dual_pipeline` row).
+struct DualStateVM: Hashable {
+    let fileID: String
+    let status: String  // marked | transcribing | relabel-pending | integrating | vault-ready | vault-sent
+    let proposal: [SpeakerProposalVM]
+    let speakerMap: [String: String]
+    let vaultPath: String?
+    let error: String?
+}
+
+/// The dual pipeline's final artifact pair (cross-analyzed transcript +
+/// comprehensive summary) resolved from data/integrated/.
+struct IntegratedContentVM: Hashable {
+    let fileID: String
+    let label: String  // e.g. "gpt-5.6-sol__integrated"
+    let transcript: String
+    let summary: String
+}
+
+/// Content-reuse mark (`note_reuse` row): channel × status × note.
+struct ReuseMarkVM: Identifiable, Hashable, FetchableRecord {
+    let channel: String
+    let status: String  // flagged | drafted | published
+    let note: String?
+    var id: String { channel }
+
+    init(row: Row) {
+        self.channel = row["channel"]
+        self.status = row["status"] ?? "flagged"
+        self.note = row["note"]
+    }
+}
+
 struct NoteMetadataVM: Hashable {
     let fileID: String
     let title: String?
@@ -242,6 +289,17 @@ final class Database: @unchecked Sendable {
         // SQLITE_BUSY.
         var config = Configuration()
         config.busyMode = .timeout(5)
+        // Read tuning for a ~300MB library on a laptop SSD. `mmap_size` lets
+        // SQLite page the file in via the VM system instead of read(2) per
+        // page; `cache_size` is negative = KiB, so -60000 pins a 60MB page
+        // cache (the whole hot working set: files + note_tags + metadata).
+        // Applied per-connection, which is what `prepareDatabase` is for.
+        config.prepareDatabase { db in
+            try db.execute(sql: "PRAGMA cache_size = -60000")
+            try db.execute(sql: "PRAGMA mmap_size = 536870912")
+            try db.execute(sql: "PRAGMA temp_store = MEMORY")
+            try db.execute(sql: "PRAGMA synchronous = NORMAL")
+        }
         self.pool = try? DatabasePool(path: path, configuration: config)
         ensureMetadataSchema()
     }
@@ -304,8 +362,26 @@ final class Database: @unchecked Sendable {
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (file_id, path)
                 );
+                CREATE TABLE IF NOT EXISTS note_reuse (
+                    file_id TEXT NOT NULL,
+                    channel TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'flagged',
+                    note TEXT,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (file_id, channel)
+                );
+                CREATE TABLE IF NOT EXISTS dual_pipeline (
+                    file_id TEXT PRIMARY KEY,
+                    status TEXT NOT NULL DEFAULT 'marked',
+                    speaker_proposal TEXT,
+                    speaker_map TEXT,
+                    vault_path TEXT,
+                    error TEXT,
+                    updated_at INTEGER NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS note_tags_tag_idx ON note_tags(tag);
                 CREATE INDEX IF NOT EXISTS note_refs_file_idx ON note_references(file_id);
+                CREATE INDEX IF NOT EXISTS note_reuse_channel_idx ON note_reuse(channel, status);
             """)
             let rows = try Row.fetchAll(db, sql: "PRAGMA table_info(note_metadata)")
             let columns = Set(rows.compactMap { row -> String? in row["name"] })
@@ -432,10 +508,12 @@ final class Database: @unchecked Sendable {
     }
 
     private func read<T>(_ block: (GRDB.Database) throws -> T) -> T? {
-        lock.lock(); defer { lock.unlock() }
+        lock.lock()
         tryOpen()
-        guard let pool else { return nil }
-        return try? pool.read(block)
+        let currentPool = pool
+        lock.unlock()
+        guard let currentPool else { return nil }
+        return try? currentPool.read(block)
     }
 
     /// One row of the in-memory master list: a fully-hydrated `PlaudFileVM`
@@ -502,9 +580,11 @@ final class Database: @unchecked Sendable {
                    SELECT GROUP_CONCAT(nt.tag, char(31))
                      FROM note_tags nt
                     WHERE nt.file_id = f.id
-               ) AS all_tags
+               ) AS all_tags,
+               dp.status AS dual_status
           FROM files f
           LEFT JOIN note_metadata nm ON nm.file_id = f.id
+          LEFT JOIN dual_pipeline dp ON dp.file_id = f.id
           LEFT JOIN (
               SELECT file_id,
                      GROUP_CONCAT(folder_id, char(31)) AS agg_folder_ids
@@ -694,7 +774,7 @@ final class Database: @unchecked Sendable {
             let total = try Int.fetchOne(db,
                 sql: "SELECT COUNT(*) FROM files WHERE is_trash = 0") ?? 0
             let cached = try Int.fetchOne(db,
-                sql: "SELECT COUNT(*) FROM file_content") ?? 0
+                sql: "SELECT COUNT(*) FROM file_content fc JOIN files f ON f.id = fc.file_id WHERE f.is_trash = 0") ?? 0
             return (total, cached)
         } ?? (0, 0)
     }
@@ -743,10 +823,10 @@ final class Database: @unchecked Sendable {
     /// the AddSlotSheet initial state — so they never drift apart. Do **not**
     /// derive these from `loadModelPresets()` (that would be circular).
     static let fallbackModelIDs: [String: String] = [
-        "claude": "claude-opus-4-7",
-        "codex": "gpt-5.5",
+        "claude": "claude-fable-5",
+        "codex": "gpt-5.6-sol",
         "gemini": "gemini-3.1-pro-preview",
-        "grok": "grok-4.20-0309-reasoning",
+        "grok": "grok-4.6",
     ]
 
     /// App config shared with the Python CLI. Direct read of `data/config.json`.
@@ -771,11 +851,47 @@ final class Database: @unchecked Sendable {
         var pinnedTags: [String]
     }
 
+    /// `config.json` parsed once and reused until the file's mtime/size
+    /// changes. `outputBaseDir(kind:)` calls this, and that in turn is called
+    /// from view bodies (`integratedExists`, `summaryBody`, the slot cards) —
+    /// so an uncached read meant a disk read + JSON parse several times per
+    /// render pass. The CLI writes this file, hence the stat-based check
+    /// rather than a load-once cache.
+    private struct ConfigCache {
+        let signature: String
+        let config: AppConfig
+    }
+    private var configCache: ConfigCache?
+    private let configLock = NSLock()
+
+    private static func fileSignature(_ path: String) -> String {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        else { return "" }
+        let mtime = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let size = (attrs[.size] as? UInt64) ?? 0
+        return "\(mtime):\(size)"
+    }
+
     func loadAppConfig() -> AppConfig {
         let path = "\(Self.projectRoot)/data/config.json"
+        let signature = Self.fileSignature(path)
+        configLock.lock()
+        if let cached = configCache, cached.signature == signature {
+            configLock.unlock()
+            return cached.config
+        }
+        configLock.unlock()
+        let parsed = parseAppConfig(path: path)
+        configLock.lock()
+        configCache = ConfigCache(signature: signature, config: parsed)
+        configLock.unlock()
+        return parsed
+    }
+
+    private func parseAppConfig(path: String) -> AppConfig {
         let defaults = AppConfig(
             backends: ["claude": "cli", "codex": "cli", "gemini": "cli",
-                       "grok": "api"],
+                       "grok": "cli"],
             models: Self.fallbackModelIDs,
             paths: ["transcripts": "", "summaries": "", "integrated": ""],
             classifyModel: "claude",
@@ -876,45 +992,11 @@ final class Database: @unchecked Sendable {
     /// Returns `nil` (so the caller falls back) when the CLI is unavailable,
     /// exits non-zero, or emits output we can't decode.
     private static func fetchModelPresetsFromCLI() -> [ModelPresetVM]? {
-        let home = NSHomeDirectory()
-        let uvCandidates = [
-            "\(home)/.local/bin/uv",
-            "/opt/homebrew/bin/uv",
-            "/usr/local/bin/uv",
-        ]
-        guard let uvPath = uvCandidates.first(where: {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }) else { return nil }
-
-        let cliPath = [
-            "\(home)/.local/bin",
-            "/opt/homebrew/bin",
-            "/usr/local/bin",
-            "/usr/bin",
-            "/bin",
-            "/usr/sbin",
-            "/sbin",
-        ].joined(separator: ":")
-
-        let process = Process()
-        process.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
-        process.environment = ProcessInfo.processInfo.environment.merging(
-            ["PATH": cliPath, "PYTHONUNBUFFERED": "1"]
-        ) { _, new in new }
-        process.executableURL = URL(fileURLWithPath: uvPath)
-        process.arguments = ["run", "plaud", "models", "--json"]
-
-        let stdout = Pipe()
-        process.standardOutput = stdout
-        process.standardError = Pipe()
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = stdout.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0, !data.isEmpty,
+        guard let process = try? PlaudCommand.makeProcess(args: ["models", "--json"])
+        else { return nil }
+        let result = PlaudProcessRunner.run(process, timeout: 15)
+        let data = Data(result.stdout.utf8)
+        guard result.exitCode == 0, !data.isEmpty,
               let dtos = try? JSONDecoder().decode([ModelPresetDTO].self, from: data)
         else { return nil }
         return dtos.map(\.viewModel)
@@ -923,12 +1005,12 @@ final class Database: @unchecked Sendable {
     private static func fallbackModelPresets() -> [ModelPresetVM] {
         [
             ModelPresetVM(provider: "claude", providerLabel: "Anthropic",
-                          apiName: fallbackModelIDs["claude"] ?? "claude-opus-4-7",
+                          apiName: fallbackModelIDs["claude"] ?? "claude-fable-5",
                           title: "Claude Opus 4.7",
                           description: "Anthropic flagship", status: "fallback",
                           isSOTA: true, sourcePath: ""),
             ModelPresetVM(provider: "codex", providerLabel: "OpenAI",
-                          apiName: fallbackModelIDs["codex"] ?? "gpt-5.5",
+                          apiName: fallbackModelIDs["codex"] ?? "gpt-5.6-sol",
                           title: "GPT-5.5",
                           description: "OpenAI flagship", status: "fallback",
                           isSOTA: true, sourcePath: ""),
@@ -938,7 +1020,7 @@ final class Database: @unchecked Sendable {
                           description: "Google frontier", status: "fallback",
                           isSOTA: true, sourcePath: ""),
             ModelPresetVM(provider: "grok", providerLabel: "xAI",
-                          apiName: fallbackModelIDs["grok"] ?? "grok-4.20-0309-reasoning",
+                          apiName: fallbackModelIDs["grok"] ?? "grok-4.6",
                           title: "Grok 4.20",
                           description: "xAI frontier", status: "fallback",
                           isSOTA: true, sourcePath: ""),
@@ -1068,6 +1150,81 @@ final class Database: @unchecked Sendable {
     private func sanitize(_ s: String) -> String {
         s.map { c in c.isLetter || c.isNumber || c == "-" || c == "_" ? String(c) : "_" }
          .joined()
+    }
+
+    /// One full-content search hit: the recording id plus an FTS snippet
+    /// with the matched span wrapped in « ».
+    struct SearchHit {
+        let fileID: String
+        let snippet: String
+    }
+
+    /// Full-content search over title + transcript + summary, run natively
+    /// against the local SQLite instead of shelling out to `plaud search`
+    /// (which cost ~300ms of `uv run` + Python import per keystroke burst).
+    ///
+    /// Mirrors `core/storage.py::search_recordings` exactly so both surfaces
+    /// rank identically: trigram FTS5 when every term is >= 3 chars, else a
+    /// LIKE scan so 2-char Korean terms still match.
+    func searchContent(_ query: String, limit: Int = 200) -> [SearchHit] {
+        let terms = query.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !terms.isEmpty else { return [] }
+        if terms.allSatisfy({ $0.count >= 3 }) {
+            if let hits = searchFTS(terms: terms, limit: limit) { return hits }
+        }
+        return searchLike(terms: terms, limit: limit)
+    }
+
+    private func searchFTS(terms: [String], limit: Int) -> [SearchHit]? {
+        let match = terms
+            .map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
+            .joined(separator: " AND ")
+        return read { db in
+            try Row.fetchAll(db, sql: """
+                SELECT file_id,
+                       snippet(recording_fts, 2, '«', '»', '…', 12) AS snippet
+                  FROM recording_fts
+                 WHERE recording_fts MATCH ?
+                 ORDER BY bm25(recording_fts, 0.0, 10.0, 1.0)
+                 LIMIT ?
+            """, arguments: [match, limit]).map { row in
+                SearchHit(fileID: row["file_id"] ?? "",
+                          snippet: row["snippet"] ?? "")
+            }
+        }
+    }
+
+    private func searchLike(terms: [String], limit: Int) -> [SearchHit] {
+        return read { db in
+            // Use the decoded spoken-text index for short Korean queries too;
+            // '%' and '_' are search text, not SQL wildcard operators.
+            let indexed = try db.tableExists("recording_fts")
+            let source = indexed ? "recording_fts" :
+                "(SELECT file_id, title, COALESCE(summary_md, '') || char(10) || COALESCE(transcript, '') AS body FROM file_content)"
+            let clause = terms.map { _ in
+                "(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')"
+            }.joined(separator: " AND ")
+            var args: [DatabaseValueConvertible] = []
+            for term in terms {
+                let escaped = term.replacingOccurrences(of: "\\", with: "\\\\")
+                    .replacingOccurrences(of: "%", with: "\\%")
+                    .replacingOccurrences(of: "_", with: "\\_")
+                let like = "%\(escaped)%"
+                args.append(contentsOf: [like, like])
+            }
+            args.append(limit)
+            return try Row.fetchAll(db, sql: """
+                SELECT file_id, title, body
+                  FROM \(source)
+                 WHERE \(clause)
+                 LIMIT ?
+            """, arguments: StatementArguments(args)).map { row in
+                let body: String = row["body"] ?? ""
+                let text: String = body.isEmpty ? (row["title"] ?? "") : body
+                return SearchHit(fileID: row["file_id"] ?? "",
+                                 snippet: String(text.prefix(120)))
+            }
+        } ?? []
     }
 
     func savedSpeakers() -> [Speaker] {
@@ -1206,6 +1363,80 @@ final class Database: @unchecked Sendable {
         return result ?? nil
     }
 
+    /// Newest integrated (Plaud × CMDS cross-analysis) artifact pair for a
+    /// recording, read straight from `data/integrated/{id}/` — same
+    /// resolution as the CLI's integrated-first pickers (newest mtime wins).
+    func integratedContent(for fileID: String) -> IntegratedContentVM? {
+        let dir = URL(fileURLWithPath: "\(outputBaseDir(kind: "integrated"))/\(fileID)")
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]
+        ) else { return nil }
+        let summaries = files.filter { $0.lastPathComponent.hasSuffix(".summary.md") }
+        guard let newest = summaries.max(by: {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            return a < b
+        }) else { return nil }
+        let transcriptURL = URL(fileURLWithPath: newest.path
+            .replacingOccurrences(of: ".summary.md", with: ".transcript.md"))
+        let summary = Self.stripFrontmatter(
+            (try? String(contentsOf: newest, encoding: .utf8)) ?? "")
+        let transcript = Self.stripFrontmatter(
+            (try? String(contentsOf: transcriptURL, encoding: .utf8)) ?? "")
+        guard !summary.isEmpty || !transcript.isEmpty else { return nil }
+        return IntegratedContentVM(
+            fileID: fileID,
+            label: newest.lastPathComponent.replacingOccurrences(of: ".summary.md", with: ""),
+            transcript: transcript,
+            summary: summary
+        )
+    }
+
+    /// Dual-transcribe pipeline state, or nil when the recording isn't marked.
+    func dualState(for fileID: String) -> DualStateVM? {
+        let result: DualStateVM?? = read { db -> DualStateVM? in
+            guard let row = try Row.fetchOne(
+                db, sql: "SELECT * FROM dual_pipeline WHERE file_id = ?",
+                arguments: [fileID]
+            ) else { return nil }
+            var proposal: [SpeakerProposalVM] = []
+            if let json: String = row["speaker_proposal"],
+               let decoded = try? JSONDecoder().decode(
+                   [SpeakerProposalVM].self, from: Data(json.utf8)
+               ) {
+                proposal = decoded
+            }
+            var map: [String: String] = [:]
+            if let json: String = row["speaker_map"],
+               let decoded = try? JSONDecoder().decode(
+                   [String: String].self, from: Data(json.utf8)
+               ) {
+                map = decoded
+            }
+            return DualStateVM(
+                fileID: fileID,
+                status: row["status"] ?? "marked",
+                proposal: proposal,
+                speakerMap: map,
+                vaultPath: row["vault_path"],
+                error: row["error"]
+            )
+        }
+        return result ?? nil
+    }
+
+    func reuseMarks(for fileID: String) -> [ReuseMarkVM] {
+        read { db in
+            try Row.fetchAll(
+                db,
+                sql: "SELECT * FROM note_reuse WHERE file_id = ? ORDER BY channel",
+                arguments: [fileID]
+            ).map(ReuseMarkVM.init(row:))
+        } ?? []
+    }
+
     func noteMetadata(for fileID: String) -> NoteMetadataVM {
         let result: NoteMetadataVM?? = read { db -> NoteMetadataVM? in
             let meta = try Row.fetchOne(db,
@@ -1333,13 +1564,13 @@ final class DatabaseWatcher {
     private var timer: Timer?
     private var lastSignature: String = ""
     private var lifecycleObservers: [NSObjectProtocol] = []
-    private let dbPath: String = Database.shared.path
+    private let dbPath = PlaudCommand.projectRoot + "/data/plaud.db"
 
     /// In WAL mode SQLite writes the journal to `<db>-wal` and the main `.db`
     /// only gets touched on checkpoints. Watching both files (mtime + size)
     /// catches every write within ~1 second.
     private var watchedPaths: [String] {
-        [dbPath, dbPath + "-wal", dbPath + "-shm"]
+        [dbPath, dbPath + "-wal"]
     }
 
     /// Begin watching. Registers app lifecycle observers (once) so the poll

@@ -24,15 +24,18 @@ DEFAULT_CONFIG: dict = {
         "claude": "cli",
         "codex": "cli",
         "gemini": "cli",
-        "grok": "api",
+        # All four default to the vendor CLI's OAuth / subscription session
+        # (Claude Max · ChatGPT · Google · SuperGrok). Switch a provider to
+        # "api" only when you deliberately want metered API-key billing.
+        "grok": "cli",
     },
     "models": {
         # Used only when backend = api. CLI mode picks whatever the CLI
         # defaults to.
-        "claude": "claude-opus-4-7",
-        "codex": "gpt-5.5",
+        "claude": "claude-fable-5",
+        "codex": "gpt-5.6-sol",
         "gemini": "gemini-3.1-pro-preview",
-        "grok": "grok-4.20-0309-reasoning",
+        "grok": "grok-4.6",
     },
     "paths": {
         # Empty string = fall back to the project default.
@@ -63,6 +66,13 @@ DEFAULT_CONFIG: dict = {
     "auto_metadata_limit": 20,
     # Tags the user pinned to the top of the app's Tags sidebar.
     "pinned_tags": [],
+    # Auto-foldering: let the classify model arbitrate when keyword rules are
+    # weak (confidence below the threshold or the default meeting bucket).
+    "classify_llm_assist": True,
+    "classify_llm_threshold": 0.6,
+    # Reasoning effort recorded in vault frontmatter `effort:` for agent-
+    # written notes (frontmatter-standard.md). Informational.
+    "model_effort": "medium",
 }
 
 
@@ -228,3 +238,24 @@ def set_author(name: str) -> None:
     cfg = load()
     cfg["author"] = name
     save(cfg)
+
+
+def classify_llm_assist() -> bool:
+    return bool(load().get("classify_llm_assist", True))
+
+
+def set_classify_llm_assist(enabled: bool) -> None:
+    cfg = load()
+    cfg["classify_llm_assist"] = bool(enabled)
+    save(cfg)
+
+
+def classify_llm_threshold() -> float:
+    try:
+        return float(load().get("classify_llm_threshold", 0.6))
+    except (TypeError, ValueError):
+        return 0.6
+
+
+def model_effort() -> str:
+    return str(load().get("model_effort") or "medium")

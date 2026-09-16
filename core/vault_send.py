@@ -27,6 +27,7 @@ from pathlib import Path
 
 from . import app_config
 from .metadata import (
+    as_list,
     build_recording_snapshot,
     first_nonempty,
     format_cmds_transcript,
@@ -50,7 +51,7 @@ WIKI_VAULT_DIRNAME = "CMDS_LLM_Wiki"
 @dataclass(frozen=True, slots=True)
 class ResolvedContent:
     kind: str  # integrated | summary | plaud | transcript
-    label: str  # artifact label, e.g. "claude-opus-4-8__integrated"
+    label: str  # artifact label, e.g. "claude-fable-5__integrated"
     summary: str
     transcript: str = ""
     source_path: str = ""
@@ -227,6 +228,55 @@ def note_tags(snapshot: dict, note_type: str) -> list[str]:
     return normalize_tags(seed)[:12]
 
 
+def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
+    """CMDS/index/keywords/related/speakers for a note, from stored metadata
+    when present, else from the deterministic classifier."""
+    from .classification import classify_snapshot
+
+    existing = storage.get_note_metadata(file_id)
+    meta: dict = {}
+    if existing and existing["metadata_json"]:
+        try:
+            import json as _json
+
+            meta = _json.loads(existing["metadata_json"]) or {}
+        except Exception:
+            meta = {}
+    cls = classify_snapshot(snapshot)
+    cmds = str(meta.get("cmds") or cls.cmds or "")
+    index = str(meta.get("index") or cls.index or "")
+    keywords = [str(k) for k in (snapshot.get("keywords") or [])][:12]
+    related = [str(r) for r in (meta.get("related") or [])]
+    related_paths: list[dict[str, str]] = []
+    try:
+        from .vault_index import related_notes
+
+        related_paths = related_notes([*keywords, *as_list(meta.get("key_topics")), *related])
+        if not related:
+            related = [n["title"] for n in related_paths]
+    except Exception:
+        related_paths = []
+    speakers = [s for s in str(snapshot.get("speakers") or "").replace(",", " ").split() if s]
+    if not speakers:
+        try:
+            from .dual_pipeline import cmds_speakers
+
+            speakers = cmds_speakers(storage, file_id)
+        except Exception:
+            speakers = []
+    aliases = [str(a) for a in as_list(meta.get("aliases"))][:3]
+    return {
+        "cmds": cmds,
+        "index": index,
+        "keywords": keywords,
+        "related": related,
+        "related_paths": related_paths,
+        "speakers": speakers,
+        "aliases": aliases,
+        "tags": [str(t) for t in as_list(meta.get("tags"))],
+    }
+
+
 def _note_type(storage: Storage, file_id: str, snapshot: dict) -> str:
     existing = storage.get_note_metadata(file_id)
     if existing and existing["note_type"]:
@@ -246,35 +296,52 @@ def build_note_markdown(
     with_transcript: bool,
     author: str = "",
     now: datetime | None = None,
+    reuse_channels: list[str] | None = None,
+    cmds: str = "",
+    index: str = "",
+    speakers: list[str] | None = None,
+    keywords: list[str] | None = None,
+    related: list[str] | None = None,
+    model: str = "",
+    aliases: list[str] | None = None,
+    source_vault: str = "",
+    main_vault_related: list[dict[str, str]] | None = None,
 ) -> str:
-    """Deterministic CMDS-style note (direct mode) — frontmatter conventions
-    follow the vault-meeting-note template: English quoted description, plain
-    tags, ISO dates, source/plaud_id fields."""
-    now = now or datetime.now()
-    created = now.strftime("%Y-%m-%d %H:%M")
-    kind_label = f"{resolved.kind} ({resolved.label})" if resolved.label else resolved.kind
+    """Deterministic CMDS-style note (direct mode). Frontmatter follows the
+    vault's frontmatter-standard (7 required fields + CMDS/index + Plaud lane
+    extras) via `core.frontmatter.CmdsFrontmatter`."""
+    from .frontmatter import CmdsFrontmatter, iso_minute, model_label
 
-    lines = ["---"]
-    lines.append(
-        "description: "
-        + _yaml_quote(f"Plaud recording note: {title}. Generated from the {resolved.kind} output.")
+    now = now or datetime.now()
+    kind_label = f"{resolved.kind} ({resolved.label})" if resolved.label else resolved.kind
+    fm = CmdsFrontmatter(
+        type=note_type,
+        aliases=list(aliases or []),
+        description=f"Plaud recording note: {title}. Generated from the {resolved.kind} output.",
+        author=author,
+        model=model_label(model) if model else "",
+        date_created=iso_minute(now),
+        date=date,
+        tags=tags,
+        cmds=cmds,
+        index=index,
+        status="inProgress",
+        source="plaud",
+        plaud_id=file_id,
+        speakers=list(speakers or []),
+        keywords=list(keywords or []),
+        related=[] if source_vault else list(related or []),
+        reuse_channels=list(reuse_channels or []),
+        source_vault=source_vault,
+        main_vault_related=list(main_vault_related or []),
+        extra={"content_kind": kind_label},
     )
-    if author:
-        lines.append("author:")
-        lines.append(f'  - "[[{author}]]"')
-    lines.append(f"date created: {created}")
-    lines.append(f"date: {date}")
-    lines.append(f"type: {note_type}")
-    lines.append("status: inProgress")
-    lines.append("source: plaud")
-    lines.append(f"plaud_id: {file_id}")
-    lines.append(f"content_kind: {kind_label}")
-    lines.append("tags:")
-    lines.extend(f"  - {t}" for t in tags)
-    lines.append("---")
+    lines = fm.lines()
     lines.append("")
     lines.append(f"> [!info] Plaud 녹음 · {date}")
     lines.append(f"> [web.plaud.ai](https://web.plaud.ai/file/{file_id}) · `{file_id}`")
+    if speakers:
+        lines.append(f"> 참석자: {' '.join(f'[[{s}]]' for s in speakers)}")
     lines.append("")
     if resolved.summary:
         lines.append(resolved.summary)
@@ -284,6 +351,21 @@ def build_note_markdown(
             lines.append("## Transcript")
             lines.append("")
         lines.append(resolved.transcript)
+    if related and not source_vault:
+        lines.append("")
+        lines.append("## 관련 노트")
+        lines.append("")
+        lines.extend(f"- [[{r}]]" for r in related)
+    elif main_vault_related and source_vault:
+        from .frontmatter import advanced_uri_link
+
+        lines.append("")
+        lines.append("## 관련 노트 (main vault)")
+        lines.append("")
+        lines.extend(
+            "- " + advanced_uri_link(n.get("title", ""), source_vault, n.get("rel_path", ""))
+            for n in main_vault_related
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -365,6 +447,19 @@ def build_filing_prompt(
 {transcript_block}"""
 
 
+def _ctx_kwargs(ctx: dict) -> dict:
+    return {
+        "cmds": ctx.get("cmds", ""),
+        "index": ctx.get("index", ""),
+        "speakers": ctx.get("speakers") or [],
+        "keywords": ctx.get("keywords") or [],
+        "related": ctx.get("related") or [],
+        "aliases": ctx.get("aliases") or [],
+        "source_vault": ctx.get("source_vault", ""),
+        "main_vault_related": ctx.get("related_paths") or [],
+    }
+
+
 def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
     stem = f"{date_compact}_{safe_filename(title) or 'plaud-note'}"
     path = folder / f"{stem}.md"
@@ -431,6 +526,17 @@ def vault_send(
     note_type = _note_type(storage, file_id, snapshot)
     tags = note_tags(snapshot, note_type)
     author = app_config.author()
+    from .reuse import reuse_channels_for_frontmatter
+
+    reuse_channels = reuse_channels_for_frontmatter(storage, file_id)
+    ctx = note_context(storage, file_id, snapshot)
+    if ctx["tags"]:
+        tags = normalize_tags([*tags, *ctx["tags"]])[:20]
+    # Wiki (satellite) vault: `[[…]]` cannot cross vaults, so main-vault
+    # relations become advanced-uri links under `mainVaultRelated:`.
+    if to == "wiki":
+        main_vault = app_config.obsidian_vault()
+        ctx["source_vault"] = main_vault.name if main_vault else ""
 
     if via == "claude":
         from .summarize import model_available, model_unavailable_message, run_model
@@ -477,6 +583,9 @@ def vault_send(
                 ),
                 with_transcript=False,
                 author=author,
+                reuse_channels=reuse_channels,
+                model=provider,
+                **_ctx_kwargs(ctx),
             )
     else:
         note_text = build_note_markdown(
@@ -488,6 +597,8 @@ def vault_send(
             resolved=resolved,
             with_transcript=with_transcript,
             author=author,
+            reuse_channels=reuse_channels,
+            **_ctx_kwargs(ctx),
         )
 
     dest = dest.strip() or DEFAULT_DEST

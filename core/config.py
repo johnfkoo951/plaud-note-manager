@@ -177,9 +177,10 @@ def _maybe_auto_refresh(env_path: Path) -> None:
         pass
 
 
-def load_config(env_file: Path | None = None) -> PlaudConfig:
+def load_config(env_file: Path | None = None, *, auto_refresh: bool = True) -> PlaudConfig:
     env_path = resolve_env_path(env_file)
-    _maybe_auto_refresh(env_path)
+    if auto_refresh:
+        _maybe_auto_refresh(env_path)
 
     # Migrate legacy plaintext credentials before python-dotenv can copy them
     # into the process environment.  Keychain is authoritative once present.

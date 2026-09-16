@@ -93,6 +93,62 @@ def test_normalize_tag_removes_hashes_and_spaces() -> None:
     assert normalize_tags(["AI, 회의록"]) == ["AI", "회의록"]
 
 
+def test_partial_metadata_update_preserves_lifecycle(tmp_path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_note_metadata(
+        file_id="f", status="done", usage_status="vault-linked", title="Before", now=1
+    )
+    storage.upsert_note_metadata(file_id="f", title="After", now=2)
+    row = storage.get_note_metadata("f")
+    assert (row["status"], row["usage_status"]) == ("done", "vault-linked")
+    assert row["title"] == "After"
+    storage.upsert_note_metadata(file_id="new", title="New", now=2)
+    row = storage.get_note_metadata("new")
+    assert (row["status"], row["usage_status"]) == ("unread", "unused")
+
+
+def test_note_folder_can_be_cleared(tmp_path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_note_metadata(file_id="f", folder_id="a", folder_name="A", now=1)
+    storage.update_note_folder("f", folder_id=None, folder_name=None, now=2)
+    row = storage.get_note_metadata("f")
+    assert row["folder_id"] is None and row["folder_name"] is None
+
+
+def test_batch_sync_keeps_local_state_and_updates_cloud_fields(tmp_path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_file(PlaudFile(id="f", filename="Before"), now=1)
+    storage.mark_seen("f", now=2)
+    storage.set_starred("f", True)
+    storage.mark_downloaded("f", tmp_path / "audio.mp3", now=2)
+    storage.upsert_files(
+        [PlaudFile(id="f", filename="After"), PlaudFile(id="g", filename="New")],
+        now=3,
+    )
+    row = storage.get_file_row("f")
+    assert row["filename"] == "After"
+    assert (row["seen_at"], row["starred"], row["status"]) == (2, 1, "downloaded")
+    assert storage.get_file_row("g")["filename"] == "New"
+
+
+def test_regenerating_metadata_keeps_completed_lifecycle(tmp_path, monkeypatch) -> None:
+    from core import metadata, vault_index
+
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_file(PlaudFile(id="f", filename="회의 녹음"), now=1)
+    storage.save_content(
+        FileContent(file_id="f", summaries=[SummaryBlock(kind="auto_sum_note", body_md="회의")]),
+        now=1,
+    )
+    storage.upsert_note_metadata(file_id="f", status="done", usage_status="archived", now=1)
+    monkeypatch.setattr(metadata, "integrated_dir", lambda _: tmp_path)
+    monkeypatch.setattr(vault_index, "related_wikilinks", lambda _: [])
+    result = metadata.generate_note_metadata(storage, "f", vault_path=tmp_path, use_ai=False)
+    assert result["status"] == "done" and result["usage_status"] == "archived"
+    row = storage.get_note_metadata("f")
+    assert row["status"] == "done" and row["usage_status"] == "archived"
+
+
 def test_write_meeting_note_fallback_records_reference(tmp_path) -> None:
     storage = Storage(tmp_path / "plaud.db")
     now = int(time.time())

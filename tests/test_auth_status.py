@@ -56,7 +56,7 @@ def test_human_duration():
 
 
 def test_unconfigured(monkeypatch):
-    def boom():
+    def boom(**_):
         raise ConfigError("missing creds")
 
     monkeypatch.setattr(auth_mod, "load_config", boom)
@@ -76,7 +76,7 @@ def test_valid_token(monkeypatch):
             "role": "admin",
         }
     )
-    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
     st = auth_status(now=now)
     assert st.state == "valid"
     assert st.workspace_id == "ws_tes…pc9"  # masked at source
@@ -89,19 +89,19 @@ def test_valid_token(monkeypatch):
 def test_expiring_soon(monkeypatch):
     now = 1_000_000
     token = _make_jwt({"exp": now + 600, "iat": now - 100})  # < 2h window
-    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
     assert auth_status(now=now).state == "expiring"
 
 
 def test_expired(monkeypatch):
     now = 1_000_000
     token = _make_jwt({"exp": now - 10, "iat": now - 90_000})
-    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
     assert auth_status(now=now).state == "expired"
 
 
 def test_non_jwt_token_is_unknown(monkeypatch):
-    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config("opaque-token"))
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config("opaque-token"))
     st = auth_status(now=1000)
     assert st.configured is True
     assert st.state == "unknown"
@@ -134,7 +134,7 @@ def _stub_client(monkeypatch, *, error: Exception | None = None) -> dict:
 def test_live_probe_401_is_rejected(monkeypatch):
     now = 1_000_000
     token = _make_jwt({"exp": now + 50_000, "iat": now - 100})
-    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
     _stub_client(monkeypatch, error=PlaudAPIError("Plaud HTTP 401", status_code=401))
     st = auth_status(live=True, now=now)
     assert st.live_state == "rejected"
@@ -144,7 +144,7 @@ def test_live_probe_401_is_rejected(monkeypatch):
 def test_live_probe_network_error_is_unreachable(monkeypatch):
     now = 1_000_000
     token = _make_jwt({"exp": now + 50_000, "iat": now - 100})
-    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config(token))
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
     _stub_client(monkeypatch, error=PlaudAPIError("network down"))  # no status_code
     st = auth_status(live=True, now=now)
     assert st.live_state == "unreachable"
@@ -152,10 +152,139 @@ def test_live_probe_network_error_is_unreachable(monkeypatch):
 
 
 def test_undecodable_jwt_still_runs_live_probe(monkeypatch):
-    monkeypatch.setattr(auth_mod, "load_config", lambda: _fake_config("opaque-token"))
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config("opaque-token"))
     record = _stub_client(monkeypatch)
     st = auth_status(live=True, now=1000)
     assert record["calls"] == 1  # probe ran despite the opaque token
     assert st.state == "unknown"
     assert st.live_state == "ok"
     assert st.live_ok is True
+
+
+# --- Server-verdict memo ------------------------------------------------------
+#
+# Regression cover for the 2026-08-19 failure: a web.plaud.ai sign-in rotated
+# the workspace chain, so the server started answering -419 while the stored
+# JWT still claimed ~23h of life. Every layer read the JWT and believed it —
+# `auth --json` said "valid", the app's dot stayed green, and `auth-recover`'s
+# precheck returned "fresh" and stopped without recovering. The memo below is
+# what makes the server's verdict outrank the token's own claim.
+
+
+def _memo_at(tmp_path, monkeypatch):
+    """Point the rejection memo at a temp file, never the real data dir."""
+    path = tmp_path / "auth_state.json"
+    monkeypatch.setattr(auth_mod, "REJECTION_FILE", path)
+    return path
+
+
+def test_recorded_rejection_overrides_a_still_valid_jwt(tmp_path, monkeypatch):
+    _memo_at(tmp_path, monkeypatch)
+    token = _make_jwt({"iat": 1000, "exp": 1000 + 86400, "wid": "ws_x", "mid": "mem_y"})
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
+
+    # Before the server says anything, the JWT is trusted.
+    assert auth_status(now=2000).state == "valid"
+
+    auth_mod.record_auth_rejection(status=-419, now=1500)
+    status = auth_status(now=2000)
+    assert status.state == "rejected"
+    assert "server rejected" in status.detail
+
+
+def test_rejection_older_than_the_token_is_ignored(tmp_path, monkeypatch):
+    """A memo from the *previous* credential must not condemn its replacement."""
+    _memo_at(tmp_path, monkeypatch)
+    auth_mod.record_auth_rejection(status=-419, now=500)
+    token = _make_jwt({"iat": 1000, "exp": 1000 + 86400})
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
+
+    assert auth_status(now=2000).state == "valid"
+
+
+def test_clear_auth_rejection_restores_trust(tmp_path, monkeypatch):
+    _memo_at(tmp_path, monkeypatch)
+    token = _make_jwt({"iat": 1000, "exp": 1000 + 86400})
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
+
+    auth_mod.record_auth_rejection(status=-419, now=1500)
+    assert auth_status(now=2000).state == "rejected"
+    auth_mod.clear_auth_rejection()
+    assert auth_status(now=2000).state == "valid"
+    assert auth_mod.auth_rejected_at() is None
+
+
+def test_expired_state_is_not_masked_by_the_memo(tmp_path, monkeypatch):
+    """An outright expiry stays "expired" — it has its own recovery path."""
+    _memo_at(tmp_path, monkeypatch)
+    token = _make_jwt({"iat": 1000, "exp": 1100})
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
+    auth_mod.record_auth_rejection(status=-419, now=1500)
+
+    assert auth_status(now=2000).state == "expired"
+
+
+def test_minus_420_counts_as_an_auth_rejection():
+    """-420 (refresh token refused) used to be classified as transient, which
+    kept the recovery ladder from escalating to a browser re-harvest."""
+    assert PlaudAPIError("x", api_status=-420).is_auth_rejection
+    assert PlaudAPIError("x", api_status=-419).is_auth_rejection
+    assert not PlaudAPIError("x", api_status=-1).is_auth_rejection
+
+
+def test_late_old_request_rejection_cannot_poison_new_credentials(monkeypatch):
+    old = _make_jwt({"iat": 1000, "exp": 90000, "wid": "ws"})
+    new = _make_jwt({"iat": 2000, "exp": 90000, "wid": "ws"})
+    auth_mod.record_auth_rejection(status=-419, now=2100, authorization=f"Bearer {old}")
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(new))
+    assert auth_status(now=2200).state == "valid"
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(old))
+    assert auth_status(now=2200).state == "rejected"
+    memo = auth_mod.REJECTION_FILE.read_text()
+    assert old not in memo and new not in memo
+
+
+def test_refresh_rejection_does_not_replace_access_verdict():
+    auth_mod.record_auth_rejection(status=-419, now=1000)
+    auth_mod.record_auth_rejection(status=-420, now=2000, scope="refresh")
+    assert auth_mod.auth_rejected_at() == 1000
+    assert auth_mod.auth_rejected_at(scope="refresh") == 2000
+
+
+def test_decodable_jwt_array_is_rejected_as_invalid_payload():
+    assert _decode_jwt_payload(_make_jwt(["not", "claims"])) is None
+
+
+def test_offline_status_never_runs_automatic_renewal(monkeypatch):
+    calls = []
+    token = _make_jwt({"iat": 1, "exp": 10000})
+
+    def config(**kwargs):
+        calls.append(kwargs)
+        return _fake_config(token)
+
+    monkeypatch.setattr(auth_mod, "load_config", config)
+    assert auth_status(now=9999).state == "expiring"
+    assert calls == [{"auto_refresh": False}]
+
+
+def test_successful_live_probe_retires_matching_access_rejection(monkeypatch):
+    token = _make_jwt({"iat": 1000, "exp": 90000})
+    auth_mod.record_auth_rejection(status=-419, now=1500, authorization=f"bearer {token}")
+    monkeypatch.setattr(auth_mod, "load_config", lambda **_: _fake_config(token))
+    _stub_client(monkeypatch)
+    assert auth_status(now=2000, live=True).state == "valid"
+    assert auth_mod.auth_rejected_at() is None
+
+
+def test_store_unavailable_is_not_misreported_as_logged_out(monkeypatch):
+    from core.secret_store import CredentialStoreError
+
+    def config(**kwargs):
+        raise ConfigError("credentials unavailable") from CredentialStoreError("lock denied")
+
+    monkeypatch.setattr(auth_mod, "load_config", config)
+    status = auth_status()
+    assert status.state == "store_unavailable"
+    assert status.auto_refresh == "store_unavailable"
+    assert "Authenticate" not in status.detail

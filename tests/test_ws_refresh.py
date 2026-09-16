@@ -202,14 +202,21 @@ def test_select_workspace_entry_rules() -> None:
 
 def test_capture_preserves_ws_keys_and_clears_stale_cookie(tmp_path: Path) -> None:
     env = tmp_path / ".env"
-    _seed_env(env, auth_exp=NOW - 10, extra={"PLAUD_COOKIE": "old-cookie"})
+    _seed_env(
+        env,
+        auth_exp=NOW - 10,
+        extra={
+            "PLAUD_COOKIE": "old-cookie",
+            "PLAUD_WS_REFRESH_EXPIRES_AT": str(NOW + 86_400),
+        },
+    )
     captured = {
         "PLAUD_AUTHORIZATION": "bearer " + _make_jwt({"exp": NOW + 86_400, "wid": "ws_abc"}),
         "PLAUD_X_DEVICE_ID": "dev-2",
         "PLAUD_X_PLD_USER": "user-2",
         "PLAUD_BASE_URL": "https://api-apne1.plaud.ai",
     }
-    update_env_file(credential_env_updates(captured, env), env)
+    update_env_file(credential_env_updates(captured, env, now=NOW), env)
     values = read_env_file(env)
     assert values["PLAUD_WS_REFRESH_TOKEN"] == "refresh-1"  # headless refresh survives
     assert "PLAUD_COOKIE" not in values  # stale cookie does not outlive the login
@@ -218,15 +225,79 @@ def test_capture_preserves_ws_keys_and_clears_stale_cookie(tmp_path: Path) -> No
 
 def test_capture_drops_ws_keys_when_workspace_changes(tmp_path: Path) -> None:
     env = tmp_path / ".env"
-    _seed_env(env, auth_exp=NOW - 10)
+    _seed_env(
+        env,
+        auth_exp=NOW - 10,
+        extra={"PLAUD_WS_REFRESH_EXPIRES_AT": str(NOW + 86_400)},
+    )
     captured = {
         "PLAUD_AUTHORIZATION": "bearer " + _make_jwt({"exp": NOW + 86_400, "wid": "ws_OTHER"}),
         "PLAUD_X_DEVICE_ID": "dev-2",
         "PLAUD_X_PLD_USER": "user-2",
     }
-    update_env_file(credential_env_updates(captured, env), env)
+    update_env_file(credential_env_updates(captured, env, now=NOW), env)
     values = read_env_file(env)
     assert "PLAUD_WS_REFRESH_TOKEN" not in values
+    assert "PLAUD_WORKSPACE_ID" not in values
+
+
+def test_capture_drops_ws_keys_when_candidate_workspace_is_opaque(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    _seed_env(
+        env,
+        auth_exp=NOW - 10,
+        extra={"PLAUD_WS_REFRESH_EXPIRES_AT": str(NOW + 86_400)},
+    )
+    captured = {
+        "PLAUD_AUTHORIZATION": "bearer opaque-token",
+        "PLAUD_X_DEVICE_ID": "dev-2",
+    }
+
+    update_env_file(credential_env_updates(captured, env, now=NOW), env)
+
+    values = read_env_file(env)
+    assert "PLAUD_WS_REFRESH_TOKEN" not in values
+    assert "PLAUD_WS_REFRESH_EXPIRES_AT" not in values
+    assert "PLAUD_WORKSPACE_ID" not in values
+
+
+def test_capture_drops_matching_ws_keys_after_refresh_horizon(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    _seed_env(
+        env,
+        auth_exp=NOW - 10,
+        extra={"PLAUD_WS_REFRESH_EXPIRES_AT": str(NOW - 1)},
+    )
+    captured = {
+        "PLAUD_AUTHORIZATION": "bearer " + _make_jwt({"exp": NOW + 86_400, "wid": "ws_abc"}),
+        "PLAUD_X_DEVICE_ID": "dev-2",
+    }
+
+    update_env_file(credential_env_updates(captured, env, now=NOW), env)
+
+    values = read_env_file(env)
+    assert "PLAUD_WS_REFRESH_TOKEN" not in values
+    assert "PLAUD_WS_REFRESH_EXPIRES_AT" not in values
+    assert "PLAUD_WORKSPACE_ID" not in values
+
+
+def test_capture_drops_ws_keys_for_expired_access_candidate(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    _seed_env(
+        env,
+        auth_exp=NOW + 86_400,
+        extra={"PLAUD_WS_REFRESH_EXPIRES_AT": str(NOW + 86_400)},
+    )
+    captured = {
+        "PLAUD_AUTHORIZATION": "bearer " + _make_jwt({"exp": NOW - 1, "wid": "ws_abc"}),
+        "PLAUD_X_DEVICE_ID": "dev-2",
+    }
+
+    update_env_file(credential_env_updates(captured, env, now=NOW), env)
+
+    values = read_env_file(env)
+    assert "PLAUD_WS_REFRESH_TOKEN" not in values
+    assert "PLAUD_WS_REFRESH_EXPIRES_AT" not in values
     assert "PLAUD_WORKSPACE_ID" not in values
 
 
@@ -241,7 +312,7 @@ def test_capture_arms_from_workspace_list(tmp_path: Path) -> None:
     ws_list = json.dumps(
         [{"workspaceId": "ws_abc", "refreshToken": "fresh-tok", "domain": "api-eu1.plaud.ai"}]
     )
-    updates = credential_env_updates(captured, env, workspace_list_json=ws_list)
+    updates = credential_env_updates(captured, env, workspace_list_json=ws_list, now=NOW)
     update_env_file(updates, env)
     values = read_env_file(env)
     assert values["PLAUD_WS_REFRESH_TOKEN"] == "fresh-tok"
@@ -251,6 +322,34 @@ def test_capture_arms_from_workspace_list(tmp_path: Path) -> None:
         credential_env_updates(captured, env, workspace_list_json="oops")["PLAUD_X_DEVICE_ID"]
         == "dev-2"
     )
+
+
+def test_capture_refuses_expired_workspace_list_refresh_candidate(tmp_path: Path) -> None:
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW - 10, ws_token=None)
+    captured = {
+        "PLAUD_AUTHORIZATION": "bearer " + _make_jwt({"exp": NOW + 86_400, "wid": "ws_abc"}),
+        "PLAUD_X_DEVICE_ID": "dev-2",
+    }
+    ws_list = json.dumps(
+        [
+            {
+                "workspaceId": "ws_abc",
+                "refreshToken": "expired-refresh",
+                "refreshExpiresAt": NOW - 1,
+            }
+        ]
+    )
+
+    update_env_file(
+        credential_env_updates(captured, env, workspace_list_json=ws_list, now=NOW),
+        env,
+    )
+
+    values = read_env_file(env)
+    assert "PLAUD_WS_REFRESH_TOKEN" not in values
+    assert "PLAUD_WS_REFRESH_EXPIRES_AT" not in values
+    assert "PLAUD_WORKSPACE_ID" not in values
 
 
 # ------------------------------------------------ refresh_workspace_token
@@ -492,3 +591,173 @@ def test_env_writer_neutralizes_newline_smuggling(tmp_path: Path) -> None:
     write_env_file({"A": "evil\nB=injected", "C": "after"}, env)
     values = read_env_file(env)
     assert values == {"A": "evilB=injected", "C": "after"}  # no structural split
+
+
+def test_only_if_needed_does_not_short_circuit_after_a_server_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`only_if_needed` compares the token's own `exp` against a threshold.
+
+    That claim is worthless once the server has rejected the token — and
+    trusting it is precisely what made `auth-recover` report "nothing to do"
+    on 2026-08-19 while every API call came back -419. With a rejection on
+    record, the refresh must actually go to the server.
+    """
+    import core.auth_status as auth_mod
+
+    _clear_plaud_env(monkeypatch)
+    monkeypatch.setattr(auth_mod, "REJECTION_FILE", tmp_path / "auth_state.json")
+    auth_mod.record_auth_rejection(status=-419, now=NOW - 60)
+
+    env = tmp_path / ".env"
+    # A token well past the short-circuit threshold: without the memo this
+    # returns "fresh" without touching the network (see the test above).
+    _seed_env(env, auth_exp=NOW + REFRESH_WHEN_REMAINING + 3600)
+
+    calls: list = []
+    monkeypatch.setattr(
+        ws_mod.httpx, "post", _fake_post({"status": -420, "msg": "nope"}, calls=calls)
+    )
+
+    outcome = refresh_workspace_token(env_path=env, now=NOW, only_if_needed=True)
+
+    assert calls, "refresh must reach the server despite the fresh-looking JWT"
+    # -420 is a rejection, so the ladder can climb to the browser re-harvest
+    # instead of writing it off as a transient outage.
+    assert outcome.status == "rejected"
+
+
+def test_ensure_fresh_token_reaches_locked_refresh_after_server_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The outer cheap precheck must not hide the rejection-aware inner path."""
+    import core.auth_status as auth_mod
+
+    _clear_plaud_env(monkeypatch)
+    monkeypatch.setenv("PLAUD_AUTO_REFRESH", "1")
+    auth_mod.record_auth_rejection(status=-419, now=NOW - 60)
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW + REFRESH_WHEN_REMAINING + 3600)
+    calls: list = []
+    monkeypatch.setattr(ws_mod.httpx, "post", _fake_post({"status": -420}, calls=calls))
+
+    outcome = ws_mod.ensure_fresh_token(env_path=env, now=NOW)
+
+    assert calls
+    assert outcome is not None and outcome.status == "rejected"
+
+
+def test_minus_420_disarms_dead_refresh_token_for_browser_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rotated-away token must not remain 'ready' or shadow a new capture."""
+    _clear_plaud_env(monkeypatch)
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW - 10)
+    monkeypatch.setattr(ws_mod.httpx, "post", _fake_post({"status": -420}))
+
+    outcome = refresh_workspace_token(env_path=env, now=NOW)
+
+    assert outcome.status == "rejected"
+    values = read_env_file(env)
+    assert "PLAUD_WS_REFRESH_TOKEN" not in values
+    assert "PLAUD_WS_REFRESH_EXPIRES_AT" not in values
+    assert values["PLAUD_WORKSPACE_ID"] == "ws_abc"
+
+
+def test_successful_refresh_clears_the_rejection_memo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new authorization retires the verdict passed on its predecessor."""
+    import core.auth_status as auth_mod
+
+    _clear_plaud_env(monkeypatch)
+    monkeypatch.setattr(auth_mod, "REJECTION_FILE", tmp_path / "auth_state.json")
+    auth_mod.record_auth_rejection(status=-419, now=NOW - 60)
+
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW - 10)
+    monkeypatch.setattr(
+        ws_mod.httpx,
+        "post",
+        _fake_post(
+            {
+                "status": 0,
+                "data": {
+                    "workspace_token": _make_jwt({"exp": NOW + 86400, "wid": "ws_abc"}),
+                    "refresh_token": "refresh-2",
+                    "expires_in": 86400,
+                },
+            }
+        ),
+    )
+
+    outcome = refresh_workspace_token(env_path=env, now=NOW)
+
+    assert outcome.status == "ok"
+    assert auth_mod.auth_rejected_at() is None
+
+
+@pytest.mark.parametrize("response_status", [-420, -419])
+def test_stale_bootstrap_candidate_preserves_existing_pair_and_access_verdict(
+    tmp_path, monkeypatch, response_status
+):
+    import core.auth_status as auth_mod
+
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW + 86400)
+    original = env.read_bytes()
+    monkeypatch.setattr(ws_mod.httpx, "post", _fake_post({"status": response_status}))
+    candidate = json.dumps([{"workspaceId": "ws_abc", "refreshToken": "stale-browser"}])
+    outcome = bootstrap_workspace(candidate, env_path=env, now=NOW)
+    assert outcome.status == "rejected"
+    assert env.read_bytes() == original
+    assert auth_mod.auth_rejected_at() is None
+    assert auth_mod.auth_rejected_at(scope="refresh") is None
+
+
+def test_bootstrap_network_outage_never_installs_unverified_candidate(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW + 86400)
+    original = env.read_bytes()
+
+    def offline(*args, **kwargs):
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(ws_mod.httpx, "post", offline)
+    candidate = json.dumps([{"workspaceId": "ws_abc", "refreshToken": "browser-copy"}])
+    assert bootstrap_workspace(candidate, env_path=env, now=NOW).status == "unreachable"
+    assert env.read_bytes() == original
+
+
+def test_refresh_rejection_does_not_mark_still_valid_access_rejected(tmp_path, monkeypatch):
+    import core.auth_status as auth_mod
+
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW + 86400)
+    authorization = read_env_file(env)["PLAUD_AUTHORIZATION"]
+    monkeypatch.setattr(ws_mod.httpx, "post", _fake_post({"status": -420}))
+    assert refresh_workspace_token(env_path=env, now=NOW).status == "rejected"
+    assert auth_mod.auth_rejected_at(authorization) is None
+    assert auth_mod.auth_rejected_at(authorization, scope="refresh") == NOW
+    assert read_env_file(env)["PLAUD_AUTHORIZATION"] == authorization
+
+
+def test_newer_capture_without_workspace_export_keeps_usable_refresh(tmp_path):
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW + 86400)
+    captured = {
+        "PLAUD_AUTHORIZATION": "bearer "
+        + _make_jwt({"iat": NOW, "exp": NOW + 86400, "wid": "ws_abc"})
+    }
+    updates = credential_env_updates(captured, env, replace_workspace_refresh=True, now=NOW)
+    assert "PLAUD_WS_REFRESH_TOKEN" not in updates
+
+
+def test_refresh_refuses_expired_server_pair_without_replacing_credentials(tmp_path):
+    env = tmp_path / ".env"
+    _seed_env(env, auth_exp=NOW + 86400)
+    original = env.read_bytes()
+    result = RefreshResult(_make_jwt({"exp": NOW - 1, "wid": "ws_abc"}), 86400, "next", None)
+    assert apply_refresh_result(result, env, now=NOW).status == "rejected"
+    assert env.read_bytes() == original

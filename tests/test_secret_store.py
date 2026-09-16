@@ -68,6 +68,15 @@ def test_keychain_bundle_round_trip_is_one_atomic_blob(
     assert fake_keychain.stored == fake_keychain.replacements[0]
 
 
+def test_lock_permission_error_becomes_structured_store_error(tmp_path, monkeypatch):
+    def denied(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(store_mod.os, "open", denied)
+    with pytest.raises(CredentialStoreError, match="cannot open its lock"):
+        load_credential_values(tmp_path / ".env")
+
+
 def test_legacy_env_migrates_only_after_verified_keychain_write(
     tmp_path: Path, fake_keychain: FakeKeychain
 ) -> None:

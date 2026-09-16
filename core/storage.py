@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Literal
 
 from .config import PROJECT_ROOT
 from .models import FileContent, FileStatus, Folder, PlaudFile
@@ -15,7 +16,9 @@ from .tags import normalize_tags
 DEFAULT_DB = PROJECT_ROOT / "data" / "plaud.db"
 
 # Bump when SCHEMA_TABLES/_migrate change; gates the migration fast-path.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 4
+CONTENT_EMPTY_RETRY_SECONDS = 60 * 60
+CONTENT_FAILURE_RETRY_SECONDS = 5 * 60
 
 SCHEMA_TABLES = """
 CREATE TABLE IF NOT EXISTS files (
@@ -57,6 +60,13 @@ CREATE TABLE IF NOT EXISTS file_content (
     keywords     TEXT,
     fetched_at   INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS content_fetch_attempts (
+    file_id          TEXT PRIMARY KEY,
+    source_edit_time INTEGER,
+    outcome          TEXT NOT NULL CHECK (outcome IN ('empty', 'failed')),
+    attempted_at     INTEGER NOT NULL,
+    retry_after      INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS cmds_transcripts (
     file_id     TEXT NOT NULL,
     model       TEXT NOT NULL,
@@ -97,6 +107,23 @@ CREATE TABLE IF NOT EXISTS note_tags (
     created_at INTEGER NOT NULL,
     PRIMARY KEY (file_id, tag)
 );
+CREATE TABLE IF NOT EXISTS note_reuse (
+    file_id    TEXT NOT NULL,
+    channel    TEXT NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'flagged',
+    note       TEXT,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (file_id, channel)
+);
+CREATE TABLE IF NOT EXISTS dual_pipeline (
+    file_id          TEXT PRIMARY KEY,
+    status           TEXT NOT NULL DEFAULT 'marked',
+    speaker_proposal TEXT,
+    speaker_map      TEXT,
+    vault_path       TEXT,
+    error            TEXT,
+    updated_at       INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS note_references (
     file_id    TEXT NOT NULL,
     path       TEXT NOT NULL,
@@ -114,6 +141,7 @@ CREATE INDEX IF NOT EXISTS files_trash_idx ON files(is_trash);
 CREATE INDEX IF NOT EXISTS note_tags_tag_idx ON note_tags(tag);
 CREATE INDEX IF NOT EXISTS note_refs_file_idx ON note_references(file_id);
 CREATE INDEX IF NOT EXISTS file_folders_folder_idx ON file_folders(folder_id);
+CREATE INDEX IF NOT EXISTS note_reuse_channel_idx ON note_reuse(channel, status);
 """
 
 
@@ -123,9 +151,12 @@ class Storage:
         self._db_path = db_path
         self._fts_ok = False
         with self._connect() as conn:
-            conn.executescript(SCHEMA_TABLES)
-            self._migrate(conn)
-            conn.executescript(SCHEMA_INDEXES)
+            # The CLI creates Storage for even small local reads. Do not run
+            # schema/index DDL and take a writer lock on every invocation.
+            if conn.execute("PRAGMA user_version").fetchone()[0] < SCHEMA_VERSION:
+                conn.executescript(SCHEMA_TABLES)
+                self._migrate(conn)
+                conn.executescript(SCHEMA_INDEXES)
             self._fts_ok = self._ensure_search_index(conn)
 
     # ---------- full-content search (FTS5 trigram — Korean substring OK) ----------
@@ -134,15 +165,19 @@ class Storage:
         """Create the recording FTS table and backfill it once. Returns False
         (search disabled) if this SQLite build lacks FTS5/trigram."""
         try:
-            conn.execute(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS recording_fts "
-                "USING fts5(file_id UNINDEXED, title, body, tokenize='trigram')"
-            )
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recording_fts'"
+            ).fetchone():
+                conn.execute(
+                    "CREATE VIRTUAL TABLE recording_fts "
+                    "USING fts5(file_id UNINDEXED, title, body, tokenize='trigram')"
+                )
         except sqlite3.OperationalError:
             return False
-        fts_n = conn.execute("SELECT COUNT(*) FROM recording_fts").fetchone()[0]
-        content_n = conn.execute("SELECT COUNT(*) FROM file_content").fetchone()[0]
-        if fts_n == 0 and content_n > 0:
+        # FTS COUNT scans the entire virtual table. Only emptiness matters;
+        # LIMIT 1 makes opening a large library independent of its row count.
+        has_fts = conn.execute("SELECT 1 FROM recording_fts LIMIT 1").fetchone()
+        if not has_fts and conn.execute("SELECT 1 FROM file_content LIMIT 1").fetchone():
             self._backfill_search_index(conn)
         return True
 
@@ -195,11 +230,11 @@ class Storage:
         with self._connect() as conn:
             if self._fts_ok and all(len(t) >= 3 for t in terms):
                 hits = self._search_fts(conn, terms, limit)
-                if hits:
+                if hits is not None:
                     return hits
             return self._search_like(conn, terms, limit)
 
-    def _search_fts(self, conn, terms: list[str], limit: int) -> list[dict]:
+    def _search_fts(self, conn, terms: list[str], limit: int) -> list[dict] | None:
         match = " AND ".join('"' + t.replace('"', '""') + '"' for t in terms)
         try:
             rows = conn.execute(
@@ -208,28 +243,36 @@ class Storage:
                        snippet(recording_fts, 2, '«', '»', '…', 12) AS snippet
                   FROM recording_fts
                  WHERE recording_fts MATCH ?
-                 ORDER BY bm25(recording_fts, 10.0, 1.0)
+                 ORDER BY bm25(recording_fts, 0.0, 10.0, 1.0)
                  LIMIT ?
                 """,
                 (match, limit),
             ).fetchall()
         except sqlite3.OperationalError:
-            return []
+            return None
         return [{"file_id": r["file_id"], "snippet": r["snippet"] or ""} for r in rows]
 
     def _search_like(self, conn, terms: list[str], limit: int) -> list[dict]:
-        where = " AND ".join(
-            "(title LIKE ? OR summary_md LIKE ? OR transcript LIKE ?)" for _ in terms
-        )
+        if self._fts_ok:
+            source = "recording_fts"
+        else:
+            # Match spoken text, not JSON property names such as start_time.
+            conn.create_function("plaud_transcript_text", 1, self._transcript_text)
+            source = (
+                "(SELECT file_id, title, COALESCE(summary_md, '') || char(10) || "
+                "plaud_transcript_text(transcript) AS body FROM file_content)"
+            )
+        where = " AND ".join("(title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\')" for _ in terms)
         params: list = []
         for t in terms:
-            like = f"%{t}%"
-            params += [like, like, like]
+            escaped = t.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            like = f"%{escaped}%"
+            params += [like, like]
         params.append(limit)
         rows = conn.execute(
             f"""
-            SELECT file_id, title, summary_md
-              FROM file_content
+            SELECT file_id, title, body
+              FROM {source}
              WHERE {where}
              LIMIT ?
             """,
@@ -237,7 +280,7 @@ class Storage:
         ).fetchall()
         out = []
         for r in rows:
-            text = r["summary_md"] or r["title"] or ""
+            text = r["body"] or r["title"] or ""
             out.append({"file_id": r["file_id"], "snippet": text[:120]})
         return out
 
@@ -296,8 +339,14 @@ class Storage:
     # ---------- files ----------
 
     def upsert_file(self, file: PlaudFile, *, now: int, is_trash: int = 0) -> None:
+        self.upsert_files([file], now=now, is_trash=is_trash)
+
+    def upsert_files(self, files: list[PlaudFile], *, now: int, is_trash: int = 0) -> None:
+        """Save a sync page in one transaction, preserving local read/star state."""
+        if not files:
+            return
         with self._connect() as conn:
-            conn.execute(
+            conn.executemany(
                 """
                 INSERT INTO files (id, filename, filesize, duration, edit_time,
                                    start_time, is_trash, status, synced_at, updated_at)
@@ -312,17 +361,20 @@ class Storage:
                     synced_at  = excluded.synced_at,
                     updated_at = excluded.updated_at
                 """,
-                (
-                    file.id,
-                    file.filename or file.fullname,
-                    file.filesize,
-                    file.duration,
-                    file.edit_time,
-                    file.start_time,
-                    is_trash,
-                    now,
-                    now,
-                ),
+                [
+                    (
+                        file.id,
+                        file.filename or file.fullname,
+                        file.filesize,
+                        file.duration,
+                        file.edit_time,
+                        file.start_time,
+                        is_trash,
+                        now,
+                        now,
+                    )
+                    for file in files
+                ],
             )
 
     def mark_downloaded(self, file_id: str, local_path: Path, *, now: int) -> None:
@@ -494,7 +546,39 @@ class Storage:
                 self._index_one(
                     conn, content.file_id, content.title, transcript_json, content.summary_md
                 )
+            conn.execute("DELETE FROM content_fetch_attempts WHERE file_id = ?", (content.file_id,))
         self.set_file_folders(content.file_id, content.folder_ids)
+
+    def record_content_fetch_attempt(
+        self,
+        file_id: str,
+        *,
+        source_edit_time: int | None,
+        outcome: Literal["empty", "failed"],
+        now: int,
+    ) -> None:
+        """Defer an uncached revision without treating an empty result as content.
+
+        The revision is captured before the request, so a concurrent cloud sync
+        exposing newer content makes it immediately eligible again. A successful
+        concurrent fetch wins over this failed/empty attempt.
+        """
+        delay = CONTENT_EMPTY_RETRY_SECONDS if outcome == "empty" else CONTENT_FAILURE_RETRY_SECONDS
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO content_fetch_attempts
+                    (file_id, source_edit_time, outcome, attempted_at, retry_after)
+                SELECT ?, ?, ?, ?, ?
+                 WHERE NOT EXISTS (SELECT 1 FROM file_content WHERE file_id = ?)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    source_edit_time = excluded.source_edit_time,
+                    outcome = excluded.outcome,
+                    attempted_at = excluded.attempted_at,
+                    retry_after = excluded.retry_after
+                """,
+                (file_id, source_edit_time, outcome, now, now + delay, file_id),
+            )
 
     def delete_empty_content(self) -> list[str]:
         """Drop stale empty caches (no transcript/summary/outline) so they
@@ -523,16 +607,33 @@ class Storage:
                 "SELECT * FROM file_content WHERE file_id = ?", (file_id,)
             ).fetchone()
 
-    def files_without_content(self) -> list[sqlite3.Row]:
-        """Files that don't yet have transcript/summary cached."""
+    def files_without_content(
+        self, *, now: int | None = None, include_deferred: bool = False
+    ) -> list[sqlite3.Row]:
+        """Uncached files whose latest attempted revision is due for a retry.
+
+        ``include_deferred`` bypasses attempt cooldowns for an explicit retry;
+        it never includes cached or trashed files.
+        """
+        if now is None:
+            now = int(time.time())
         with self._connect() as conn:
             return list(
-                conn.execute("""
-                SELECT id FROM files
-                 WHERE is_trash = 0
-                   AND id NOT IN (SELECT file_id FROM file_content)
-                 ORDER BY edit_time DESC
-            """)
+                conn.execute(
+                    """
+                    SELECT f.id, f.edit_time FROM files AS f
+                     WHERE f.is_trash = 0
+                       AND NOT EXISTS (SELECT 1 FROM file_content WHERE file_id = f.id)
+                       AND (? OR NOT EXISTS (
+                           SELECT 1 FROM content_fetch_attempts AS attempt
+                            WHERE attempt.file_id = f.id
+                              AND attempt.source_edit_time IS f.edit_time
+                              AND attempt.retry_after > ?
+                       ))
+                     ORDER BY f.edit_time DESC
+                    """,
+                    (include_deferred, now),
+                )
             )
 
     # ---------- note metadata / tags ----------
@@ -580,8 +681,8 @@ class Storage:
                     title = COALESCE(excluded.title, title),
                     description = COALESCE(excluded.description, description),
                     note_type = COALESCE(excluded.note_type, note_type),
-                    status = COALESCE(excluded.status, status),
-                    usage_status = COALESCE(excluded.usage_status, usage_status),
+                    status = COALESCE(?, status),
+                    usage_status = COALESCE(?, usage_status),
                     category = COALESCE(excluded.category, category),
                     folder_id = COALESCE(excluded.folder_id, folder_id),
                     folder_name = COALESCE(excluded.folder_name, folder_name),
@@ -608,6 +709,8 @@ class Storage:
                     metadata_json,
                     generated_at,
                     now,
+                    status,
+                    usage_status,
                 ),
             )
 
@@ -623,8 +726,8 @@ class Storage:
             conn.execute(
                 """
                 UPDATE note_metadata
-                   SET folder_id = COALESCE(?, folder_id),
-                       folder_name = COALESCE(?, folder_name),
+                   SET folder_id = ?,
+                       folder_name = ?,
                        updated_at = ?
                  WHERE file_id = ?
                 """,
@@ -698,6 +801,127 @@ class Storage:
         with self._connect() as conn:
             return list(conn.execute(sql, params))
 
+    # ---------- reuse marks (content-repurposing checks) ----------
+
+    def set_reuse(
+        self,
+        file_id: str,
+        channel: str,
+        *,
+        status: str = "flagged",
+        note: str | None = None,
+        now: int,
+    ) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO note_reuse (file_id, channel, status, note, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(file_id, channel) DO UPDATE SET
+                    status = excluded.status,
+                    note = COALESCE(excluded.note, note),
+                    updated_at = excluded.updated_at
+                """,
+                (file_id, channel, status, note, now),
+            )
+
+    def clear_reuse(self, file_id: str, channel: str | None = None) -> int:
+        with self._connect() as conn:
+            if channel:
+                cur = conn.execute(
+                    "DELETE FROM note_reuse WHERE file_id = ? AND channel = ?",
+                    (file_id, channel),
+                )
+            else:
+                cur = conn.execute("DELETE FROM note_reuse WHERE file_id = ?", (file_id,))
+            return cur.rowcount
+
+    def list_reuse(self, file_id: str) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return list(
+                conn.execute(
+                    "SELECT * FROM note_reuse WHERE file_id = ? ORDER BY channel",
+                    (file_id,),
+                )
+            )
+
+    def query_reuse(
+        self, *, channel: str | None = None, status: str | None = None
+    ) -> list[sqlite3.Row]:
+        """All reuse marks (joined with file title) for 'what material do I
+        have for channel X' queries."""
+        sql = """
+            SELECT r.*, f.filename, f.start_time, f.edit_time
+              FROM note_reuse r
+              JOIN files f ON f.id = r.file_id
+             WHERE f.is_trash = 0
+        """
+        params: list[str] = []
+        if channel:
+            sql += " AND r.channel = ?"
+            params.append(channel)
+        if status:
+            sql += " AND r.status = ?"
+            params.append(status)
+        sql += " ORDER BY r.updated_at DESC"
+        with self._connect() as conn:
+            return list(conn.execute(sql, params))
+
+    # ---------- dual-transcribe pipeline state ----------
+
+    def get_dual(self, file_id: str) -> sqlite3.Row | None:
+        with self._connect() as conn:
+            return conn.execute(
+                "SELECT * FROM dual_pipeline WHERE file_id = ?", (file_id,)
+            ).fetchone()
+
+    def upsert_dual(
+        self,
+        file_id: str,
+        *,
+        now: int,
+        status: str | None = None,
+        speaker_proposal: str | None = None,
+        speaker_map: str | None = None,
+        vault_path: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """None = leave unchanged — except `error`, which is always set to the
+        given value so every state transition clears a stale error."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO dual_pipeline
+                    (file_id, status, speaker_proposal, speaker_map, vault_path,
+                     error, updated_at)
+                VALUES (?, COALESCE(?, 'marked'), ?, ?, ?, ?, ?)
+                ON CONFLICT(file_id) DO UPDATE SET
+                    status = COALESCE(excluded.status, status),
+                    speaker_proposal = COALESCE(excluded.speaker_proposal, speaker_proposal),
+                    speaker_map = COALESCE(excluded.speaker_map, speaker_map),
+                    vault_path = COALESCE(excluded.vault_path, vault_path),
+                    error = excluded.error,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    file_id,
+                    status,
+                    speaker_proposal,
+                    speaker_map,
+                    vault_path,
+                    error,
+                    now,
+                ),
+            )
+
+    def delete_dual(self, file_id: str) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM dual_pipeline WHERE file_id = ?", (file_id,))
+
+    def list_dual(self) -> list[sqlite3.Row]:
+        with self._connect() as conn:
+            return list(conn.execute("SELECT * FROM dual_pipeline ORDER BY updated_at DESC"))
+
     def get_note_metadata(self, file_id: str) -> sqlite3.Row | None:
         with self._connect() as conn:
             return conn.execute(
@@ -756,12 +980,16 @@ class Storage:
         tags = normalize_tags(raw_tags)
         if not tags:
             return []
+        # A tag the user adds by hand becomes `manual` even if an earlier
+        # ai/auto pass already inserted it — otherwise the next regeneration
+        # would delete the user's tag.
+        conflict = "DO UPDATE SET source = 'manual'" if source == "manual" else "DO NOTHING"
         with self._connect() as conn:
             conn.executemany(
-                """
+                f"""
                 INSERT INTO note_tags (file_id, tag, source, created_at)
                 VALUES (?, ?, ?, ?)
-                ON CONFLICT(file_id, tag) DO NOTHING
+                ON CONFLICT(file_id, tag) {conflict}
                 """,
                 [(file_id, tag, source, now) for tag in tags],
             )

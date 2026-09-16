@@ -58,8 +58,7 @@ class AutoMetadataReport:
 def source_hash(row: Any) -> str:
     """Stable digest of the Plaud-side source text metadata derives from."""
     payload = "\x1f".join(
-        str(row[key] or "")
-        for key in ("transcript", "summary_md", "summary_extra")
+        str(row[key] or "") for key in ("transcript", "summary_md", "summary_extra")
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
@@ -147,9 +146,7 @@ def run_auto_metadata(
             "at": int(time.time()),
             "attempts": 0,
         }
-        storage.upsert_note_metadata(
-            file_id=file_id, metadata=merged, now=int(time.time())
-        )
+        storage.upsert_note_metadata(file_id=file_id, metadata=merged, now=int(time.time()))
         report.generated.append(file_id)
     return report
 

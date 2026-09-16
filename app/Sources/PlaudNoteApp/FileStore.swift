@@ -2,17 +2,6 @@ import AppKit
 import Combine
 import Foundation
 
-private enum PlaudCommandError: LocalizedError {
-    case missingUV([String])
-
-    var errorDescription: String? {
-        switch self {
-        case .missingUV(let candidates):
-            return "uv executable not found. Checked: \(candidates.joined(separator: ", "))"
-        }
-    }
-}
-
 /// Snapshot of Plaud credential health, mirroring the JSON emitted by
 /// `plaud auth --json`. All fields are optional/tolerant so a partial or
 /// malformed payload still decodes into *something* the UI can render.
@@ -27,6 +16,7 @@ struct AuthStatus: Codable, Equatable {
     var secondsRemaining: Int?
     var remainingHuman: String?
     var liveOK: Bool?
+    var liveState: String?
     /// Renewal readiness: ready | expiring | expired | disabled |
     /// not_bootstrapped | store_unavailable.
     var autoRefresh: String?
@@ -45,6 +35,7 @@ struct AuthStatus: Codable, Equatable {
         case secondsRemaining = "seconds_remaining"
         case remainingHuman = "remaining_human"
         case liveOK = "live_ok"
+        case liveState = "live_state"
         case autoRefresh = "auto_refresh"
         case refreshExpiresAt = "refresh_expires_at"
         case detail
@@ -76,43 +67,24 @@ struct AuthStatus: Codable, Equatable {
     }
 }
 
-private enum PlaudCommand {
-    static let projectRoot = NSString(string: "~/DEV/plaud-note-manager")
-        .expandingTildeInPath
+/// Single-flight auth repair state.  WebKit is mounted only during
+/// ``webSession`` so it cannot compete with Keychain during normal operation.
+enum AuthRecoveryPhase: Equatable {
+    case idle
+    case webSession
+    case verifying
+    case needsInteractive
+}
 
-    static let uvCandidates = [
-        "\(NSHomeDirectory())/.local/bin/uv",
-        "/opt/homebrew/bin/uv",
-        "/usr/local/bin/uv",
-    ]
-
-    static let cliPath = [
-        "\(NSHomeDirectory())/.local/bin",
-        "/opt/homebrew/bin",
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    ].joined(separator: ":")
-
-    static func makeProcess(args: [String]) throws -> Process {
-        guard let uvPath = uvExecutablePath() else {
-            throw PlaudCommandError.missingUV(uvCandidates)
-        }
-
-        let process = Process()
-        process.currentDirectoryURL = URL(fileURLWithPath: projectRoot)
-        process.environment = ProcessInfo.processInfo.environment.merging(
-            ["PATH": cliPath, "PYTHONUNBUFFERED": "1"]
-        ) { _, new in new }
-        process.executableURL = URL(fileURLWithPath: uvPath)
-        process.arguments = ["run", "plaud"] + args
-        return process
+/// Builds positional tag commands with an explicit option terminator. Tags
+/// such as `-topic` and `--topic` are user data, not Typer options.
+enum PlaudTagCommandArguments {
+    static func add(fileID: String, tag: String) -> [String] {
+        ["tag-add", fileID, "--", tag]
     }
 
-    private static func uvExecutablePath() -> String? {
-        uvCandidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+    static func remove(fileID: String, tag: String) -> [String] {
+        ["tag-remove", fileID, "--", tag]
     }
 }
 
@@ -153,6 +125,49 @@ final class FileStore: ObservableObject {
     @Published var selectedID: String?
     @Published var content: FileContentVM?
     @Published var noteMetadata: NoteMetadataVM?
+    /// Dual-transcribe pipeline state of the selected recording (nil = unmarked).
+    @Published var dualState: DualStateVM?
+    /// Content-reuse marks of the selected recording.
+    @Published var reuseMarks: [ReuseMarkVM] = []
+    /// Dual final artifacts (cross-analyzed transcript + summary) of the
+    /// selected recording — drives the Source › Final tab.
+    @Published var integratedContent: IntegratedContentVM?
+    /// Recordings with a `plaud dual` stage running (drives the ⚡ spinner).
+    @Published var dualRunningIDs: Set<String> = []
+
+    /// ElevenLabs STT credit balance for the library-overview indicator.
+    struct ElevenLabsStatus: Decodable, Equatable {
+        let status: String
+        var tier: String?
+        var remaining: Int?
+        var limit: Int?
+        var resetAt: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case status, tier, remaining, limit
+            case resetAt = "reset_at"
+        }
+    }
+
+    @Published var elevenLabs: ElevenLabsStatus?
+    private var elevenLabsFetchedAt: Date?
+
+    /// Fetch the ElevenLabs balance, throttled to every 30 min — it's a
+    /// passive indicator, not something worth an API call per sync. Pass
+    /// force after transcription runs, which actually spend credits.
+    func refreshElevenLabs(force: Bool = false) async {
+        if !force, let at = elevenLabsFetchedAt,
+           Date().timeIntervalSince(at) < 1800 { return }
+        elevenLabsFetchedAt = Date()
+        let output = await runPlaudOutput(
+            args: ["elevenlabs-status", "--json"], showError: false
+        )
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8), !data.isEmpty,
+              let decoded = try? JSONDecoder().decode(ElevenLabsStatus.self, from: data)
+        else { return }
+        elevenLabs = decoded
+    }
     @Published var isSyncing: Bool = false
     @Published var lastSyncedAt: Date?
     @Published var deepSyncRunning: Bool = false
@@ -167,7 +182,29 @@ final class FileStore: ObservableObject {
     /// replaces the Keychain credential bundle. Drives auth UI spinners and disabled
     /// state.
     @Published var refreshingAuth = false
+    /// Outcome metadata for the most recent manual cURL import. A valid access
+    /// token and durable automatic renewal are separate facts; the auth sheet
+    /// uses these fields to avoid claiming "one-time setup" when Chrome's
+    /// rotating workspace token could not be captured.
+    @Published private(set) var lastCurlImportAutoRefreshArmed: Bool?
+    @Published private(set) var lastCurlImportDetail: String?
+    /// Password-free fallback through the app's persistent Plaud Web session.
+    @Published var authRecoveryPhase: AuthRecoveryPhase = .idle
+    @Published var authRecoveryRequestID: Int = 0
+    @Published var authRecoveryStatus: String?
+    @Published var interactiveLoginActive = false
+    let plaudLoginWindow = PlaudLoginWindowController()
+    /// One automatic attempt per rejected access-token generation. A healthy
+    /// replacement clears this in `selfHealAuthIfNeeded`.
+    var selfHealCredentialIssuedAt: Int?
+    var authMissingSessionGeneration: Int?
+    var authPromptedGeneration: Int?
+    var authRecoveryRetryAfter: Date?
+    var authStatusRequestID: UInt64 = 0
 
+    private var lastSyncAttempt: Date?
+    private var cacheSyncRetryAfter: Date?
+    @Published var cacheSyncNotice: String?
     private var cloudSyncTimer: Timer?
     private var cloudSyncInterval: TimeInterval = 30
     private var cancellables: Set<AnyCancellable> = []
@@ -178,6 +215,24 @@ final class FileStore: ObservableObject {
     /// Generation counter to coalesce bursts of reload requests: only the
     /// latest off-main fetch is allowed to publish its results.
     private var reloadGeneration: UInt64 = 0
+    private var reloadInFlight = false
+    private var reloadRequested = false
+    @Published private(set) var contentRevision: UInt64 = 0
+    private var loadedContentID: String?
+    /// Same coalescing trick for detail loads: a fast arrow-key walk down the
+    /// list fires one load per row, and only the newest may publish.
+    private var contentGeneration: UInt64 = 0
+
+    /// Lowercased names of speakers flagged `is_self`, refreshed once per
+    /// `reload()`. Read by the transcript renderer instead of hitting SQLite
+    /// per bubble.
+    @Published var selfSpeakerNames: [String] = []
+
+    /// Pipeline stage of the current selection (Integrated > Transcribed >
+    /// Cached > New). Derived off-main in `loadContent` — deriving it inside
+    /// the detail view's body meant a `data/integrated/` directory scan plus
+    /// two queries on every publish.
+    @Published var selectedStage: PipelineStage = .new
     /// Generation token guarding content search: a slow earlier query can't
     /// overwrite a newer one's results.
     private var contentSearchGeneration: UInt64 = 0
@@ -192,6 +247,12 @@ final class FileStore: ObservableObject {
         let stderr: String
 
         var ok: Bool { exitCode == 0 }
+
+        var mentionsAuth: Bool {
+            let text = (stderr + stdout).lowercased()
+            return ["workspace token expired", "plaud auth expired", "-419", "-420",
+                    "missing plaud credentials", "unauthorized"].contains { text.contains($0) }
+        }
 
         var failureMessage: String {
             let rawBody = [stderr, stdout]
@@ -311,7 +372,7 @@ final class FileStore: ObservableObject {
             .sink { [weak self] newScope in
                 guard let self else { return }
                 self.onSearchInputsChanged(search: self.search, scope: newScope)
-                self.applyFilter(sidebar: self.sidebar, search: self.search)
+                self.applyFilter(sidebar: self.sidebar, search: self.search, contentScope: newScope)
             }
             .store(in: &cancellables)
 
@@ -389,6 +450,11 @@ final class FileStore: ObservableObject {
     /// `reload()`, so the off-main read launched here always observes that
     /// committed write — the optimistic update is never raced away.
     func reload() {
+        guard !reloadInFlight else {
+            reloadRequested = true
+            return
+        }
+        reloadInFlight = true
         reloadGeneration &+= 1
         let generation = reloadGeneration
         let selectedID = self.selectedID
@@ -400,26 +466,38 @@ final class FileStore: ObservableObject {
             let pinnedTags = Database.shared.loadAppConfig().pinnedTags
             let categoryCounts = Database.shared.categoryCounts()
             let cacheStatus = Database.shared.contentCacheStatus()
-            let metadata = selectedID.map { Database.shared.noteMetadata(for: $0) }
-            let transcript = selectedID.flatMap { Database.shared.cmdsTranscript(for: $0) }
+            // Self-speaker names are hoisted out of the transcript render
+            // path: `TranscriptBubbleList` used to re-query `speakers` once
+            // per bubble (~1,400 locked SQLite reads for a 1h20m recording,
+            // every single body evaluation).
+            let selfNames = Database.shared.savedSpeakers()
+                .filter(\.isSelf)
+                .map { $0.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
 
             guard let strongSelf = self else { return }
             await MainActor.run {
                 guard generation == strongSelf.reloadGeneration else { return }
                 strongSelf.masterFiles = master
-                strongSelf.folders = folders
-                strongSelf.tagCounts = tagCounts
-                strongSelf.pinnedTags = pinnedTags
-                strongSelf.categoryCounts = categoryCounts
-                strongSelf.cacheStatus = cacheStatus
+                if strongSelf.folders != folders { strongSelf.folders = folders }
+                if !strongSelf.tagCounts.elementsEqual(tagCounts, by: {
+                    $0.tag == $1.tag && $0.count == $1.count
+                }) { strongSelf.tagCounts = tagCounts }
+                if strongSelf.pinnedTags != pinnedTags { strongSelf.pinnedTags = pinnedTags }
+                if strongSelf.categoryCounts != categoryCounts { strongSelf.categoryCounts = categoryCounts }
+                if strongSelf.cacheStatus != cacheStatus { strongSelf.cacheStatus = cacheStatus }
                 // Re-derive the visible list against the freshly-loaded master
                 // set using the *current* sidebar/search.
                 strongSelf.applyFilter(sidebar: strongSelf.sidebar,
                                        search: strongSelf.search)
+                if strongSelf.selfSpeakerNames != selfNames { strongSelf.selfSpeakerNames = selfNames }
+                strongSelf.reloadInFlight = false
+                if strongSelf.reloadRequested {
+                    strongSelf.reloadRequested = false
+                    strongSelf.reload()
+                }
                 if let id = selectedID, id == strongSelf.selectedID {
                     strongSelf.loadContent(for: id)
-                    strongSelf.noteMetadata = metadata
-                    strongSelf.cmdsTranscript = transcript
                     // Covers the launch race where a file is selected before
                     // the first master load lands (no-op once seen).
                     strongSelf.markSeen(id)
@@ -432,7 +510,7 @@ final class FileStore: ObservableObject {
     /// set. Reproduces the four sidebar cases exactly as `Database.files(for:)`
     /// did in SQL, plus a case-insensitive filename `contains(search)`.
     /// Runs synchronously on the main actor — no DB hop, same render pass.
-    func applyFilter(sidebar: SidebarItem, search: String) {
+    func applyFilter(sidebar: SidebarItem, search: String, contentScope: Bool? = nil) {
         let trimmed = search.trimmingCharacters(in: .whitespacesAndNewlines)
         let needle = trimmed.lowercased()
 
@@ -440,20 +518,21 @@ final class FileStore: ObservableObject {
         // query, the visible set + ORDER come from the FTS hit list (relevance
         // ranked) — NOT the filename substring + date sort. The sidebar
         // selection still narrows the result (search-within-selection).
-        let contentMode = contentSearchScope && !trimmed.isEmpty
+        let contentMode = (contentScope ?? contentSearchScope) && !trimmed.isEmpty
         if contentMode {
             // Order by FTS relevance (hit order), narrowing within the current
             // sidebar selection. Files not in the local master set (uncached /
             // unindexed) are skipped — they can't be shown.
             let byID = Dictionary(masterFiles.map { ($0.id, $0) },
                                   uniquingKeysWith: { a, _ in a })
-            files = contentSearchHits.compactMap { id -> PlaudFileVM? in
+            let result = contentSearchHits.compactMap { id -> PlaudFileVM? in
                 guard let item = byID[id],
                       matchesSidebar(item.file, folderIDs: item.folderIDs,
                                      sidebar: sidebar)
                 else { return nil }
                 return item.file
             }
+            if files != result { files = result }
             return
         }
 
@@ -466,7 +545,7 @@ final class FileStore: ObservableObject {
             }
             return item.file
         }
-        files = result
+        if files != result { files = result }
     }
 
     /// Whether a file matches the sidebar selection. Shared by the normal and
@@ -494,20 +573,6 @@ final class FileStore: ObservableObject {
         }
     }
 
-    /// One FTS hit decoded from `plaud search "<q>" --json`.
-    private struct ContentSearchHit: Decodable {
-        let fileID: String
-        let snippet: String?
-        enum CodingKeys: String, CodingKey {
-            case fileID = "file_id"
-            case snippet
-        }
-    }
-
-    private struct ContentSearchResponse: Decodable {
-        let hits: [ContentSearchHit]
-    }
-
     /// React to a change in the search text OR the scope toggle. Filename mode
     /// (or an empty query) tears down any content-search state and restores the
     /// normal list immediately. Content mode debounces, then runs `plaud
@@ -526,7 +591,7 @@ final class FileStore: ObservableObject {
                 contentSearchQuery = ""
                 contentSearchRunning = false
             }
-            applyFilter(sidebar: sidebar, search: search)
+            applyFilter(sidebar: sidebar, search: search, contentScope: scope)
             return
         }
 
@@ -534,38 +599,38 @@ final class FileStore: ObservableObject {
         contentSearchGeneration &+= 1
         let generation = contentSearchGeneration
         contentSearchDebounce = Task { [weak self] in
-            // Debounce ~250ms so we don't spawn a subprocess per keystroke.
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            // 80ms is enough to collapse a fast typist's keystrokes now that
+            // the query is a local FTS read (~2ms) rather than a `uv run`
+            // subprocess (~300ms) — it used to need 250ms just to amortize
+            // Python startup.
+            try? await Task.sleep(nanoseconds: 80_000_000)
             if Task.isCancelled { return }
             await self?.runContentSearch(query: trimmed, generation: generation)
         }
     }
 
-    /// Execute `plaud search "<query>" --json`, decode the ranked hits, and —
-    /// if this is still the newest query — publish them and re-derive the list.
+    /// Run the full-content search against local SQLite (FTS5 trigram, with
+    /// a LIKE fallback for short terms) and — if this is still the newest
+    /// query — publish the ranked hits.
+    ///
+    /// This used to shell out to `plaud search --json`. Same SQL, same
+    /// ranking, minus a process spawn, a `uv` lock resolution, and a Python
+    /// interpreter boot on every query.
     private func runContentSearch(query: String, generation: UInt64) async {
-        let output = await runPlaudOutput(
-            args: ["search", query, "--json"],
-            timeout: 15,
-            showError: false
-        )
+        let hits = await Task.detached(priority: .userInitiated) {
+            Database.shared.searchContent(query)
+        }.value
         // Drop stale responses: a newer keystroke/scope-change superseded us.
         guard generation == contentSearchGeneration else { return }
 
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        var hits: [String] = []
+        var ids: [String] = []
         var snippets: [String: String] = [:]
-        if let data = trimmed.data(using: .utf8), !data.isEmpty,
-           let decoded = try? JSONDecoder().decode(ContentSearchResponse.self, from: data) {
-            for hit in decoded.hits where !hit.fileID.isEmpty {
-                hits.append(hit.fileID)
-                if let snip = hit.snippet, !snip.isEmpty {
-                    snippets[hit.fileID] = snip
-                }
-            }
+        for hit in hits where !hit.fileID.isEmpty {
+            ids.append(hit.fileID)
+            if !hit.snippet.isEmpty { snippets[hit.fileID] = hit.snippet }
         }
 
-        contentSearchHits = hits
+        contentSearchHits = ids
         contentSnippets = snippets
         contentSearchQuery = query
         contentSearchRunning = false
@@ -574,35 +639,48 @@ final class FileStore: ObservableObject {
 
     func sync(showError: Bool = true) async {
         guard !isSyncing else { return }
+        // Activation and timer ticks can arrive together. Manual sync always
+        // runs; passive refreshes share a 30-second cooldown.
+        if !showError, let attempted = lastSyncAttempt,
+           Date().timeIntervalSince(attempted) < 30 { return }
+        lastSyncAttempt = Date()
         isSyncing = true
         defer { isSyncing = false }
-        await runPlaud(args: ["sync"], showError: showError)
+        var result = await executePlaud(args: ["sync"])
+        if !result.ok {
+            // Inspect this command's result, never a previous UI alert. Even
+            // quiet/background failures must refresh the auth indicator.
+            await refreshAuth()
+            if result.mentionsAuth && auth?.state == "valid" {
+                result = await executePlaud(args: ["sync"])
+            }
+        }
+        guard result.ok else {
+            if showError { lastCommandError = result.failureMessage }
+            reload()
+            return
+        }
         lastSyncedAt = Date()
         reload()
-        // Cheap offline auth check after every sync — also covers launch and
-        // app-activation, both of which route through `sync()`.
         await refreshAuth()
-        // Keep new recordings flowing to "Metadata Ready" without a manual
-        // Backfill click: fetch content for uncached files, which also fires
-        // the CLI's auto-metadata hook (config `auto_metadata`, on by
-        // default). No-ops fast when everything is cached; skipped while a
-        // manual deep sync is already running.
-        if !deepSyncRunning {
-            Task { await self.deepSync() }
+        Task { await self.refreshElevenLabs() }
+        // Backfill only when uncached recordings exist; a warm library must
+        // not start another Python/AI job on every automatic poll.
+        let currentCache = await Task.detached(priority: .utility) {
+            Database.shared.contentCacheStatus()
+        }.value
+        if !deepSyncRunning, currentCache.cached < currentCache.total {
+            Task { await self.deepSync(showError: false) }
         }
     }
 
-    /// Refresh the cached Plaud auth status via `plaud auth --json`.
-    ///
-    /// Offline (`live == false`) is instant — it only decodes the local JWT, no
-    /// network — so it's cheap enough to fire at launch, after each sync, and on
-    /// app activation. Pass `live: true` for the "Verify now" button to also ping
-    /// the API. Decode failures fall back to a `state:"unknown"` value rather
-    /// than crashing or clearing the indicator.
     func refreshAuth(live: Bool = false) async {
+        authStatusRequestID &+= 1
+        let requestID = authStatusRequestID
         var args = ["auth", "--json"]
         if live { args.append("--live") }
         let output = await runPlaudOutput(args: args, showError: false)
+        guard requestID == authStatusRequestID else { return }
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let data = trimmed.data(using: .utf8), !data.isEmpty else {
             auth = AuthStatus.unknown(detail: "No output from plaud auth.")
@@ -610,6 +688,7 @@ final class FileStore: ObservableObject {
         }
         if let decoded = try? JSONDecoder().decode(AuthStatus.self, from: data) {
             auth = decoded
+            await selfHealAuthIfNeeded(decoded)
         } else {
             auth = AuthStatus.unknown(
                 detail: "Could not read auth status from Plaud CLI."
@@ -623,6 +702,15 @@ final class FileStore: ObservableObject {
     private struct RefreshAuthResult: Decodable {
         let status: String
         let detail: String?
+        let autoRefreshArmed: Bool?
+        let autoRefreshDetail: String?
+
+        enum CodingKeys: String, CodingKey {
+            case status
+            case detail
+            case autoRefreshArmed = "auto_refresh_armed"
+            case autoRefreshDetail = "auto_refresh_detail"
+        }
     }
 
     /// Refresh Plaud credentials from a Plaud API cURL. When `curlText` is nil,
@@ -636,8 +724,15 @@ final class FileStore: ObservableObject {
     /// — we only read the `status`/`detail` fields the command prints.
     @discardableResult
     func refreshAuthCredentials(curlText: String? = nil) async -> Bool {
+        guard !interactiveLoginActive else {
+            lastCommandError = "열린 로그인 창을 먼저 닫은 뒤 cURL을 가져와 주세요."
+            return false
+        }
         guard !refreshingAuth else { return false }
         refreshingAuth = true
+        authStatusRequestID &+= 1
+        lastCurlImportAutoRefreshArmed = nil
+        lastCurlImportDetail = nil
         defer { refreshingAuth = false }
 
         let cleanCurl = curlText?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -669,20 +764,25 @@ final class FileStore: ObservableObject {
 
         let detail = result.detail?.trimmingCharacters(in: .whitespacesAndNewlines)
         let detailOrNil = (detail?.isEmpty ?? true) ? nil : detail
+        lastCurlImportAutoRefreshArmed = result.autoRefreshArmed
+        let refreshDetail = result.autoRefreshDetail?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        lastCurlImportDetail = (refreshDetail?.isEmpty == false) ? refreshDetail : nil
 
         switch result.status {
         case "ok":
             lastCommandError = nil
-            // Update the indicator with a live check, then reload the library.
-            await refreshAuth(live: true)
-            await sync(showError: false)
+            // Import already validated access. Do not make authentication wait
+            // for another network probe and a full library sync.
+            await refreshAuth()
+            Task { await self.sync(showError: false) }
             return true
         case "live_check_unavailable":
-            // The capture was saved, but an outage is not proof of a working
-            // connection. Keep the sheet open and let the user retry.
+            // Validate-before-write keeps the previous Keychain generation
+            // intact when the network cannot prove the pasted candidate.
             await refreshAuth(live: false)
             lastCommandError = detailOrNil
-                ?? "자격증명은 저장했지만 Plaud 연결을 검증하지 못했습니다. 네트워크를 확인해주세요."
+                ?? "Plaud 연결을 검증하지 못해 새 자격증명을 저장하지 않았습니다. 네트워크를 확인해주세요."
             return false
         case "live_auth_failed":
             // Validate-before-write leaves the previous Keychain item unchanged.
@@ -709,6 +809,47 @@ final class FileStore: ObservableObject {
     @Published var classifyResult: String?
     /// Decoded dry-run plans driving the preview sheet (nil = sheet closed).
     @Published var classifyPlans: [ClassifyPlan]?
+
+    /// v0.8: OAuth / subscription login state per LLM provider (`plaud llm-auth --json`).
+    struct LLMAuthRow: Identifiable, Decodable {
+        let provider: String
+        let label: String
+        let backend: String
+        let cliInstalled: Bool
+        let oauthLoggedIn: Bool?
+        let account: String
+        let apiKeyEnv: String
+        let apiKeySet: Bool
+        let loginCommand: String
+        let note: String
+        let ready: Bool
+
+        var id: String { provider }
+
+        enum CodingKeys: String, CodingKey {
+            case provider, label, backend, account, note, ready
+            case cliInstalled = "cli_installed"
+            case oauthLoggedIn = "oauth_logged_in"
+            case apiKeyEnv = "api_key_env"
+            case apiKeySet = "api_key_set"
+            case loginCommand = "login_command"
+        }
+    }
+
+    @Published var llmAuth: [LLMAuthRow] = []
+    @Published var llmAuthLoading: Bool = false
+
+    func refreshLLMAuth() async {
+        guard !llmAuthLoading else { return }
+        llmAuthLoading = true
+        defer { llmAuthLoading = false }
+        let output = await runPlaudOutput(args: ["llm-auth", "--json"], showError: false)
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let data = trimmed.data(using: .utf8), !data.isEmpty,
+              let rows = try? JSONDecoder().decode([LLMAuthRow].self, from: data)
+        else { return }
+        llmAuth = rows
+    }
     /// Set after a successful apply so the file list can offer an undo banner.
     /// `count` = how many recordings were actually moved.
     @Published var lastClassifyApply: (count: Int, at: Date)?
@@ -722,8 +863,14 @@ final class FileStore: ObservableObject {
         let folderName: String
         let confidence: Double
         let reason: String
+        /// v0.8: CMDS vault mapping + how the verdict was reached (rule | llm | default).
+        var cmds: String = ""
+        var index: String = ""
+        var source: String = "rule"
+        var alternatives: [String] = []
 
         var id: String { fileID }
+        var isLLM: Bool { source == "llm" }
 
         enum CodingKeys: String, CodingKey {
             case fileID = "file_id"
@@ -731,6 +878,10 @@ final class FileStore: ObservableObject {
             case folderName = "folder_name"
             case confidence
             case reason
+            case cmds
+            case index
+            case source
+            case alternatives
         }
 
         init(from decoder: Decoder) throws {
@@ -740,6 +891,10 @@ final class FileStore: ObservableObject {
             self.folderName = (try? c.decode(String.self, forKey: .folderName)) ?? ""
             self.confidence = (try? c.decode(Double.self, forKey: .confidence)) ?? 0
             self.reason = (try? c.decode(String.self, forKey: .reason)) ?? ""
+            self.cmds = (try? c.decode(String.self, forKey: .cmds)) ?? ""
+            self.index = (try? c.decode(String.self, forKey: .index)) ?? ""
+            self.source = (try? c.decode(String.self, forKey: .source)) ?? "rule"
+            self.alternatives = (try? c.decode([String].self, forKey: .alternatives)) ?? []
         }
     }
 
@@ -775,45 +930,82 @@ final class FileStore: ObservableObject {
     /// Apply classification for ONLY the given file ids (`classify --apply`
     /// with one `--only <id>` each), then sync + reload. Sets
     /// `lastClassifyApply` so the UI can offer an Undo banner.
-    func applyClassify(fileIDs: [String]) async {
+    func applyClassify(fileIDs: [String], overrides: [String: String] = [:]) async {
         guard !classifyRunning, !fileIDs.isEmpty else { return }
         classifyRunning = true
         defer { classifyRunning = false }
-        let args = ["classify", "--apply"] + fileIDs.flatMap { ["--only", $0] }
-        let output = await runPlaudOutput(args: args)
-        await sync(showError: false)
-        // The JSON array has `moved_to` set for files that were actually moved.
-        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        var moved = fileIDs.count
-        if let data = trimmed.data(using: .utf8), !data.isEmpty,
-           let results = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-            let movedCount = results.filter {
-                let to = ($0["moved_to"] as? String) ?? ""
-                return !to.isEmpty
-            }.count
-            if movedCount > 0 { moved = movedCount }
+        var byFolder: [String: [String]] = [:]
+        for (id, folder) in overrides where fileIDs.contains(id) {
+            byFolder[folder, default: []].append(id)
         }
-        lastClassifyApply = (count: moved, at: Date())
+        var commands = byFolder.sorted(by: { $0.key < $1.key }).map { folder, ids in
+            ["classify", "--apply", "--json", "--folder", folder]
+                + ids.sorted().flatMap { ["--only", $0] }
+        }
+        let remaining = fileIDs.filter { overrides[$0] == nil }
+        if !remaining.isEmpty {
+            commands.append(["classify", "--apply", "--json"]
+                + remaining.flatMap { ["--only", $0] })
+        }
+        var moved = 0
+        for (index, command) in commands.enumerated() {
+            let args = command + (index > 0 ? ["--append-undo"] : [])
+            let result = await executePlaud(args: args)
+            if !result.ok { lastCommandError = result.failureMessage }
+            if let rows = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [[String: Any]] {
+                moved += rows.filter { !(($0["moved_to"] as? String) ?? "").isEmpty }.count
+            }
+            // Stop after failure so subsequent invocations cannot obscure
+            // the failure or replace a partially written recovery record.
+            if !result.ok { break }
+        }
+        if moved > 0 { lastClassifyApply = (count: moved, at: Date()) }
+        reload()
     }
 
-    /// Revert the last applied classification (`classify-undo --json`), then
-    /// sync + reload and clear the undo banner.
+    /// Keep failed entries actionable: the CLI retains their undo snapshots.
     func classifyUndo() async {
         guard !classifyRunning else { return }
         classifyRunning = true
         defer { classifyRunning = false }
-        _ = await runPlaudOutput(args: ["classify-undo", "--json"])
-        lastClassifyApply = nil
-        await sync(showError: false)
+        let result = await executePlaud(args: ["classify-undo", "--json"])
+        if let value = try? JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any] {
+            let status = value["status"] as? String
+            if result.ok && (status == "ok" || status == "nothing") {
+                lastClassifyApply = nil
+            } else if let failed = value["failed"] as? [String], !failed.isEmpty {
+                lastClassifyApply = (count: failed.count, at: Date())
+                lastCommandError = "\(failed.count) recordings could not be restored. Their undo records were kept for retry."
+            }
+        }
+        if !result.ok && lastCommandError == nil { lastCommandError = result.failureMessage }
+        reload()
     }
 
     /// Background backfill of transcript/summary cache for every file.
     /// Long-running (15+ min for 1k files); UI stays responsive.
-    func deepSync() async {
+    func deepSync(showError: Bool = true) async {
         guard !deepSyncRunning else { return }
+        if !showError, let retryAfter = cacheSyncRetryAfter, Date() < retryAfter { return }
         deepSyncRunning = true
         defer { deepSyncRunning = false }
-        await runPlaud(args: ["sync-content"])
+        let result = await executePlaud(args: showError ? ["sync-content", "--force"] : ["sync-content"])
+        if result.ok {
+            let cache = await Task.detached(priority: .utility) {
+                Database.shared.contentCacheStatus()
+            }.value
+            let waiting = cache.total - cache.cached
+            cacheSyncRetryAfter = waiting > 0 ? Date().addingTimeInterval(300) : nil
+            cacheSyncNotice = waiting > 0
+                ? "\(waiting)개 녹음은 아직 받아올 본문이 없습니다. 준비된 본문은 계속 사용할 수 있으며, 대기 중인 파일은 나중에 다시 확인합니다."
+                : nil
+        } else {
+            // The CLI preserves completed files. A failed background fetch
+            // should retry remaining work later without interrupting reading.
+            cacheSyncRetryAfter = Date().addingTimeInterval(300)
+            cacheSyncNotice = "일부 본문을 아직 받지 못했습니다. 저장된 파일은 사용할 수 있고, 5분 후 남은 파일을 다시 시도합니다. 클릭하면 바로 재시도합니다."
+            if showError { lastCommandError = cacheSyncNotice }
+        }
         reload()
     }
 
@@ -856,14 +1048,14 @@ final class FileStore: ObservableObject {
     func addTag(_ rawTag: String, to fileID: String) async {
         let tag = rawTag.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !tag.isEmpty else { return }
-        await runPlaud(args: ["tag-add", fileID, tag])
+        await runPlaud(args: PlaudTagCommandArguments.add(fileID: fileID, tag: tag))
         noteMetadata = Database.shared.noteMetadata(for: fileID)
         // Refresh the sidebar tag counts + the file's chip set.
         reload()
     }
 
     func removeTag(_ tag: String, from fileID: String) async {
-        await runPlaud(args: ["tag-remove", fileID, tag])
+        await runPlaud(args: PlaudTagCommandArguments.remove(fileID: fileID, tag: tag))
         noteMetadata = Database.shared.noteMetadata(for: fileID)
         reload()
     }
@@ -925,6 +1117,91 @@ final class FileStore: ObservableObject {
     func setUsageStatus(_ fileID: String, status: String) async {
         await runPlaud(args: ["usage-status", fileID, status])
         noteMetadata = Database.shared.noteMetadata(for: fileID)
+    }
+
+    // MARK: - Dual-transcribe pipeline
+
+    /// Run (or resume) the dual pipeline. Long-running: ElevenLabs transcription
+    /// plus one or two LLM calls — the ⚡ spinner is driven by dualRunningIDs and
+    /// the stage badge refreshes from the DB row the CLI keeps updated.
+    /// `speakerMap` carries names confirmed in the app's speaker sheet.
+    func runDual(_ fileID: String, speakerMap: [String: String] = [:],
+                 toVault: Bool = false) async {
+        guard !dualRunningIDs.contains(fileID) else { return }
+        dualRunningIDs.insert(fileID)
+        defer { dualRunningIDs.remove(fileID) }
+        var args = ["dual", fileID]
+        for (speaker, name) in speakerMap.sorted(by: { $0.key < $1.key })
+        where !name.trimmingCharacters(in: .whitespaces).isEmpty {
+            args += ["--map", "\(speaker)=\(name)"]
+        }
+        if toVault { args += ["--to-vault"] }
+        await runPlaud(args: args)
+        refreshDual(fileID)
+        reload()
+        // The transcribe stage spends ElevenLabs credits.
+        await refreshElevenLabs(force: true)
+    }
+
+    /// Land the vault-ready note in the vault transcript inbox lane.
+    func dualSend(_ fileID: String) async {
+        guard !dualRunningIDs.contains(fileID) else { return }
+        dualRunningIDs.insert(fileID)
+        defer { dualRunningIDs.remove(fileID) }
+        await runPlaud(args: ["dual-send", fileID])
+        refreshDual(fileID)
+        noteMetadata = Database.shared.noteMetadata(for: fileID)
+    }
+
+    func dualUnmark(_ fileID: String) async {
+        await runPlaud(args: ["dual-unmark", fileID], showError: false)
+        refreshDual(fileID)
+    }
+
+    private func refreshDual(_ fileID: String) {
+        guard fileID == selectedID else { return }
+        dualState = Database.shared.dualState(for: fileID)
+        // The pipeline may have just produced/refreshed the final artifacts.
+        integratedContent = Database.shared.integratedContent(for: fileID)
+    }
+
+    /// Open a Claude Code Terminal session preloaded with this recording's
+    /// context (`plaud claude`) — the CLI/MCP bridge. Empty fileID is valid
+    /// for library-wide tasks like digest.
+    func launchClaude(_ fileID: String, task: String, prompt: String = "") async {
+        var args = ["claude"]
+        if !fileID.isEmpty { args.append(fileID) }
+        args += ["--task", task]
+        if !prompt.isEmpty { args += ["--prompt", prompt] }
+        await runPlaud(args: args)
+    }
+
+    // MARK: - Content-reuse marks
+
+    /// Chip tap: none → flagged → drafted → published → cleared.
+    func cycleReuse(_ fileID: String, channel: String) async {
+        let current = reuseMarks.first { $0.channel == channel }?.status
+        switch current {
+        case nil:
+            await runPlaud(args: ["reuse", fileID, channel])
+        case "flagged":
+            await runPlaud(args: ["reuse", fileID, channel, "--status", "drafted"])
+        case "drafted":
+            await runPlaud(args: ["reuse", fileID, channel, "--status", "published"])
+        default:
+            await runPlaud(args: ["reuse", fileID, channel, "--clear"])
+        }
+        if fileID == selectedID {
+            reuseMarks = Database.shared.reuseMarks(for: fileID)
+        }
+    }
+
+    func setReuseNote(_ fileID: String, channel: String, note: String) async {
+        let status = reuseMarks.first { $0.channel == channel }?.status ?? "flagged"
+        await runPlaud(args: ["reuse", fileID, channel, "--status", status, "--note", note])
+        if fileID == selectedID {
+            reuseMarks = Database.shared.reuseMarks(for: fileID)
+        }
     }
 
     /// Force a re-fetch of file detail (transcript + summary + folder ids)
@@ -1055,7 +1332,7 @@ final class FileStore: ObservableObject {
     @Published var audioURL: URL?
 
     func reloadCmdsTranscript() {
-        cmdsTranscript = selectedID.flatMap { Database.shared.cmdsTranscript(for: $0) }
+        loadContent(for: selectedID)
     }
 
     func transcribeWithElevenLabs(_ fileID: String, numSpeakers: Int = 0) async {
@@ -1067,6 +1344,8 @@ final class FileStore: ObservableObject {
         }
         await runPlaud(args: args)
         reloadCmdsTranscript()
+        // Transcription spends ElevenLabs credits — update the indicator.
+        await refreshElevenLabs(force: true)
     }
 
     func relabelCmdsSpeakers(_ fileID: String, mapping: [String: String],
@@ -1202,7 +1481,8 @@ final class FileStore: ObservableObject {
     /// FileStore is already `@MainActor`, so we assign directly (no extra hop),
     /// and validate the CLI output before trusting it as a streamable URL.
     func loadAudioURL(_ fileID: String) async {
-        let output = await runPlaudOutput(args: ["audio-url", fileID])
+        let output = await runPlaudOutput(args: ["audio-url", fileID], showError: false)
+        guard selectedID == fileID else { return }
         let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty,
               let url = URL(string: trimmed),
@@ -1215,80 +1495,15 @@ final class FileStore: ObservableObject {
         audioURL = url
     }
 
-    /// Shell out to `uv run plaud …` and return stdout.
-    ///
-    /// `timeout` (seconds) is an optional watchdog: when set, the process is
-    /// terminated if it overruns. When `nil` (the default), behavior is
-    /// unchanged — it waits indefinitely via `waitUntilExit()`, matching every
-    /// existing caller.
+    /// Run the installed Python environment off-main with concurrently drained
+    /// output and a bounded watchdog. Explicit timeouts override command defaults.
     func runPlaudOutput(
         args: [String],
         stdin: String? = nil,
         timeout: TimeInterval? = nil,
         showError: Bool = true
     ) async -> String {
-        let result = await Task.detached(priority: .userInitiated) { () -> CommandResult in
-            let stdout = Pipe()
-            let stderr = Pipe()
-            let input = stdin.map { _ in Pipe() }
-            do {
-                let process = try PlaudCommand.makeProcess(args: args)
-                process.standardOutput = stdout
-                process.standardError = stderr
-                if let input {
-                    process.standardInput = input
-                }
-                try process.run()
-                if let stdin,
-                   let input,
-                   let data = stdin.data(using: .utf8) {
-                    input.fileHandleForWriting.write(data)
-                    input.fileHandleForWriting.closeFile()
-                }
-
-                var timedOut = false
-                if let timeout {
-                    // Arm a watchdog that kills the process if it overruns, then
-                    // wait. Reading the pipes *after* the process exits (or is
-                    // killed) avoids a deadlock on a full pipe buffer for these
-                    // small-output commands.
-                    let watchdog = DispatchWorkItem {
-                        if process.isRunning {
-                            timedOut = true
-                            process.terminate()
-                        }
-                    }
-                    DispatchQueue.global().asyncAfter(
-                        deadline: .now() + timeout, execute: watchdog
-                    )
-                    process.waitUntilExit()
-                    watchdog.cancel()
-                } else {
-                    process.waitUntilExit()
-                }
-
-                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                if timedOut {
-                    return CommandResult(
-                        exitCode: -1,
-                        stdout: String(data: outData, encoding: .utf8) ?? "",
-                        stderr: "plaud command timed out after \(Int(timeout ?? 0))s"
-                    )
-                }
-                return CommandResult(
-                    exitCode: process.terminationStatus,
-                    stdout: String(data: outData, encoding: .utf8) ?? "",
-                    stderr: String(data: errData, encoding: .utf8) ?? ""
-                )
-            } catch {
-                return CommandResult(
-                    exitCode: -1,
-                    stdout: "",
-                    stderr: "plaud CLI failed: \(error.localizedDescription)"
-                )
-            }
-        }.value
+        let result = await executePlaud(args: args, stdin: stdin, timeout: timeout)
         if !result.ok && showError {
             lastCommandError = result.failureMessage
         }
@@ -1314,51 +1529,112 @@ final class FileStore: ObservableObject {
         loadContent(for: selectedID)
     }
 
+    /// Everything the detail pane needs for one recording, fetched together
+    /// off the main actor. Bundling avoids five separate hops and lets one
+    /// generation check drop the whole stale set at once.
+    private struct DetailBundle {
+        let metadata: NoteMetadataVM?
+        let dual: DualStateVM?
+        let reuse: [ReuseMarkVM]
+        let integrated: IntegratedContentVM?
+        let content: FileContentVM?
+        let transcript: String?
+        let stage: PipelineStage
+    }
+
+    /// Load the detail pane for `id`.
+    ///
+    /// Everything here — five SQLite reads, a ~166KB transcript JSON decode,
+    /// and a `data/integrated/` directory scan for the pipeline stage — used
+    /// to run synchronously on the main actor on every selection change AND
+    /// on every `reload()` (which the 1s DB watcher fires throughout a sync).
+    /// It now runs on a detached task; only the decoded value types are
+    /// published back. `contentGeneration` drops results from a selection the
+    /// user has already moved off of.
     private func loadContent(for id: String?) {
+        contentGeneration &+= 1
+        let generation = contentGeneration
+        if loadedContentID != id {
+            loadedContentID = id
+            content = nil
+            noteMetadata = nil
+            dualState = nil
+            reuseMarks = []
+            integratedContent = nil
+            cmdsTranscript = nil
+            selectedStage = .new
+            audioURL = nil
+        }
         guard let id else {
             content = nil
             noteMetadata = nil
+            dualState = nil
+            reuseMarks = []
+            integratedContent = nil
+            cmdsTranscript = nil
+            selectedStage = .new
             return
         }
-        noteMetadata = Database.shared.noteMetadata(for: id)
-        content = Database.shared.content(for: id)
-        if content == nil && !pendingDetailFetch.contains(id) {
-            pendingDetailFetch.insert(id)
-            Task {
-                await runPlaud(args: ["detail", id], showError: false)
-                self.pendingDetailFetch.remove(id)
-                self.content = Database.shared.content(for: id)
+        let hasContent = masterFiles.first { $0.id == id }?.file.hasContent ?? false
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let bundle = DetailBundle(
+                metadata: Database.shared.noteMetadata(for: id),
+                dual: Database.shared.dualState(for: id),
+                reuse: Database.shared.reuseMarks(for: id),
+                integrated: Database.shared.integratedContent(for: id),
+                content: Database.shared.content(for: id),
+                transcript: Database.shared.cmdsTranscript(for: id),
+                stage: PipelineStage.derive(fileID: id, hasContent: hasContent)
+            )
+            guard let self else { return }
+            await MainActor.run {
+                guard generation == self.contentGeneration else { return }
+                self.noteMetadata = bundle.metadata
+                self.dualState = bundle.dual
+                self.reuseMarks = bundle.reuse
+                self.integratedContent = bundle.integrated
+                self.content = bundle.content
+                self.cmdsTranscript = bundle.transcript
+                self.selectedStage = bundle.stage
+                self.contentRevision &+= 1
+                if bundle.content == nil && !self.pendingDetailFetch.contains(id) {
+                    self.pendingDetailFetch.insert(id)
+                    Task {
+                        await self.runPlaud(args: ["detail", id], showError: false)
+                        self.pendingDetailFetch.remove(id)
+                        let fetched = await Task.detached(priority: .userInitiated) {
+                            Database.shared.content(for: id)
+                        }.value
+                        guard generation == self.contentGeneration else { return }
+                        self.content = fetched
+                        self.contentRevision &+= 1
+                    }
+                }
             }
         }
     }
 
-    private func runPlaud(args: [String], showError: Bool = true) async {
-        let result = await Task.detached(priority: .userInitiated) { () -> CommandResult in
-            let stdout = Pipe()
-            let stderr = Pipe()
+    private func executePlaud(args: [String], stdin: String? = nil,
+                              timeout: TimeInterval? = nil) async -> CommandResult {
+        await Task.detached(priority: .userInitiated) {
             do {
                 let process = try PlaudCommand.makeProcess(args: args)
-                process.standardOutput = stdout
-                process.standardError = stderr
-                try process.run()
-                process.waitUntilExit()
-                let outData = stdout.fileHandleForReading.readDataToEndOfFile()
-                let errData = stderr.fileHandleForReading.readDataToEndOfFile()
-                return CommandResult(
-                    exitCode: process.terminationStatus,
-                    stdout: String(data: outData, encoding: .utf8) ?? "",
-                    stderr: String(data: errData, encoding: .utf8) ?? ""
-                )
+                let result = PlaudProcessRunner.run(process, stdin: stdin,
+                    timeout: timeout ?? PlaudCommand.timeout(for: args))
+                return CommandResult(exitCode: result.exitCode,
+                                     stdout: result.stdout, stderr: result.stderr)
             } catch {
-                return CommandResult(
-                    exitCode: -1,
-                    stdout: "",
-                    stderr: "plaud CLI failed: \(error.localizedDescription)"
-                )
+                return CommandResult(exitCode: -1, stdout: "",
+                                     stderr: error.localizedDescription)
             }
         }.value
-        if !result.ok && showError {
-            lastCommandError = result.failureMessage
-        }
+    }
+
+    @discardableResult
+    private func runPlaud(args: [String], showError: Bool = true) async -> Bool {
+        let result = await executePlaud(args: args)
+        if !result.ok && showError { lastCommandError = result.failureMessage }
+        return result.ok
     }
 }

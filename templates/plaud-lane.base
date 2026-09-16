@@ -1,0 +1,79 @@
+# Plaud intake lane — Obsidian Bases view for notes this app lands in the
+# vault (source: plaud). Installed by `plaud vault-base` next to the lane.
+filters:
+  and:
+    - 'source == "plaud"'
+    - 'file.ext == "md"'
+
+formulas:
+  recorded: 'if(date, date, file.ctime.format("YYYY-MM-DD"))'
+  category: 'if(CMDS, CMDS, "-")'
+  reuse: 'if(reuse-channels, reuse-channels, "")'
+
+properties:
+  formula.recorded:
+    displayName: "녹음일"
+  formula.category:
+    displayName: "CMDS"
+  index:
+    displayName: "Index"
+  status:
+    displayName: "상태"
+  dual:
+    displayName: "Dual"
+  speakers:
+    displayName: "화자"
+  formula.reuse:
+    displayName: "재사용"
+  file.name:
+    displayName: "노트"
+
+views:
+  - type: table
+    name: "Inbox (미처리)"
+    filters:
+      and:
+        - 'file.inFolder("00. Inbox/08. Transcripts/08-1. Plaud")'
+        - 'status != "completed"'
+    order:
+      - file.name
+      - formula.recorded
+      - formula.category
+      - index
+      - speakers
+      - status
+      - dual
+
+  - type: table
+    name: "CMDS별"
+    groupBy:
+      property: formula.category
+      direction: ASC
+    order:
+      - file.name
+      - formula.recorded
+      - index
+      - type
+      - status
+
+  - type: table
+    name: "재사용 후보"
+    filters:
+      and:
+        - 'reuse-channels'
+    order:
+      - file.name
+      - formula.recorded
+      - formula.reuse
+      - formula.category
+
+  - type: cards
+    name: "듀얼 전사본"
+    filters:
+      and:
+        - 'dual == true'
+    order:
+      - file.name
+      - formula.recorded
+      - speakers
+      - formula.category

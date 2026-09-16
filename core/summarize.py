@@ -28,14 +28,16 @@ from .templates import load_template
 MODEL_COMMANDS: dict[str, list[str]] = {
     "claude": ["claude", "--print"],
     "codex": ["codex", "exec", "--skip-git-repo-check"],
-    "gemini": ["gemini", "--prompt-interactive=false"],
+    # Gemini CLI headless: `-p` takes the prompt (docs/cli/tutorials/automation);
+    # stdin is treated as *context*, so the prompt must go as the last argv.
+    "gemini": ["gemini", "-p"],
     # Grok Build (SuperGrok subscription OAuth — no API cost). `-p` takes the
     # prompt as the LAST argv element; stdin piping is not supported.
     "grok": ["grok", "--disable-web-search", "--no-memory", "--no-subagents", "-p"],
 }
 
 # Models whose CLI takes the prompt as an argument instead of stdin.
-PROMPT_AS_ARG = {"grok"}
+PROMPT_AS_ARG = {"grok", "gemini"}
 
 # macOS ARG_MAX is 1 MiB shared with the environment; leave generous headroom.
 PROMPT_ARG_LIMIT = 700_000
@@ -43,6 +45,19 @@ PROMPT_ARG_LIMIT = 700_000
 # GUI apps inherit a minimal PATH; known install locations checked as fallback.
 CLI_FALLBACK_PATHS: dict[str, list[Path]] = {
     "grok": [Path.home() / ".grok" / "bin" / "grok"],
+    "claude": [Path.home() / ".local" / "bin" / "claude"],
+    "codex": [Path.home() / ".local" / "bin" / "codex"],
+    "gemini": [Path.home() / ".local" / "bin" / "gemini"],
+}
+
+# API-key env vars hidden from each vendor CLI so it authenticates with the
+# OAuth / subscription session instead of billing the key. (Claude Code,
+# Codex and Gemini CLI all prefer an env key when one is present.)
+CLI_STRIP_ENV: dict[str, tuple[str, ...]] = {
+    "claude": ("ANTHROPIC_API_KEY",),
+    "codex": ("OPENAI_API_KEY",),
+    "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "grok": ("XAI_API_KEY",),
 }
 
 
@@ -133,10 +148,9 @@ def _run_cli(model: str, prompt: str, *, timeout: int) -> str:
             )
         argv.append(prompt)
         stdin_input = None
-    if model == "grok":
-        # Strip XAI_API_KEY so Grok Build authenticates with the SuperGrok
-        # subscription OAuth session instead of billing the API key.
-        env = {k: v for k, v in os.environ.items() if k != "XAI_API_KEY"}
+    strip = CLI_STRIP_ENV.get(model)
+    if strip:
+        env = {k: v for k, v in os.environ.items() if k not in strip}
     proc = subprocess.run(
         argv,
         input=stdin_input,
@@ -180,7 +194,7 @@ def _claude_api(prompt: str, *, model_id: str | None, timeout: int) -> str:
     key = os.environ.get("ANTHROPIC_API_KEY") or _zshrc_value("ANTHROPIC_API_KEY")
     if not key:
         raise ModelNotInstalled("ANTHROPIC_API_KEY not set")
-    model_id = model_id or app_config.model_id_for("claude") or "claude-opus-4-7"
+    model_id = model_id or app_config.model_id_for("claude") or "claude-fable-5"
     r = httpx.post(
         "https://api.anthropic.com/v1/messages",
         headers={
@@ -206,7 +220,7 @@ def _openai_api(prompt: str, *, model_id: str | None, timeout: int) -> str:
     key = os.environ.get("OPENAI_API_KEY") or _zshrc_value("OPENAI_API_KEY")
     if not key:
         raise ModelNotInstalled("OPENAI_API_KEY not set")
-    model_id = model_id or app_config.model_id_for("codex") or "gpt-5.5"
+    model_id = model_id or app_config.model_id_for("codex") or "gpt-5.6-sol"
     r = httpx.post(
         "https://api.openai.com/v1/chat/completions",
         headers={
@@ -250,7 +264,7 @@ def _xai_api(prompt: str, *, model_id: str | None, timeout: int) -> str:
     key = os.environ.get("XAI_API_KEY") or _zshrc_value("XAI_API_KEY")
     if not key:
         raise ModelNotInstalled("XAI_API_KEY not set")
-    model_id = model_id or app_config.model_id_for("grok") or "grok-4.20-0309-reasoning"
+    model_id = model_id or app_config.model_id_for("grok") or "grok-4.6"
     r = httpx.post(
         "https://api.x.ai/v1/chat/completions",
         headers={

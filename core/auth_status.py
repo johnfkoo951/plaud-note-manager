@@ -9,10 +9,14 @@ optionally confirm the token is actually live (not revoked) with one cheap call.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
 import time
 from dataclasses import dataclass
+from tempfile import NamedTemporaryFile
 
+from .paths import DATA_DIR
 from .config import ConfigError, load_config
 
 # Warn when the token expires within this window (seconds).
@@ -35,7 +39,7 @@ def mask_id(value: str | None, *, prefix: int = 6, suffix: int = 3) -> str | Non
 @dataclass
 class AuthStatus:
     configured: bool
-    state: str  # valid | expiring | expired | unconfigured | unknown
+    state: str  # valid | expiring | expired | unconfigured | store_unavailable | unknown
     workspace_id: str | None = None
     member_id: str | None = None
     role: str | None = None
@@ -68,7 +72,8 @@ def _decode_jwt_payload(token: str) -> dict | None:
     payload = parts[1]
     payload += "=" * (-len(payload) % 4)  # restore base64 padding
     try:
-        return json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+        claims = json.loads(base64.urlsafe_b64decode(payload).decode("utf-8"))
+        return claims if isinstance(claims, dict) else None
     except Exception:
         return None
 
@@ -86,6 +91,99 @@ def _human_duration(seconds: int) -> str:
     return f"{m}m"
 
 
+# --- Server-verdict memo -----------------------------------------------------
+#
+# A Plaud token's JWT `exp` is only a *claim*. The server can invalidate a
+# token long before that — signing in on web.plaud.ai rotates the workspace
+# chain, and every previously-issued token starts coming back as -419 while
+# still claiming hours of life.
+#
+# Offline expiry math cannot see this, and everything downstream believed it:
+# `auth --json` reported "valid", the app's self-heal saw no problem, and
+# `auth-recover`'s precheck returned "fresh" and stopped before recovering.
+# So we persist the server's verdict the moment an API call is rejected, and
+# let it override the token's own claim until a genuinely new token arrives.
+
+REJECTION_FILE = DATA_DIR / "auth_state.json"
+
+
+def authorization_fingerprint(authorization: str) -> str:
+    """Identify a credential generation without persisting the credential."""
+    token = authorization.strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _rejection_path(scope: str):
+    return (
+        REJECTION_FILE if scope == "access" else REJECTION_FILE.with_name("auth_refresh_state.json")
+    )
+
+
+def record_auth_rejection(
+    *,
+    status: int | str | None = None,
+    now: int | None = None,
+    authorization: str | None = None,
+    scope: str = "access",
+) -> None:
+    """Remember that the server rejected the current credential.
+
+    Called from the API client on any auth rejection. Best-effort: a failure
+    to persist must never mask the original API error.
+    """
+    now = int(time.time()) if now is None else now
+    path = _rejection_path(scope)
+    payload = {"rejected_at": now, "status": status}
+    if authorization:
+        payload["generation"] = authorization_fingerprint(authorization)
+    temp = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as f:
+            temp = f.name
+            json.dump(payload, f)
+        os.replace(temp, path)
+    except OSError:
+        if temp:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+
+
+def clear_auth_rejection(*, scope: str | None = None, authorization: str | None = None) -> None:
+    """Forget the rejection — called whenever a fresh token is written."""
+    for kind in (scope,) if scope else ("access", "refresh"):
+        if authorization is not None and auth_rejected_at(authorization, scope=kind) is None:
+            continue
+        try:
+            _rejection_path(kind).unlink()
+        except OSError:
+            pass
+
+
+def auth_rejected_at(authorization: str | None = None, *, scope: str = "access") -> int | None:
+    """Epoch seconds of the last recorded server rejection, if any."""
+    try:
+        raw = json.loads(_rejection_path(scope).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    if authorization and raw.get("generation"):
+        if raw["generation"] != authorization_fingerprint(authorization):
+            return None
+    value = raw.get("rejected_at")
+    if authorization and not raw.get("generation") and isinstance(value, (int, float)):
+        token = authorization[7:] if authorization.lower().startswith("bearer ") else authorization
+        issued = (_decode_jwt_payload(token) or {}).get("iat")
+        if isinstance(issued, (int, float)) and value < issued:
+            return None
+    return int(value) if isinstance(value, (int, float)) else None
+
+
 def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
     """Return the current Plaud credential status.
 
@@ -94,8 +192,19 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
     """
     now = int(time.time()) if now is None else now
     try:
-        cfg = load_config()
+        # Status polling must not consume a rotating token or block behind a
+        # network refresh. Operational commands and auth-recover own renewal.
+        cfg = load_config(auto_refresh=False)
     except ConfigError as exc:
+        from .secret_store import CredentialStoreError
+
+        if isinstance(exc.__cause__, CredentialStoreError):
+            return AuthStatus(
+                configured=False,
+                state="store_unavailable",
+                auto_refresh="store_unavailable",
+                detail="Credential storage is unavailable; retry when macOS Keychain and its lock are accessible",
+            )
         return AuthStatus(
             configured=False,
             state="unconfigured",
@@ -128,6 +237,19 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
         state = "expiring"
     else:
         state = "valid"
+    claim_state, claim_detail = state, detail
+
+    # The server's verdict outranks the token's own claim. Only honor a
+    # rejection recorded *after* this token was issued — otherwise a stale
+    # memo would condemn the fresh token that just replaced the bad one.
+    rejected_at = auth_rejected_at(cfg.authorization)
+    if rejected_at is not None and state in ("valid", "expiring", "unknown"):
+        issued = int(iat) if isinstance(iat, (int, float)) else None
+        if issued is None or rejected_at >= issued:
+            state = "rejected"
+            detail = (
+                detail + "; " if detail else ""
+            ) + "server rejected this token (re-run `plaud auth-recover --force`)"
 
     auto_refresh, refresh_expires_at = _auto_refresh_state(now)
 
@@ -140,10 +262,15 @@ def auth_status(*, live: bool = False, now: int | None = None) -> AuthStatus:
             with PlaudClient(cfg) as client:
                 client.list_files(limit=1)
             live_state = "ok"
+            clear_auth_rejection(scope="access", authorization=cfg.authorization)
+            state, detail = claim_state, claim_detail
         except PlaudAPIError as exc:
             # Plaud also reports an expired workspace token as HTTP 200 with
             # business status -419, which is just as conclusive as HTTP 401/403.
             live_state = "rejected" if exc.is_auth_rejection else "unreachable"
+            if live_state == "rejected":
+                state = "rejected"
+                detail = "Plaud rejected the current access token"
 
     return AuthStatus(
         configured=True,
@@ -182,7 +309,15 @@ def _auto_refresh_state(now: int) -> tuple[str, int | None]:
     if not values.get("PLAUD_WS_REFRESH_TOKEN"):
         return "not_bootstrapped", None
 
-    from .ws_refresh import REFRESH_TOKEN_WARN_WINDOW, _normalize_epoch_seconds
+    from .ws_refresh import (
+        REFRESH_TOKEN_WARN_WINDOW,
+        _normalize_epoch_seconds,
+        _wid_from_authorization,
+    )
+
+    access_wid = _wid_from_authorization(values.get("PLAUD_AUTHORIZATION") or "")
+    if not access_wid or access_wid != values.get("PLAUD_WORKSPACE_ID"):
+        return "not_bootstrapped", None
 
     expires_at = _normalize_epoch_seconds(values.get("PLAUD_WS_REFRESH_EXPIRES_AT"))
     if expires_at is None:

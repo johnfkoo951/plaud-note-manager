@@ -9,9 +9,11 @@ Plaud web auth is two-tier OAuth (decoded from the web bundle, 2026-06-20):
                                   refresh_token, refresh_expires_in } }
 
 `workspace_token` IS the `client_id: web` 24h JWT the app stores in
-`PLAUD_AUTHORIZATION`. So as long as we hold a non-expired *workspace refresh
-token*, we can mint a fresh 24h token forever — fully headless. Each refresh
-ROTATES the refresh token, so the new one must be persisted every cycle.
+`PLAUD_AUTHORIZATION`. While the *workspace refresh token* remains accepted we
+can mint fresh 24h tokens headlessly. Plaud may revoke that rotating chain
+before its advertised horizon; the macOS app then uses its persistent account
+session to obtain a new workspace pair. Each normal refresh ROTATES the token,
+so the new one must be persisted every cycle.
 
 ONE-TIME BOOTSTRAP — the refresh token never appears in a copied cURL (it
 lives in web.plaud.ai localStorage), so it must be captured once. Three ways:
@@ -131,6 +133,12 @@ def _wid_from_authorization(authorization: str) -> str | None:
     return str(wid) if wid else None
 
 
+def _authorization_is_expired(authorization: str, *, now: int) -> bool:
+    claims = _decode_jwt_payload(_strip_bearer(authorization)) or {}
+    exp = claims.get("exp")
+    return isinstance(exp, (int, float)) and int(exp) <= now
+
+
 def _env_value(values: Mapping[str, str], key: str) -> str:
     """Stored credential first, explicit process environment as fallback."""
     return values.get(key) or os.environ.get(key) or ""
@@ -153,6 +161,25 @@ def _normalize_epoch_seconds(value: object) -> int | None:
     if n > 10**11:  # epoch millis (10**11 seconds is the year 5138)
         n //= 1000
     return n
+
+
+def workspace_refresh_is_armed(values: Mapping[str, str], *, now: int | None = None) -> bool:
+    """Return whether the stored renewal belongs to the current access token.
+
+    A refresh token has no locally inspectable workspace claim of its own, so
+    its accompanying ``PLAUD_WORKSPACE_ID`` is the binding.  Never treat a
+    token as armed when the access JWT is opaque, the workspaces differ, or a
+    known refresh horizon has passed.
+    """
+    if not values.get("PLAUD_WS_REFRESH_TOKEN"):
+        return False
+    access_wid = _wid_from_authorization(values.get("PLAUD_AUTHORIZATION", ""))
+    refresh_wid = values.get("PLAUD_WORKSPACE_ID")
+    if not access_wid or not refresh_wid or access_wid != refresh_wid:
+        return False
+    refresh_expires_at = _normalize_epoch_seconds(values.get("PLAUD_WS_REFRESH_EXPIRES_AT"))
+    now = int(time.time()) if now is None else now
+    return refresh_expires_at is None or refresh_expires_at > now
 
 
 def _normalize_domain(domain: str) -> str:
@@ -217,33 +244,60 @@ def credential_env_updates(
     env_path: Path,
     *,
     workspace_list_json: str | None = None,
+    replace_workspace_refresh: bool = False,
     already_locked: bool = False,
+    now: int | None = None,
 ) -> dict[str, str | None]:
     """Turn a full credential capture into a merge-safe credential update.
 
     Capture-owned keys are set or explicitly cleared (a stale cookie must not
     outlive the login that replaced it). The PLAUD_WS_* bootstrap keys are
-    preserved so a cURL re-import cannot disarm headless refresh — unless the
-    new token belongs to a *different* workspace (stale, cleared).  A captured
-    localStorage token never replaces an existing token for the same workspace:
-    the stored one may already have rotated beyond the browser's stale copy.
+    preserved only when the captured JWT positively identifies the same
+    workspace and the stored refresh horizon has not passed. A captured
+    localStorage token normally does not replace an existing safe token for
+    the same workspace: the stored one may already have rotated beyond the
+    browser's stale copy. ``replace_workspace_refresh`` is reserved for a
+    newer/recovered WebKit generation whose access token was validated in
+    memory.
     """
     updates: dict[str, str | None] = {key: captured.get(key) or None for key in CAPTURE_OWNED_KEYS}
     new_wid = _wid_from_authorization(captured.get("PLAUD_AUTHORIZATION", ""))
     stored = load_credential_values(env_path, already_locked=already_locked)
-    stored_wid = stored.get("PLAUD_WORKSPACE_ID") or _wid_from_authorization(
-        stored.get("PLAUD_AUTHORIZATION", "")
-    )
+    stored_wid = stored.get("PLAUD_WORKSPACE_ID")
     stored_refresh = stored.get("PLAUD_WS_REFRESH_TOKEN")
+    refresh_expires_at = _normalize_epoch_seconds(stored.get("PLAUD_WS_REFRESH_EXPIRES_AT"))
+    now = int(time.time()) if now is None else now
+    candidate_is_expired = _authorization_is_expired(
+        captured.get("PLAUD_AUTHORIZATION", ""), now=now
+    )
+    stored_refresh_is_safe = bool(
+        new_wid
+        and not candidate_is_expired
+        and stored_wid
+        and new_wid == stored_wid
+        and stored_refresh
+        and (refresh_expires_at is None or refresh_expires_at > now)
+    )
+    from .auth_status import auth_rejected_at
+
+    if auth_rejected_at(stored.get("PLAUD_AUTHORIZATION"), scope="refresh") is not None:
+        stored_refresh_is_safe = False
 
     entry: WorkspaceBootstrap | None = None
-    if workspace_list_json:
+    if workspace_list_json and new_wid and not candidate_is_expired:
         try:
             entry = select_workspace_entry(parse_workspace_list(workspace_list_json), wid=new_wid)
         except ValueError:
             entry = None  # malformed export is not fatal — headless refresh just stays unarmed
+    entry_is_current = bool(
+        entry and (entry.refresh_expires_at is None or entry.refresh_expires_at > now)
+    )
 
-    if entry is not None and not (stored_refresh and stored_wid == entry.workspace_id):
+    if (
+        entry_is_current
+        and entry is not None
+        and (replace_workspace_refresh or not stored_refresh_is_safe)
+    ):
         updates["PLAUD_WORKSPACE_ID"] = entry.workspace_id
         updates["PLAUD_WS_REFRESH_TOKEN"] = entry.refresh_token
         updates["PLAUD_WS_REFRESH_EXPIRES_AT"] = (
@@ -251,11 +305,10 @@ def credential_env_updates(
         )
         if entry.domain:
             updates["PLAUD_BASE_URL"] = _normalize_domain(entry.domain)
-    elif entry is None:
-        if stored_wid and new_wid and stored_wid != new_wid:
-            updates["PLAUD_WORKSPACE_ID"] = None
-            updates["PLAUD_WS_REFRESH_TOKEN"] = None
-            updates["PLAUD_WS_REFRESH_EXPIRES_AT"] = None
+    elif not stored_refresh_is_safe:
+        updates["PLAUD_WORKSPACE_ID"] = None
+        updates["PLAUD_WS_REFRESH_TOKEN"] = None
+        updates["PLAUD_WS_REFRESH_EXPIRES_AT"] = None
     return updates
 
 
@@ -273,7 +326,7 @@ def _call_workspace_refresh(
     )
     resp.raise_for_status()
     body = resp.json()
-    if body.get("status") != 0:
+    if body.get("status") not in (0, "0"):
         raise WorkspaceRefreshAPIError(body.get("status"))
     data = body["data"]
     return RefreshResult(
@@ -287,7 +340,14 @@ def _call_workspace_refresh(
 
 
 def apply_refresh_result(
-    result: RefreshResult, env_path: Path, *, now: int, already_locked: bool = False
+    result: RefreshResult,
+    env_path: Path,
+    *,
+    now: int,
+    already_locked: bool = False,
+    workspace_id: str | None = None,
+    base_url: str | None = None,
+    refresh_expires_at_hint: int | None = None,
 ) -> RefreshOutcome:
     """Persist a successful refresh atomically and report what happened.
 
@@ -300,7 +360,15 @@ def apply_refresh_result(
     if not already_locked:
         try:
             with credential_lock(env_path):
-                return apply_refresh_result(result, env_path, now=now, already_locked=True)
+                return apply_refresh_result(
+                    result,
+                    env_path,
+                    now=now,
+                    already_locked=True,
+                    workspace_id=workspace_id,
+                    base_url=base_url,
+                    refresh_expires_at_hint=refresh_expires_at_hint,
+                )
         except CredentialStoreError as exc:
             return RefreshOutcome("write_failed", str(exc))
 
@@ -312,7 +380,7 @@ def apply_refresh_result(
         )
 
     current = load_credential_values(env_path, already_locked=already_locked)
-    expected_wid = current.get("PLAUD_WORKSPACE_ID")
+    expected_wid = workspace_id or current.get("PLAUD_WORKSPACE_ID")
     returned_wid = claims.get("wid")
     if expected_wid and returned_wid != expected_wid:
         return RefreshOutcome(
@@ -322,19 +390,34 @@ def apply_refresh_result(
 
     exp = claims.get("exp")
     access_expires_at = int(exp) if isinstance(exp, (int, float)) else now + result.expires_in
+    if access_expires_at <= now or not result.refresh_token:
+        return RefreshOutcome(
+            "rejected", "server returned an unusable token pair — credentials unchanged"
+        )
 
     updates: dict[str, str | None] = {
         "PLAUD_AUTHORIZATION": f"bearer {result.workspace_token}",
         "PLAUD_WS_REFRESH_TOKEN": result.refresh_token,
     }
+    if workspace_id:
+        updates["PLAUD_WORKSPACE_ID"] = workspace_id
+    if base_url:
+        updates["PLAUD_BASE_URL"] = base_url
     if result.refresh_expires_in is not None:
         refresh_expires_at: int | None = now + result.refresh_expires_in
         updates["PLAUD_WS_REFRESH_EXPIRES_AT"] = str(refresh_expires_at)
+    elif workspace_id is not None:
+        refresh_expires_at = refresh_expires_at_hint
+        updates["PLAUD_WS_REFRESH_EXPIRES_AT"] = (
+            str(refresh_expires_at) if refresh_expires_at is not None else None
+        )
     else:
         # Server omitted it — keep the previously recorded horizon rather than
         # discarding the one signal that tells us when re-bootstrap is due.
         refresh_expires_at = _normalize_epoch_seconds(current.get("PLAUD_WS_REFRESH_EXPIRES_AT"))
 
+    # `update_credential_values` clears any recorded server rejection: this
+    # credential is new, so the old verdict no longer applies to it.
     update_credential_values(updates, env_path, already_locked=already_locked)
     return RefreshOutcome(
         "ok",
@@ -385,7 +468,18 @@ def _refresh_workspace_token_locked(
         return RefreshOutcome("not_bootstrapped", "workspace id unknown — sign in once again")
 
     remaining = _access_token_remaining(values, now)
-    if only_if_needed and remaining is not None and remaining > REFRESH_WHEN_REMAINING:
+    # `remaining` is the token's own claim. If the server has since rejected
+    # it, that claim is worthless — skipping the refresh here is exactly what
+    # made `auth-recover` answer "nothing to do" while every API call 419'd.
+    from .auth_status import auth_rejected_at
+
+    server_rejected = auth_rejected_at(_env_value(values, "PLAUD_AUTHORIZATION")) is not None
+    if (
+        only_if_needed
+        and not server_rejected
+        and remaining is not None
+        and remaining > REFRESH_WHEN_REMAINING
+    ):
         return RefreshOutcome(
             "fresh",
             "access token still valid — nothing to do",
@@ -401,6 +495,14 @@ def _refresh_workspace_token_locked(
     except httpx.HTTPStatusError as exc:
         code = exc.response.status_code
         if code in (401, 403):
+            from .auth_status import record_auth_rejection
+
+            record_auth_rejection(
+                status=code,
+                now=now,
+                scope="refresh",
+                authorization=_env_value(values, "PLAUD_AUTHORIZATION"),
+            )
             _disarm(env_path, already_locked=True)
             return RefreshOutcome(
                 "rejected",
@@ -411,14 +513,49 @@ def _refresh_workspace_token_locked(
         return RefreshOutcome("unreachable", f"network error: {exc}")
     except WorkspaceRefreshAPIError as exc:
         if exc.status in (-419, 401, 403, "-419", "401", "403"):
+            from .auth_status import record_auth_rejection
+
+            record_auth_rejection(
+                status=exc.status,
+                now=now,
+                scope="refresh",
+                authorization=_env_value(values, "PLAUD_AUTHORIZATION"),
+            )
             _disarm(env_path, already_locked=True)
             return RefreshOutcome(
                 "rejected",
                 "refresh token invalid/expired — automatic renewal was disarmed; sign in once",
             )
+        if exc.status in (-420, 420, "-420", "420"):
+            # Observed 2026-08-19: after a web.plaud.ai sign-in rotated the
+            # chain, the refresh call answered -420. That is a rejection, not
+            # an outage — reporting it as "unreachable" stopped the recovery
+            # ladder from climbing to the browser re-harvest that fixes it.
+            # The stored token is conclusively dead. Keeping it made auth look
+            # "ready" and also caused Web Login to preserve it over the fresh
+            # browser candidate. Disarm it; bootstrap keeps the workspace id
+            # and can atomically install/verify the browser's replacement.
+            from .auth_status import record_auth_rejection
+
+            record_auth_rejection(
+                status=exc.status,
+                now=now,
+                scope="refresh",
+                authorization=_env_value(values, "PLAUD_AUTHORIZATION"),
+            )
+            _disarm(env_path, already_locked=True)
+            return RefreshOutcome(
+                "rejected",
+                "refresh token rejected (-420) — automatic renewal was disarmed; "
+                "re-harvest from the browser session",
+            )
         # A non-auth business failure may be transient.  Preserve the rotating
         # credential instead of destructively disarming it.
         return RefreshOutcome("unreachable", f"Plaud refresh status {exc.status}")
+    except (ValueError, KeyError, TypeError):
+        return RefreshOutcome(
+            "invalid_payload", "Plaud returned an invalid refresh response; credentials unchanged"
+        )
 
     try:
         return apply_refresh_result(result, env_path, now=now, already_locked=True)
@@ -456,7 +593,16 @@ def ensure_fresh_token(
     if not _env_value(values, "PLAUD_WS_REFRESH_TOKEN"):
         return None
     remaining = _access_token_remaining(values, now)
-    if remaining is not None and remaining > REFRESH_WHEN_REMAINING:
+    # A server-side rejection outranks the JWT's self-reported lifetime.  The
+    # inner locked function already knows this, but returning here used to keep
+    # it unreachable whenever a revoked token still claimed >6h remaining.
+    from .auth_status import auth_rejected_at
+
+    if (
+        auth_rejected_at(_env_value(values, "PLAUD_AUTHORIZATION")) is None
+        and remaining is not None
+        and remaining > REFRESH_WHEN_REMAINING
+    ):
         return None
     return refresh_workspace_token(env_path=env_path, now=now, only_if_needed=True)
 
@@ -466,9 +612,8 @@ def bootstrap_workspace(
 ) -> RefreshOutcome:
     """One-time arm of headless refresh from a workspaceList export.
 
-    Persists the refresh credentials, then immediately performs one real
-    refresh — this both proves the pasted token works and rotates it, so the
-    value sitting in the browser's localStorage is no longer the live one.
+    Validate the candidate in memory, then atomically save the returned pair.
+    A stale browser candidate never replaces/disarms the stored generation.
     """
     env_path = resolve_env_path(env_path)
     now = int(time.time()) if now is None else now
@@ -493,16 +638,51 @@ def bootstrap_workspace(
                     f"export contains: {listed}",
                 )
 
-            updates: dict[str, str | None] = {
-                "PLAUD_WORKSPACE_ID": entry.workspace_id,
-                "PLAUD_WS_REFRESH_TOKEN": entry.refresh_token,
-            }
-            if entry.refresh_expires_at:
-                updates["PLAUD_WS_REFRESH_EXPIRES_AT"] = str(entry.refresh_expires_at)
-            if entry.domain:
-                updates["PLAUD_BASE_URL"] = _normalize_domain(entry.domain)
-            update_credential_values(updates, env_path, already_locked=True)
-            # Validate immediately and persist only the server's rotated token.
-            return _refresh_workspace_token_locked(env_path=env_path, now=now)
+            if entry.refresh_expires_at is not None and entry.refresh_expires_at <= now:
+                return RefreshOutcome(
+                    "rejected", "browser renewal candidate has expired; credentials unchanged"
+                )
+            base_url = (
+                _normalize_domain(entry.domain)
+                if entry.domain
+                else _env_value(values, "PLAUD_BASE_URL") or "https://api-apne1.plaud.ai"
+            )
+            try:
+                result = _call_workspace_refresh(
+                    base_url=base_url,
+                    workspace_id=entry.workspace_id,
+                    refresh_token=entry.refresh_token,
+                )
+            except httpx.HTTPStatusError as exc:
+                status = "rejected" if exc.response.status_code in (401, 403) else "unreachable"
+                return RefreshOutcome(
+                    status, "browser renewal candidate could not be verified; credentials unchanged"
+                )
+            except httpx.RequestError:
+                return RefreshOutcome(
+                    "unreachable", "network unavailable; existing credentials unchanged"
+                )
+            except WorkspaceRefreshAPIError as exc:
+                status = (
+                    "rejected"
+                    if str(exc.status) in ("401", "403", "-419", "419", "-420", "420")
+                    else "unreachable"
+                )
+                return RefreshOutcome(
+                    status, "browser renewal candidate was not accepted; credentials unchanged"
+                )
+            except (ValueError, KeyError, TypeError):
+                return RefreshOutcome(
+                    "invalid_payload", "invalid renewal response; credentials unchanged"
+                )
+            return apply_refresh_result(
+                result,
+                env_path,
+                now=now,
+                already_locked=True,
+                workspace_id=entry.workspace_id,
+                base_url=base_url,
+                refresh_expires_at_hint=entry.refresh_expires_at,
+            )
     except (OSError, CredentialStoreError) as exc:
         return RefreshOutcome("write_failed", f"could not persist credentials: {exc}")

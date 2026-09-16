@@ -64,6 +64,33 @@ def test_search_empty_query_returns_nothing(tmp_path: Path) -> None:
     assert storage.search_recordings("   ") == []
 
 
+def test_fts_miss_does_not_scan_every_transcript(tmp_path, monkeypatch) -> None:
+    storage = _seed(tmp_path)
+    assert storage._fts_ok
+
+    def unexpected_scan(*args):
+        raise AssertionError("a valid empty FTS result must not trigger a full scan")
+
+    monkeypatch.setattr(storage, "_search_like", unexpected_scan)
+    assert storage.search_recordings("nonexistentphrase") == []
+
+
+def test_short_search_treats_sql_wildcards_literally(tmp_path) -> None:
+    storage = _seed(tmp_path)
+    assert storage.search_recordings("%") == []
+    assert storage.search_recordings("_") == []
+
+
+def test_reopening_storage_does_not_run_schema_ddl(tmp_path) -> None:
+    _seed(tmp_path)
+    # A concurrent SQLite reader should be able to initialize Storage without
+    # introducing writes or emitting another WAL transaction.
+    before = (tmp_path / "t.db").read_bytes()
+    reopened = Storage(tmp_path / "t.db")
+    assert reopened.search_recordings("improvisation")[0]["file_id"] == "b"
+    assert (tmp_path / "t.db").read_bytes() == before
+
+
 def test_reindex_counts_rows(tmp_path: Path) -> None:
     storage = _seed(tmp_path)
     assert storage.rebuild_search_index() == 2

@@ -71,6 +71,39 @@ def load_elevenlabs_key() -> str | None:
     return _scan_shell_files_for_key()
 
 
+def elevenlabs_subscription() -> dict[str, Any]:
+    """Remaining STT credits + reset date from /v1/user/subscription.
+
+    Returns {"status": "ok", tier, used, limit, remaining, reset_at} or
+    {"status": "no_key" | "error", "detail": …}. Never raises — the app polls
+    this for a passive indicator and must degrade quietly.
+    """
+    api_key = load_elevenlabs_key()
+    if not api_key:
+        return {"status": "no_key", "detail": "ELEVENLABS_API_KEY not found"}
+    try:
+        resp = httpx.get(
+            "https://api.elevenlabs.io/v1/user/subscription",
+            headers={"xi-api-key": api_key},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+    used = int(data.get("character_count") or 0)
+    limit = int(data.get("character_limit") or 0)
+    return {
+        "status": "ok",
+        "tier": str(data.get("tier") or ""),
+        "used": used,
+        "limit": limit,
+        "remaining": max(0, limit - used),
+        # Unix seconds of the next credit reset (billing-cycle renewal).
+        "reset_at": int(data.get("next_character_count_reset_unix") or 0),
+    }
+
+
 def transcribe_file(
     cfg: PlaudConfig,
     file_id: str,

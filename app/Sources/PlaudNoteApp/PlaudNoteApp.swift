@@ -31,7 +31,7 @@ struct PlaudNoteApp: App {
         // Default matches Yohan's working window on the 14" MBP
         // (1608×854pt, ~1.88:1) — sidebar + list + detail + Work Sidebar
         // all visible without horizontal crowding.
-        .defaultSize(width: 1608, height: 854)
+        .defaultSize(width: WorkspaceLayout.windowWidth, height: WorkspaceLayout.windowHeight)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appSettings) {

@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import time
 
+import httpx
+import pytest
 from typer.testing import CliRunner
 
 import core.web_auth as web_auth_mod
+import core.auth_status as auth_status_mod
 from cli.main import app
-from core.client import PlaudAPIError
+from core.client import PlaudAPIError, PlaudClient
 from core.config import load_config
 from core.web_auth import WebAuthCapture, import_web_auth
 from tests.test_auth_status import _make_jwt
@@ -27,6 +30,9 @@ def _clear_auth_env(monkeypatch) -> None:
         "PLAUD_ORIGIN",
         "PLAUD_REFERER",
         "PLAUD_TIMEZONE",
+        "PLAUD_WORKSPACE_ID",
+        "PLAUD_WS_REFRESH_TOKEN",
+        "PLAUD_WS_REFRESH_EXPIRES_AT",
     ):
         monkeypatch.delenv(key, raising=False)
 
@@ -35,9 +41,16 @@ def _fake_client(record: dict, *, error: Exception | None = None):
     """Stand-in for PlaudClient that records the candidate config it was given."""
 
     class FakeClient:
-        def __init__(self, cfg, *, timeout: float = 30.0) -> None:
+        def __init__(
+            self,
+            cfg,
+            *,
+            timeout: float = 30.0,
+            record_auth_rejections: bool = True,
+        ) -> None:
             record["authorization"] = cfg.authorization
             record["timeout"] = timeout
+            record["record_auth_rejections"] = record_auth_rejections
 
         def __enter__(self) -> "FakeClient":
             return self
@@ -206,7 +219,9 @@ def test_import_web_auth_rejected_keeps_previous_env_untouched(tmp_path, monkeyp
     assert env_path.read_bytes() == previous.encode("utf-8")
 
 
-def test_import_web_auth_unreachable_writes_env_with_warning(tmp_path, monkeypatch) -> None:
+def test_import_web_auth_unreachable_never_writes_unverified_credentials(
+    tmp_path, monkeypatch
+) -> None:
     _clear_auth_env(monkeypatch)
     env_path = tmp_path / ".env"
 
@@ -221,10 +236,9 @@ def test_import_web_auth_unreachable_writes_env_with_warning(tmp_path, monkeypat
     )
 
     assert result.status == "live_check_unavailable"
-    assert "could not be verified" in result.detail
-    assert "PLAUD_AUTHORIZATION='Bearer unverified.token.value'" in env_path.read_text(
-        encoding="utf-8"
-    )
+    assert "Keychain unchanged" in result.detail
+    assert not env_path.exists()
+    assert result.auto_refresh_armed is False
 
 
 def test_import_web_auth_expired_capture_skips_validator_and_write(tmp_path) -> None:
@@ -269,7 +283,101 @@ def test_default_live_validator_probes_candidate_credentials(tmp_path, monkeypat
     # The probe must see the candidate credentials in memory — never .env.
     assert record["authorization"] == "Bearer candidate.token.value"
     assert record["timeout"] == 10.0
+    assert record["record_auth_rejections"] is False
     assert record["limit"] == 1
+
+
+@pytest.mark.parametrize("failure", ["http_401", "business_419", "unreachable"])
+def test_candidate_live_probe_keeps_existing_rejection_memo_byte_identical(
+    tmp_path, monkeypatch, failure: str
+) -> None:
+    _clear_auth_env(monkeypatch)
+    env_path = tmp_path / ".env"
+    memo_path = auth_status_mod.REJECTION_FILE
+    previous = b'{"rejected_at":111,"status":"existing-keychain-generation"}\n'
+    memo_path.write_bytes(previous)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if failure == "http_401":
+            return httpx.Response(401, request=request, json={"detail": "candidate rejected"})
+        if failure == "business_419":
+            return httpx.Response(
+                200,
+                request=request,
+                json={"status": -419, "msg": "candidate expired"},
+            )
+        raise httpx.ConnectError("candidate network unavailable", request=request)
+
+    def candidate_client(cfg, *, timeout, record_auth_rejections=True):
+        client = PlaudClient(
+            cfg,
+            timeout=timeout,
+            record_auth_rejections=record_auth_rejections,
+        )
+        client._client.close()
+        client._client = httpx.Client(
+            base_url=cfg.base_url,
+            headers=cfg.headers(),
+            transport=httpx.MockTransport(handler),
+        )
+        return client
+
+    monkeypatch.setattr(web_auth_mod, "PlaudClient", candidate_client)
+
+    result = import_web_auth(
+        {
+            "authorization": "Bearer rejected.candidate.token",
+            "x_device_id": "candidate-device",
+        },
+        env_path=env_path,
+    )
+
+    expected_status = "live_check_unavailable" if failure == "unreachable" else "live_auth_failed"
+    assert result.status == expected_status
+    assert memo_path.read_bytes() == previous
+
+
+@pytest.mark.parametrize("failure", ["http_403", "unreachable"])
+def test_failed_candidate_probe_does_not_create_rejection_memo(
+    tmp_path, monkeypatch, failure: str
+) -> None:
+    _clear_auth_env(monkeypatch)
+    memo_path = auth_status_mod.REJECTION_FILE
+    assert not memo_path.exists()
+
+    def candidate_client(cfg, *, timeout, record_auth_rejections=True):
+        client = PlaudClient(
+            cfg,
+            timeout=timeout,
+            record_auth_rejections=record_auth_rejections,
+        )
+
+        def fail(request: httpx.Request) -> httpx.Response:
+            if failure == "http_403":
+                return httpx.Response(403, request=request, json={"detail": "candidate rejected"})
+            raise httpx.ConnectError("candidate network unavailable", request=request)
+
+        client._client.close()
+        client._client = httpx.Client(
+            base_url=cfg.base_url,
+            headers=cfg.headers(),
+            transport=httpx.MockTransport(fail),
+        )
+        return client
+
+    monkeypatch.setattr(web_auth_mod, "PlaudClient", candidate_client)
+
+    result = import_web_auth(
+        {
+            "authorization": "Bearer rejected.candidate.token",
+            "x_device_id": "candidate-device",
+        },
+        env_path=tmp_path / ".env",
+    )
+
+    expected_status = "live_auth_failed" if failure == "http_403" else "live_check_unavailable"
+    assert result.status == expected_status
+    assert not memo_path.exists()
 
 
 def test_default_live_validator_maps_401_to_rejected(tmp_path, monkeypatch) -> None:
@@ -309,7 +417,7 @@ def test_default_live_validator_maps_network_error_to_unreachable(tmp_path, monk
     )
 
     assert result.status == "live_check_unavailable"
-    assert env_path.exists()
+    assert not env_path.exists()
 
 
 def test_import_web_auth_reports_write_failure_with_cookie_flag(tmp_path) -> None:
@@ -383,17 +491,41 @@ def test_web_auth_cli_non_json_invalid_payload_exits_1(tmp_path, monkeypatch) ->
     assert result.exit_code == 1
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_web_auth_cli_network_outage_reports_unchanged_credentials(
+    tmp_path, monkeypatch, json_output
+) -> None:
+    _clear_auth_env(monkeypatch)
+    env_path = tmp_path / ".env"
+    previous = (
+        b"PLAUD_AUTHORIZATION='Bearer prior-test-session'\nPLAUD_X_DEVICE_ID='prior-device'\n"
+    )
+    env_path.write_bytes(previous)
+    monkeypatch.setenv("PLAUD_ENV_FILE", str(env_path))
+    monkeypatch.setattr(web_auth_mod, "_default_live_validator", lambda _: "unreachable")
+    args = ["web-auth", "--stdin"] + (["--json"] if json_output else [])
+    result = CliRunner().invoke(
+        app,
+        args,
+        input=json.dumps(
+            {"authorization": "Bearer candidate-test-session", "x_device_id": "new-device"}
+        ),
+    )
+
+    assert env_path.read_bytes() == previous
+    if json_output:
+        assert result.exit_code == 0  # app bridge reads the structured status
+        assert json.loads(result.stdout)["status"] == "live_check_unavailable"
+    else:
+        assert result.exit_code == 1
+        assert "credentials unchanged" in result.stdout
+        assert "credentials saved" not in result.stdout
+
+
 def test_import_web_auth_arms_headless_refresh_from_workspace_list(tmp_path, monkeypatch) -> None:
     _clear_auth_env(monkeypatch)
     env_path = tmp_path / ".env"
     auth_jwt = _make_jwt({"exp": int(time.time()) + 86_400, "wid": "ws_abc"})
-    from core.ws_refresh import RefreshOutcome
-
-    monkeypatch.setattr(
-        web_auth_mod,
-        "_refresh_workspace_token_locked",
-        lambda **kwargs: RefreshOutcome("ok", "verified"),
-    )
 
     result = import_web_auth(
         {
@@ -410,7 +542,7 @@ def test_import_web_auth_arms_headless_refresh_from_workspace_list(tmp_path, mon
 
     assert result.status == "ok"
     assert result.auto_refresh_armed is True
-    assert "automatic renewal verified" in result.detail
+    assert "automatic renewal captured" in result.detail
     from core.config import read_env_file
 
     values = read_env_file(env_path)
@@ -453,27 +585,34 @@ def test_import_web_auth_without_workspace_list_keeps_existing_bootstrap(
     assert values["PLAUD_WS_REFRESH_TOKEN"] == "existing-refresh"
 
 
-def test_import_web_auth_does_not_arm_unverified_browser_refresh_token(
+def test_rejected_existing_refresh_yields_to_fresh_web_login_candidate(
     tmp_path, monkeypatch
 ) -> None:
+    """Regression: a dead Keychain token used to shadow the recovered pair."""
     _clear_auth_env(monkeypatch)
     env_path = tmp_path / ".env"
-    auth_jwt = _make_jwt({"exp": int(time.time()) + 86_400, "wid": "ws_abc"})
-    from core.config import read_env_file
-    from core.ws_refresh import RefreshOutcome
+    from core.config import read_env_file, write_env_file
 
-    monkeypatch.setattr(
-        web_auth_mod,
-        "_refresh_workspace_token_locked",
-        lambda **kwargs: RefreshOutcome("unreachable", "temporary outage"),
+    now = int(time.time())
+    old_jwt = _make_jwt({"iat": now - 3600, "exp": now + 3600, "wid": "ws_abc"})
+    recovered_jwt = _make_jwt({"iat": now, "exp": now + 86_400, "wid": "ws_abc"})
+    write_env_file(
+        {
+            "PLAUD_AUTHORIZATION": f"bearer {old_jwt}",
+            "PLAUD_X_DEVICE_ID": "old-dev",
+            "PLAUD_WORKSPACE_ID": "ws_abc",
+            "PLAUD_WS_REFRESH_TOKEN": "dead-keychain-token",
+        },
+        env_path,
     )
+    auth_status_mod.record_auth_rejection(status=-420, now=now - 1)
 
     result = import_web_auth(
         {
-            "authorization": f"Bearer {auth_jwt}",
+            "authorization": f"Bearer {recovered_jwt}",
             "x_device_id": "device-from-webkit",
             "workspace_list": json.dumps(
-                [{"workspaceId": "ws_abc", "refreshToken": "unproved-token"}]
+                [{"workspaceId": "ws_abc", "refreshToken": "fresh-browser-token"}]
             ),
         },
         env_path=env_path,
@@ -481,7 +620,106 @@ def test_import_web_auth_does_not_arm_unverified_browser_refresh_token(
     )
 
     assert result.status == "ok"
+    assert result.auto_refresh_armed is True
+    assert read_env_file(env_path)["PLAUD_WS_REFRESH_TOKEN"] == "fresh-browser-token"
+
+
+def test_import_web_auth_does_not_arm_missing_browser_refresh_token(tmp_path, monkeypatch) -> None:
+    _clear_auth_env(monkeypatch)
+    env_path = tmp_path / ".env"
+    auth_jwt = _make_jwt({"exp": int(time.time()) + 86_400, "wid": "ws_abc"})
+    result = import_web_auth(
+        {
+            "authorization": f"Bearer {auth_jwt}",
+            "x_device_id": "device-from-webkit",
+            "workspace_list": json.dumps([{"workspaceId": "ws_abc"}]),
+        },
+        env_path=env_path,
+        live_validator=lambda values: "ok",
+    )
+
+    assert result.status == "invalid_payload"
     assert result.auto_refresh_armed is False
-    values = read_env_file(env_path)
-    assert "PLAUD_WS_REFRESH_TOKEN" not in values
-    assert values["PLAUD_AUTHORIZATION"].startswith("Bearer ")
+    assert not env_path.exists()
+
+
+def test_unreachable_web_capture_preserves_existing_access_refresh_and_memos(tmp_path, monkeypatch):
+    from core.config import write_env_file
+
+    _clear_auth_env(monkeypatch)
+    env = tmp_path / ".env"
+    now = int(time.time())
+    old = _make_jwt({"iat": now - 3600, "exp": now + 86400, "wid": "ws_abc"})
+    new = _make_jwt({"iat": now, "exp": now + 86400, "wid": "ws_abc"})
+    write_env_file(
+        {
+            "PLAUD_AUTHORIZATION": f"bearer {old}",
+            "PLAUD_X_DEVICE_ID": "old-device",
+            "PLAUD_WORKSPACE_ID": "ws_abc",
+            "PLAUD_WS_REFRESH_TOKEN": "existing-renewal",
+            "PLAUD_WS_REFRESH_EXPIRES_AT": str(now + 90000),
+            "CUSTOM_PREF": "keep",
+        },
+        env,
+    )
+    original = env.read_bytes()
+    auth_status_mod.record_auth_rejection(status=-419, now=now - 10, authorization=f"bearer {old}")
+    memo = auth_status_mod.REJECTION_FILE.read_bytes()
+    result = import_web_auth(
+        {
+            "authorization": f"bearer {new}",
+            "x_device_id": "new-device",
+            "workspace_list": json.dumps(
+                [{"workspaceId": "ws_abc", "refreshToken": "candidate-renewal"}]
+            ),
+        },
+        env_path=env,
+        live_validator=lambda _: "unreachable",
+    )
+    assert result.status == "live_check_unavailable"
+    assert not result.auto_refresh_armed
+    assert env.read_bytes() == original
+    assert auth_status_mod.REJECTION_FILE.read_bytes() == memo
+
+
+@pytest.mark.parametrize(
+    "workspace_list",
+    [
+        json.dumps([{"workspaceId": "other-workspace", "refreshToken": "other-renewal"}]),
+        json.dumps([{"workspaceId": "ws_abc"}]),
+        "not-json",
+    ],
+)
+def test_inconsistent_web_workspace_capture_never_disarms_existing_pair(
+    tmp_path, monkeypatch, workspace_list
+):
+    from core.config import write_env_file
+
+    _clear_auth_env(monkeypatch)
+    env = tmp_path / ".env"
+    token = _make_jwt({"exp": int(time.time()) + 86400, "wid": "ws_abc"})
+    write_env_file(
+        {
+            "PLAUD_AUTHORIZATION": f"bearer {token}",
+            "PLAUD_X_DEVICE_ID": "existing-device",
+            "PLAUD_WORKSPACE_ID": "ws_abc",
+            "PLAUD_WS_REFRESH_TOKEN": "existing-renewal",
+        },
+        env,
+    )
+    original = env.read_bytes()
+
+    def unexpected_probe(_):
+        raise AssertionError("inconsistent local capture should fail before the live probe")
+
+    result = import_web_auth(
+        {
+            "authorization": f"bearer {token}",
+            "x_device_id": "new-device",
+            "workspace_list": workspace_list,
+        },
+        env_path=env,
+        live_validator=unexpected_probe,
+    )
+    assert result.status == "invalid_payload"
+    assert env.read_bytes() == original

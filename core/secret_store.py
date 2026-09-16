@@ -190,10 +190,18 @@ def credential_lock(env_path: Path) -> Iterator[None]:
     """Serialize every credential mutation across the app and all checkouts."""
 
     lock_path = _lock_path(env_path)
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise CredentialStoreError(
+            "Credential storage is temporarily unavailable (cannot open its lock)"
+        ) from exc
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise CredentialStoreError("Credential storage lock is unavailable") from exc
         yield
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
@@ -291,12 +299,25 @@ def _update_locked(updates: Mapping[str, str | None], env_path: Path) -> None:
 
 
 def update_credential_values(
-    updates: Mapping[str, str | None], env_path: Path, *, already_locked: bool = False
+    updates: Mapping[str, str | None],
+    env_path: Path,
+    *,
+    already_locked: bool = False,
+    retire_auth_rejection: bool = True,
 ) -> None:
     """Atomically merge auth updates into Keychain and non-auth updates into .env."""
 
     if already_locked:
         _update_locked(updates, env_path)
-        return
-    with credential_lock(env_path):
-        _update_locked(updates, env_path)
+    else:
+        with credential_lock(env_path):
+            _update_locked(updates, env_path)
+
+    # Writing a new authorization retires whatever the server rejected before.
+    # Doing it here — the one choke point every credential path funnels
+    # through (ws-refresh, web-auth, refresh-auth) — means no future write
+    # path can forget to clear the memo and leave a healthy token marked dead.
+    if retire_auth_rejection and updates.get("PLAUD_AUTHORIZATION"):
+        from .auth_status import clear_auth_rejection
+
+        clear_auth_rejection()

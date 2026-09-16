@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 from .paths import integrated_paths
 from .summarize import run_model
@@ -50,6 +51,60 @@ def split_integrated(raw: str) -> tuple[str, str]:
     return "", raw.strip()
 
 
+def collect_inputs(storage: Any, file_id: str) -> dict[str, str]:
+    """Assemble the CMDS/Plaud text inputs the integrated prompt needs.
+
+    Mirrors what the `cmds-integrate` CLI builds; shared so the dual pipeline
+    produces identical prompts.
+    """
+    import json
+
+    cmds_text = ""
+    speakers = ""
+    cmds_row = storage.get_cmds_transcript(file_id)
+    if cmds_row:
+        segs = json.loads(cmds_row["segments"] or "[]")
+        sp_set = sorted({s.get("speaker") for s in segs if s.get("speaker")})
+        speakers = ", ".join(filter(None, sp_set))
+        cmds_text = "\n".join(
+            f"[{int(s.get('start_ms') or 0) / 1000:.1f}s] "
+            f"{s.get('speaker') or ''}: {s.get('content') or ''}"
+            for s in segs
+        )
+
+    plaud_text = ""
+    plaud_summaries = ""
+    title = ""
+    keywords = ""
+    content_row = storage.get_content_row(file_id)
+    if content_row:
+        title = content_row["title"] or ""
+        keywords = ", ".join(json.loads(content_row["keywords"] or "[]")[:15])
+        tr_segs = json.loads(content_row["transcript"] or "[]")
+        plaud_text = "\n".join(
+            f"[{int(s.get('start_time') or 0) / 1000:.1f}s] "
+            f"{s.get('speaker') or ''}: {s.get('content') or ''}"
+            for s in tr_segs
+        )
+        primary = content_row["summary_md"] or ""
+        extras = json.loads(content_row["summary_extra"] or "[]")
+        blocks = []
+        if primary:
+            blocks.append(f"### Primary\n\n{primary}")
+        for i, body in enumerate(extras):
+            blocks.append(f"### Template {i + 1}\n\n{body}")
+        plaud_summaries = "\n\n".join(blocks) or "(없음)"
+
+    return {
+        "cmds_transcript": cmds_text,
+        "plaud_transcript": plaud_text,
+        "plaud_summaries": plaud_summaries,
+        "title": title,
+        "keywords": keywords,
+        "speakers": speakers,
+    }
+
+
 def integrate(
     *,
     file_id: str,
@@ -62,6 +117,7 @@ def integrate(
     keywords: str = "",
     speakers: str = "",
     model_id: str = "",
+    transcription_context: str = "",
 ) -> dict[str, Path]:
     """Run the integrated prompt and persist all/transcript/summary outputs."""
     template = load_template(template_name)
@@ -72,6 +128,7 @@ def integrate(
         cmds_transcript=cmds_transcript,
         plaud_transcript=plaud_transcript,
         plaud_summaries=plaud_summaries,
+        transcription_context=transcription_context or "(없음)",
     )
     response = run_model(model, prompt, model_id=model_id or None)
     transcript, summary = split_integrated(response)

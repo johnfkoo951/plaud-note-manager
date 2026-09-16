@@ -49,7 +49,12 @@ class PlaudAPIError(RuntimeError):
 
     @property
     def is_auth_rejection(self) -> bool:
-        return self.status_code in (401, 403) or self.api_status in (-419, 419)
+        # -419: workspace token expired. -420: the workspace *refresh* token
+        # was rejected too (observed 2026-08-19 after a web.plaud.ai sign-in
+        # rotated the chain). Both mean "this credential is dead", not
+        # "transient" — classifying -420 as transient is what kept the
+        # recovery ladder from escalating to a browser re-harvest.
+        return self.status_code in (401, 403) or self.api_status in (-419, 419, -420, 420)
 
 
 def _safe_json(resp: httpx.Response, label: str) -> dict[str, Any]:
@@ -60,9 +65,35 @@ def _safe_json(resp: httpx.Response, label: str) -> dict[str, Any]:
         raise PlaudAPIError(f"Plaud returned a non-JSON response for {label}") from None
 
 
+def _note_rejection(
+    exc: PlaudAPIError, *, enabled: bool = True, authorization: str | None = None
+) -> PlaudAPIError:
+    """Persist the server's auth verdict, then hand the error back unchanged.
+
+    Offline JWT expiry math cannot see a server-side invalidation, so without
+    this memo `auth_status` keeps reporting a dead token as "valid" and the
+    self-heal / recovery paths never fire.
+    """
+    if enabled and exc.is_auth_rejection:
+        from .auth_status import record_auth_rejection
+
+        record_auth_rejection(status=exc.api_status or exc.status_code, authorization=authorization)
+    return exc
+
+
 class PlaudClient:
-    def __init__(self, config: PlaudConfig, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        config: PlaudConfig,
+        *,
+        timeout: float = 30.0,
+        record_auth_rejections: bool = True,
+    ) -> None:
         self._config = config
+        # Normal API calls must memo server-side invalidation so auth status
+        # and self-heal react. Validate-before-write candidate probes opt out:
+        # a rejected *candidate* says nothing about the credential in Keychain.
+        self._record_auth_rejections = record_auth_rejections
         self._client = httpx.Client(
             base_url=config.base_url,
             headers=config.headers(),
@@ -89,7 +120,11 @@ class PlaudClient:
         except httpx.HTTPStatusError as exc:
             label = _request_label(exc.request)
             status = exc.response.status_code
-            raise PlaudAPIError(f"Plaud HTTP {status} for {label}", status_code=status) from None
+            raise _note_rejection(
+                PlaudAPIError(f"Plaud HTTP {status} for {label}", status_code=status),
+                enabled=self._record_auth_rejections,
+                authorization=self._config.authorization,
+            ) from None
         except httpx.RequestError as exc:
             label = _request_label(exc.request)
             detail = str(exc) or exc.__class__.__name__
@@ -123,7 +158,11 @@ class PlaudClient:
         status = data.get("status")
         if status not in (0, "0", None):
             msg = data.get("msg") or data.get("error") or "unknown Plaud error"
-            raise PlaudAPIError(f"Plaud API error ({status}): {msg}", api_status=status)
+            raise _note_rejection(
+                PlaudAPIError(f"Plaud API error ({status}): {msg}", api_status=status),
+                enabled=self._record_auth_rejections,
+                authorization=self._config.authorization,
+            )
         return data
 
     def _patch_json(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:

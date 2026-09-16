@@ -24,15 +24,16 @@ PROVIDER_LABELS = {
     "grok": "xAI",
 }
 
+# Used only when the vault's API Information notes are unreachable — keep in
+# rough sync with the vault's is_sota set (last refreshed 2026-08-15).
 FALLBACK_PRESETS = [
-    ("claude", "claude-opus-4-7", "Claude Opus 4.7", "Anthropic flagship reasoning"),
-    ("claude", "claude-sonnet-4-6", "Claude Sonnet 4.6", "Anthropic balanced flagship"),
-    ("codex", "gpt-5.5", "GPT-5.5", "OpenAI flagship"),
-    ("codex", "gpt-5.5-pro", "GPT-5.5 Pro", "OpenAI maximum precision"),
-    ("gemini", "gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", "Google frontier"),
-    ("gemini", "gemini-3-flash-preview", "Gemini 3 Flash Preview", "Google fast frontier"),
-    ("grok", "grok-4.20-0309-reasoning", "Grok 4.20 Reasoning", "xAI frontier"),
-    ("grok", "grok-4-1-fast-reasoning", "Grok 4.1 Fast", "xAI fast agentic"),
+    ("claude", "claude-fable-5", "Claude Fable 5", "Anthropic flagship (most capable)"),
+    ("claude", "claude-opus-5", "Claude Opus 5", "Anthropic near-flagship at half price"),
+    ("codex", "gpt-5.6-sol", "GPT-5.6 Sol", "OpenAI flagship tier"),
+    ("codex", "gpt-5.6-terra", "GPT-5.6 Terra", "OpenAI balanced tier"),
+    ("gemini", "gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", "Google most intelligent"),
+    ("gemini", "gemini-3.6-flash", "Gemini 3.6 Flash", "Google newest stable fast frontier"),
+    ("grok", "grok-4.6", "Grok 4.6", "xAI current frontier"),
 ]
 
 

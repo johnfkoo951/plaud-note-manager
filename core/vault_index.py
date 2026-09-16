@@ -464,3 +464,95 @@ def resolve_links(
     if owns_conn:
         conn.close()
     return counts
+
+
+def related_notes(
+    terms: list[str],
+    *,
+    conn: sqlite3.Connection | None = None,
+    min_confidence: float = 0.9,
+    limit: int = 8,
+) -> list[dict[str, str]]:
+    """Resolve free-text terms (Plaud keywords, LLM key topics, speaker names)
+    to *existing* vault notes so frontmatter links never dangle.
+
+    Returns ``[{"title", "rel_path", "vault", "kind"}]`` in term order.
+    Match order: exact title (1.0) → alias (0.9) → tag (0.7); only matches at
+    or above `min_confidence` are returned.
+    """
+    clean = []
+    for term in terms:
+        t = str(term or "").strip()
+        if len(t) >= 2 and t not in clean:
+            clean.append(t)
+    if not clean:
+        return []
+    owns_conn = conn is None
+    if owns_conn:
+        if not DEFAULT_DB.exists():
+            return []
+        conn = sqlite3.connect(DEFAULT_DB)
+    assert conn is not None
+    conn.row_factory = sqlite3.Row
+    try:
+        has_table = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vault_notes'"
+        ).fetchone()
+        if not has_table:
+            return []
+        cols = "title, rel_path, vault"
+        found: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for term in clean:
+            hit = None
+            row = conn.execute(
+                f"SELECT {cols} FROM vault_notes WHERE title = ? COLLATE NOCASE LIMIT 1", (term,)
+            ).fetchone()
+            if row:
+                hit = (row, 1.0, "title")
+            else:
+                esc = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+                like_term = f'%"{esc}"%'
+                row = conn.execute(
+                    f"SELECT {cols} FROM vault_notes WHERE aliases LIKE ? ESCAPE '\\' LIMIT 1",
+                    (like_term,),
+                ).fetchone()
+                if row:
+                    hit = (row, 0.9, "alias")
+                elif min_confidence <= 0.7:
+                    row = conn.execute(
+                        f"SELECT {cols} FROM vault_notes WHERE tags LIKE ? ESCAPE '\\' LIMIT 1",
+                        (like_term,),
+                    ).fetchone()
+                    if row:
+                        hit = (row, 0.7, "tag")
+            if hit and hit[1] >= min_confidence and hit[0]["title"] not in seen:
+                seen.add(hit[0]["title"])
+                found.append(
+                    {
+                        "title": str(hit[0]["title"]),
+                        "rel_path": str(hit[0]["rel_path"] or ""),
+                        "vault": str(hit[0]["vault"] or ""),
+                        "kind": hit[2],
+                    }
+                )
+            if len(found) >= limit:
+                break
+        return found
+    finally:
+        if owns_conn:
+            conn.close()
+
+
+def related_wikilinks(
+    terms: list[str],
+    *,
+    conn: sqlite3.Connection | None = None,
+    min_confidence: float = 0.9,
+    limit: int = 8,
+) -> list[str]:
+    """Titles of existing vault notes matching `terms` (see related_notes)."""
+    return [
+        n["title"]
+        for n in related_notes(terms, conn=conn, min_confidence=min_confidence, limit=limit)
+    ]

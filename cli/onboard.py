@@ -39,6 +39,21 @@ DEFAULTS = {
     "PLAUD_TIMEZONE": "Asia/Seoul",
 }
 
+# A normal Chrome "Copy as cURL" payload is only a few kilobytes.  Keep a
+# generous ceiling so a mistaken clipboard dump can not make the app spend an
+# unbounded amount of time in ``shlex.split`` (the text is sent over stdin, but
+# it is still untrusted input).
+MAX_CURL_BYTES = 1_000_000
+
+
+def _reject_control_characters(value: str, *, field: str) -> str:
+    """Reject C0/DEL bytes before a copied value can reach credential storage."""
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in value):
+        # Never echo the value: it may contain both terminal controls and a
+        # credential. The field name is sufficient for a corrective message.
+        raise SystemExit(f"invalid control character in cURL {field}")
+    return value
+
 
 def parse_curl(curl: str) -> dict[str, str]:
     """Return a flat dict suitable for atomic credential storage.
@@ -47,6 +62,11 @@ def parse_curl(curl: str) -> dict[str, str]:
     emits cookies as ``-b 'name=value'`` (without a ``cookie:`` prefix). Parse
     argv instead of individual lines so all of those current formats work.
     """
+    if len(curl.encode("utf-8")) > MAX_CURL_BYTES:
+        raise SystemExit("copied cURL is unexpectedly large; copy one Plaud Network request")
+    if "\x00" in curl:
+        raise SystemExit("copied cURL contains an invalid NUL character")
+
     out: dict[str, str] = dict(DEFAULTS)
 
     normalized = curl.replace("\\\r\n", " ").replace("\\\n", " ")
@@ -64,7 +84,7 @@ def parse_curl(curl: str) -> dict[str, str]:
             return
         key, _, val = raw.partition(":")
         key = key.strip().lower()
-        val = val.strip()
+        val = _reject_control_characters(val, field="header value").strip()
         if key == "cookie":
             out["PLAUD_COOKIE"] = val
         elif key in REQUIRED_HEADERS:
@@ -102,7 +122,7 @@ def parse_curl(curl: str) -> dict[str, str]:
                 capture_header(value)
             elif token in ("-b", "--cookie"):
                 cookie = value.partition(":")[2] if value.lower().startswith("cookie:") else value
-                cookie = cookie.strip()
+                cookie = _reject_control_characters(cookie, field="cookie").strip()
                 if cookie:
                     out["PLAUD_COOKIE"] = cookie
             elif token == "--url":
@@ -113,18 +133,35 @@ def parse_curl(curl: str) -> dict[str, str]:
         index += 1
 
     parsed_url = urlsplit(request_url or "")
-    host = (parsed_url.hostname or "").lower()
-    if parsed_url.scheme != "https" or not (host.startswith("api") and host.endswith(".plaud.ai")):
+    try:
+        host = (parsed_url.hostname or "").lower()
+        port = parsed_url.port
+    except ValueError:
+        raise SystemExit("cURL contains an invalid Plaud API URL") from None
+    is_plaud_api = host == "api.plaud.ai" or (
+        host.startswith("api-") and host.endswith(".plaud.ai")
+    )
+    if (
+        parsed_url.scheme != "https"
+        or not is_plaud_api
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or port not in (None, 443)
+    ):
         raise SystemExit("cURL must target an https://api-*.plaud.ai request")
     out["PLAUD_BASE_URL"] = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
-    missing = [v for v in REQUIRED_HEADERS.values() if v not in out]
+    missing = [v for v in REQUIRED_HEADERS.values() if not out.get(v, "").strip()]
     if missing:
         raise SystemExit(f"missing required headers in cURL: {', '.join(missing)}")
+    authorization = out["PLAUD_AUTHORIZATION"].strip()
+    scheme, separator, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not separator or not token.strip():
+        raise SystemExit("authorization header must contain a non-empty Bearer token")
     return out
 
 
-def write_env(values: dict[str, str], env_path: Path) -> None:
+def write_env(values: dict[str, str], env_path: Path, *, now: int | None = None) -> None:
     # Credentials are committed as one macOS Keychain blob.  The common lock
     # prevents a cURL import from overwriting a concurrently rotated refresh
     # token; no plaintext backup is ever created.
@@ -132,7 +169,7 @@ def write_env(values: dict[str, str], env_path: Path) -> None:
     from core.ws_refresh import credential_env_updates
 
     with credential_lock(env_path):
-        updates = credential_env_updates(values, env_path, already_locked=True)
+        updates = credential_env_updates(values, env_path, already_locked=True, now=now)
         update_credential_values(updates, env_path, already_locked=True)
     print(f"wrote {env_path}")
 

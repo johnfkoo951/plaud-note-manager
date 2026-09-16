@@ -19,7 +19,7 @@ from rich.markdown import Markdown
 from rich.table import Table
 
 from core import PlaudClient, app_config, load_config
-from core.classification import FOLDER_TAXONOMY, classify_snapshot
+from core.classification import rule_cmds, taxonomy
 from core.client import PlaudAPIError
 from core.config import ConfigError
 from core.model_registry import PROVIDER_LABELS
@@ -420,9 +420,22 @@ def sync() -> None:
         storage.replace_folders(folders, now=now)
 
         for is_trash in (0, 1):
-            page = client.list_files(limit=2000, is_trash=is_trash)
-            for f in page.items:
-                storage.upsert_file(f, now=now, is_trash=is_trash)
+            skip = 0
+            seen = set()
+            while True:
+                page = client.list_files(limit=2000, skip=skip, is_trash=is_trash)
+                if not page.items:
+                    break
+                ids = {file.id for file in page.items}
+                if not ids - seen:
+                    raise PlaudAPIError("Plaud repeated a sync page; pagination did not advance")
+                storage.upsert_files(page.items, now=now, is_trash=is_trash)
+                seen.update(ids)
+                skip += len(page.items)
+                if page.total > 0 and skip >= page.total:
+                    break
+                if page.total <= 0 and len(page.items) < 2000:
+                    break
 
     console.print(
         f"[green]synced[/green] folders={len(folders)} -> {DEFAULT_DB}\n"
@@ -432,38 +445,71 @@ def sync() -> None:
 
 
 @safe_command(name="sync-content")
-def sync_content(parallel: int = 6) -> None:
+def sync_content(
+    parallel: int = typer.Option(6, min=1, max=16),
+    force: bool = typer.Option(False, help="Retry deferred empty/failed files immediately."),
+) -> None:
     """Background backfill: fetch transcript/summary for every file lacking cache."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    cfg = load_config()
     storage = Storage()
-    pending = storage.files_without_content()
+    pending = storage.files_without_content(include_deferred=force)
     if not pending:
-        console.print("[green]all files already cached[/green]")
+        deferred = len(storage.files_without_content(include_deferred=True))
+        if deferred:
+            console.print(f"no content fetches due; {deferred} uncached files deferred for retry")
+        else:
+            console.print("[green]all files already cached[/green]")
         _maybe_auto_metadata(storage)
         return
+    cfg = load_config()
     console.print(f"backfilling {len(pending)} files with parallel={parallel}")
     done = 0
+    cached = 0
+    deferred_empty = 0
+    failed = 0
 
-    def fetch(file_id: str) -> str:
+    def fetch(file_id: str, source_edit_time: int | None) -> bool:
         with PlaudClient(cfg) as client:
             content = client.file_content(file_id)
             storage.save_content(content, now=int(time.time()))
-        return file_id
+        if content.is_empty:
+            storage.record_content_fetch_attempt(
+                file_id,
+                source_edit_time=source_edit_time,
+                outcome="empty",
+                now=int(time.time()),
+            )
+        return not content.is_empty
 
     with ThreadPoolExecutor(max_workers=parallel) as ex:
-        futures = {ex.submit(fetch, f["id"]): f["id"] for f in pending}
+        futures = {ex.submit(fetch, f["id"], f["edit_time"]): f for f in pending}
         for fut in as_completed(futures):
             done += 1
             try:
-                fut.result()
+                if fut.result():
+                    cached += 1
+                else:
+                    deferred_empty += 1
             except Exception as e:
-                console.print(f"[red]err[/red] {futures[fut]}: {e}")
+                failed += 1
+                file = futures[fut]
+                storage.record_content_fetch_attempt(
+                    file["id"],
+                    source_edit_time=file["edit_time"],
+                    outcome="failed",
+                    now=int(time.time()),
+                )
+                console.print(f"[red]err[/red] {file['id']}: {e}")
             if done % 10 == 0:
                 console.print(f"  {done}/{len(pending)}")
-    console.print(f"[green]done[/green] {done}/{len(pending)}")
+    console.print(
+        f"fetched {done}/{len(pending)}; cached {cached}; "
+        f"deferred-empty {deferred_empty}; failed {failed}"
+    )
     _maybe_auto_metadata(storage)
+    if failed:
+        raise typer.Exit(1)
 
 
 def _maybe_auto_metadata(storage: Storage) -> None:
@@ -703,6 +749,48 @@ _AUTH_ICON = {
 }
 
 
+@safe_command(name="official-status")
+def official_status_cmd(
+    json_out: bool = typer.Option(False, "--json"),
+    live: bool = typer.Option(
+        False, "--live", help="Validate the official CLI's separate OAuth connection."
+    ),
+) -> None:
+    """Inspect the official @plaud-ai/cli read connection without importing tokens."""
+    from core.official_cli import status
+
+    result = status(live=live)
+    if json_out:
+        _emit_json(result)
+    else:
+        console.print_json(data=result)
+
+
+@safe_command(name="official-read")
+def official_read_cmd(
+    file_id: str = typer.Argument(...),
+    kind: str = typer.Option("summary", help="summary or transcript"),
+    block: str = typer.Option(
+        "transaction", help="Transcript block, e.g. transaction_polish or outline."
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Read through official OAuth; never changes Plaud records or the local cache."""
+    from core.official_cli import OfficialCLIError, read_recording
+
+    try:
+        result = {"status": "ok", **read_recording(file_id, kind=kind, block=block)}
+    except OfficialCLIError as exc:
+        result = {"status": exc.code, "detail": exc.detail}
+    if json_out:
+        _emit_json(result)
+        return
+    if result["status"] != "ok":
+        console.print(f"[red]{result['status']}[/red] — {result['detail']}")
+        raise typer.Exit(1)
+    console.print_json(data=result)
+
+
 @safe_command(name="auth")
 def auth_cmd(
     json_out: bool = typer.Option(False, "--json"),
@@ -779,18 +867,32 @@ def refresh_auth_cmd(
         "--validate-live",
         help="Verify recording-list access before replacing Keychain credentials.",
     ),
+    arm_auto_refresh: bool = typer.Option(
+        False,
+        "--arm-auto-refresh",
+        help=(
+            "After a valid import, try to capture the matching rotating token "
+            "from the already logged-in Chrome session."
+        ),
+    ),
 ) -> None:
     """Refresh macOS Keychain from a fresh Plaud API cURL."""
     from core.refresh_auth import refresh_auth
 
     curl_text = sys.stdin.read() if stdin else None
-    result = refresh_auth(curl_text=curl_text, validate_live=validate_live)
+    result = refresh_auth(
+        curl_text=curl_text,
+        validate_live=validate_live,
+        arm_auto_refresh=arm_auto_refresh,
+    )
     if json_out:
         _emit_json(
             {
                 "status": result.status,
                 "detail": result.detail,
                 "cookie_captured": result.cookie_captured,
+                "auto_refresh_armed": result.auto_refresh_armed,
+                "auto_refresh_detail": result.auto_refresh_detail,
             }
         )
         return
@@ -798,6 +900,13 @@ def refresh_auth_cmd(
         cookie = "yes" if result.cookie_captured else "no"
         console.print("[green]✅ credentials refreshed from copied cURL[/green]")
         console.print(f"  cookie captured: {cookie}")
+        if result.auto_refresh_armed:
+            console.print("  [green]automatic renewal: armed[/green]")
+        elif arm_auto_refresh:
+            console.print(
+                "  [yellow]automatic renewal: not armed[/yellow]"
+                + (f" — {result.auto_refresh_detail}" if result.auto_refresh_detail else "")
+            )
         from core.auth_status import auth_status as get_auth
 
         st = get_auth()
@@ -871,9 +980,10 @@ def web_auth_cmd(
         console.print("[green]credentials refreshed from Plaud Web Login[/green]")
         return
     if result["status"] == "live_check_unavailable":
-        # Credentials were saved — only the live verification could not run.
-        console.print(f"[yellow]credentials saved but unverified[/yellow] — {result['detail']}")
-        return
+        console.print(
+            f"[yellow]credentials unchanged; verification unavailable[/yellow] — {result['detail']}"
+        )
+        raise typer.Exit(1)
     console.print(f"[red]web auth failed[/red] ({result['status']}) — {result['detail']}")
     raise typer.Exit(1)
 
@@ -987,7 +1097,16 @@ def ws_bootstrap_cmd(
 @safe_command(name="auth-recover")
 def auth_recover_cmd(
     driver: str = typer.Option(
-        "auto", help="Browser driver: auto | cmux. (aside/MCP browsers run agent-side.)"
+        "auto",
+        help=(
+            "Driver: auto (chrome-disk→chrome→cmux) | chrome-disk | chrome | cmux. "
+            "chrome-disk reads Chrome's localStorage on disk — no browser setting needed."
+        ),
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Skip the 'chain already works' precheck and re-harvest from the browser.",
     ),
     json_out: bool = typer.Option(
         False,
@@ -995,16 +1114,16 @@ def auth_recover_cmd(
         help="Emit JSON and always exit 0; callers must check the status field.",
     ),
 ) -> None:
-    """Tier-1 auth recovery: re-harvest workspaceList from a live browser session.
+    """Tier-1 auth recovery: re-harvest workspaceList from your browser session.
 
-    No password is ever typed — this only reads localStorage from a browser
-    that is already logged in to web.plaud.ai, then re-arms headless refresh
-    (same as ws-bootstrap). Falls back to the app Auth sheet when no live
-    session exists.
+    No password is ever typed — this only reads the localStorage of a browser
+    already logged in to web.plaud.ai (on disk by default, no browser setting
+    or running window required), then re-arms headless refresh (same as
+    ws-bootstrap). Falls back to the app Auth sheet when nothing is found.
     """
     from core.auth_recover import CAPTURE_JS, recover
 
-    outcome = recover(driver=driver)
+    outcome = recover(driver=driver, force=force)
     if json_out:
         _emit_json(asdict(outcome))
         return
@@ -1177,11 +1296,82 @@ def usage_status_set(
 
 @safe_command(name="folder-plan")
 def folder_plan() -> None:
-    """Show the canonical Plaud recording folder taxonomy."""
-    for rule in FOLDER_TAXONOMY:
-        console.print(
-            f"[bold]{rule.folder_name}[/bold]  [dim]{rule.note_type} · {rule.cmds_category}[/dim]"
+    """Show the active Plaud folder taxonomy with its CMDS vault mapping."""
+    from core.classification import default_index_for
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Plaud folder")
+    table.add_column("type")
+    table.add_column("CMDS (📚)")
+    table.add_column("index (🏷)")
+    table.add_column("vault dest")
+    for rule in taxonomy():
+        cmds = rule_cmds(rule)
+        table.add_row(
+            rule.folder_name,
+            rule.note_type,
+            cmds or "-",
+            rule.index or default_index_for(cmds, rule.note_type),
+            rule.vault_dest or "-",
         )
+    console.print(table)
+
+
+@safe_command(name="taxonomy-upgrade")
+def taxonomy_upgrade(
+    dry_run: bool = typer.Option(False, "--dry-run", help="Show changes without writing."),
+) -> None:
+    """Add CMDS/index/vault_dest/hint fields to data/classification.json.
+
+    Missing fields are filled from the shipped default taxonomy (matched by
+    folder name); existing values are never overwritten. A `.bak` copy is
+    written next to the file first.
+    """
+    import json as _json
+    import shutil
+
+    from core.classification import DEFAULT_TAXONOMY, reload_taxonomy
+    from core.paths import DATA_DIR
+
+    user_file = DATA_DIR / "classification.json"
+    if not user_file.exists():
+        console.print(
+            "[dim]no data/classification.json — shipped defaults already carry the fields[/dim]"
+        )
+        return
+    raw = _json.loads(user_file.read_text(encoding="utf-8"))
+    folders = raw.get("folders", raw) if isinstance(raw, dict) else raw
+    defaults = {r.folder_name: r for r in DEFAULT_TAXONOMY}
+    changed: list[str] = []
+    for entry in folders:
+        name = entry.get("folder_name", "")
+        default = defaults.get(name)
+        added = []
+        for key in ("cmds", "index", "vault_dest", "hint"):
+            if entry.get(key):
+                continue
+            value = getattr(default, key, "") if default else ""
+            if key == "cmds" and not value and str(entry.get("cmds_category", "")).startswith("📚"):
+                value = entry["cmds_category"]
+            if value:
+                entry[key] = value
+                added.append(f"{key}={value}")
+        if added:
+            changed.append(f"{name}: " + ", ".join(added))
+    for line in changed:
+        console.print(f"  + {line}")
+    if not changed:
+        console.print("[green]already up to date[/green]")
+        return
+    if dry_run:
+        console.print(f"[dim]dry-run — {len(changed)} folders would change[/dim]")
+        return
+    shutil.copy2(user_file, user_file.with_suffix(".json.bak"))
+    user_file.write_text(_json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    reload_taxonomy()
+    console.print(
+        f"[green]updated {len(changed)} folders[/green] (backup: classification.json.bak)"
+    )
 
 
 @safe_command(name="tags")
@@ -1319,13 +1509,286 @@ def metadata_generate(
     console.print_json(json=_json.dumps(metadata, ensure_ascii=False))
 
 
+@safe_command(name="dual")
+def dual_cmd(
+    file_id: str,
+    map_pairs: list[str] = typer.Option(
+        [], "--map", help="Speaker real names: --map speaker_0=구요한 --map speaker_1=홍길동"
+    ),
+    auto_approve: bool = typer.Option(
+        False, "--auto-approve", help="Accept proposed names with confidence ≥ 0.7 without asking."
+    ),
+    to_vault: bool = typer.Option(
+        False, "--to-vault", help="After vault-ready, land the transcript note in the vault inbox."
+    ),
+    model: str = typer.Option("", help=MODEL_HELP + " Empty = configured metadata model."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Dual-transcribe pipeline: ElevenLabs 전사 → 실명 매핑 → Plaud×CMDS 교차분석 → (볼트).
+
+    Idempotent & resumable — re-run to continue from where it paused.
+    Pauses at `relabel-pending` until speaker names are confirmed
+    (--map / --auto-approve / app sheet).
+    """
+    from dataclasses import asdict as _asdict
+
+    from core.dual_pipeline import advance
+
+    speaker_map: dict[str, str] = {}
+    for pair in map_pairs:
+        if "=" not in pair:
+            raise typer.BadParameter(f"expected speaker_n=이름, got {pair}")
+        k, v = pair.split("=", 1)
+        speaker_map[k.strip()] = v.strip()
+
+    report = advance(
+        Storage(),
+        file_id,
+        speaker_map=speaker_map or None,
+        auto_approve=auto_approve,
+        to_vault=to_vault,
+        model=model,
+        progress=lambda msg: None if json_out else console.print(f"  [dim]{msg}[/dim]"),
+    )
+    if json_out:
+        _emit_json(_asdict(report))
+        return
+    if report.error:
+        console.print(f"[red]{report.status}[/red] — {report.error}")
+        raise typer.Exit(1)
+    if report.status == "relabel-pending":
+        console.print("[yellow]⏸ relabel-pending[/yellow] — 화자 실명을 확인해 주세요:")
+        for p in report.proposal:
+            name = p.get("name") or "?"
+            conf = f" ({float(p.get('confidence') or 0):.0%})" if p.get("name") else ""
+            ev = f" — {p['evidence']}" if p.get("evidence") else ""
+            console.print(f"  {p['speaker']:>12} → {name}{conf}{ev}")
+        console.print(
+            "\n적용: [bold]uv run plaud dual "
+            f"{file_id} --map speaker_0=이름 …[/bold]  (또는 --auto-approve)"
+        )
+        return
+    steps = ", ".join(report.steps) or "nothing to do"
+    console.print(f"[green]{report.status}[/green] — {steps}")
+    if report.vault_path:
+        console.print(f"  → {report.vault_path}")
+
+
+@safe_command(name="dual-speakers")
+def dual_speakers_cmd(
+    file_id: str,
+    refresh: bool = typer.Option(False, "--refresh", help="Regenerate the proposal."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show (or regenerate) the speaker real-name proposal for a recording."""
+    import json as _json
+
+    from core.dual_pipeline import mark
+    from core.dual_speakers import propose_speaker_names
+
+    storage = Storage()
+    mark(storage, file_id)
+    row = storage.get_dual(file_id)
+    proposal = _json.loads(row["speaker_proposal"] or "[]") if row else []
+    if refresh or not proposal:
+        proposal = propose_speaker_names(storage, file_id)
+        storage.upsert_dual(
+            file_id,
+            speaker_proposal=_json.dumps(proposal, ensure_ascii=False),
+            now=int(time.time()),
+        )
+    if json_out:
+        _emit_json({"file_id": file_id, "proposal": proposal})
+        return
+    if not proposal:
+        console.print("[yellow]no proposal[/yellow] — run cmds-transcribe (or plaud dual) first")
+        return
+    for p in proposal:
+        name = p.get("name") or "?"
+        conf = f" ({float(p.get('confidence') or 0):.0%})" if p.get("name") else ""
+        ev = f" — {p['evidence']}" if p.get("evidence") else ""
+        console.print(f"  {p['speaker']:>12} → {name}{conf}{ev}")
+
+
+@safe_command(name="dual-status")
+def dual_status_cmd(json_out: bool = typer.Option(False, "--json")) -> None:
+    """List recordings in the dual-transcribe pipeline and their stage."""
+    rows = Storage().list_dual()
+    if json_out:
+        payload = [
+            {
+                "file_id": r["file_id"],
+                "status": r["status"],
+                "error": r["error"] or "",
+                "vault_path": r["vault_path"] or "",
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+        _emit_json({"items": payload})
+        return
+    if not rows:
+        console.print("[dim]no recordings in the dual pipeline[/dim]")
+        return
+    for r in rows:
+        err = f"  [red]{r['error']}[/red]" if r["error"] else ""
+        console.print(f"  {r['status']:>15}  {r['file_id']}{err}")
+
+
+@safe_command(name="dual-send")
+def dual_send_cmd(
+    file_id: str,
+    model: str = typer.Option(
+        "", help="Integrated artifact's model label. Empty = metadata model."
+    ),
+    open_note: bool = typer.Option(
+        False, "--open", help="Open the note in Obsidian after landing."
+    ),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Land the dual-transcribed final note in the vault's Plaud transcript inbox lane."""
+    from dataclasses import asdict as _asdict
+
+    from core.dual_vault import send_dual_to_vault
+
+    storage = Storage()
+    provider = model or app_config.metadata_model()
+    label = app_config.model_id_for(provider) or provider
+    result = send_dual_to_vault(storage, file_id, model=label)
+    if result.status == "ok":
+        storage.upsert_dual(
+            file_id, status="vault-sent", vault_path=result.path, now=int(time.time())
+        )
+        storage.update_usage_status(file_id, "vault-linked", now=int(time.time()))
+        if open_note and result.obsidian_url:
+            subprocess.run(["open", result.obsidian_url], check=False)
+    if json_out:
+        _emit_json(_asdict(result))
+        return
+    if result.status == "ok":
+        console.print(f"[green]landed[/green] → {result.path}")
+        return
+    console.print(f"[red]dual-send failed[/red] ({result.status}) — {result.detail}")
+    raise typer.Exit(1)
+
+
+@safe_command(name="dual-unmark")
+def dual_unmark_cmd(file_id: str) -> None:
+    """Remove a recording from the dual pipeline (generated artifacts stay)."""
+    from core.dual_pipeline import unmark
+
+    unmark(Storage(), file_id)
+    console.print(f"[green]unmarked[/green] {file_id}")
+
+
+@safe_command(name="reuse")
+def reuse_mark(
+    file_id: str,
+    channel: str = typer.Argument(
+        "",
+        help="newsletter | lecture | shorts | sns | consulting | research | other. Empty = list.",
+    ),
+    status: str = typer.Option("flagged", help="flagged | drafted | published"),
+    note: str = typer.Option("", help="Free-text context (e.g. 게임 지식확장 사례로)."),
+    clear: bool = typer.Option(False, "--clear", help="Remove the mark for this channel."),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """Mark a recording as material for an output channel (content reuse check)."""
+    import json as _json
+
+    from core import reuse as reuse_mod
+
+    storage = Storage()
+    if not channel:
+        summary = reuse_mod.reuse_summary(storage, file_id)
+        if json_output:
+            console.print_json(json=_json.dumps(summary, ensure_ascii=False))
+            return
+        if not summary["targets"]:
+            console.print("[dim]no reuse marks[/dim]")
+            return
+        for t in summary["targets"]:
+            note_part = f"  — {t['note']}" if t["note"] else ""
+            console.print(f"  {t['channel']:>10}: {t['status']}{note_part}")
+        return
+
+    try:
+        channel = reuse_mod.validate_channel(channel)
+        status = reuse_mod.validate_status(status)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if clear:
+        removed = storage.clear_reuse(file_id, channel)
+        console.print(
+            f"[green]cleared[/green] {channel} ({removed})"
+            if removed
+            else f"[yellow]no mark for {channel}[/yellow]"
+        )
+        return
+    storage.set_reuse(file_id, channel, status=status, note=note or None, now=int(time.time()))
+    note_part = f" — {note}" if note else ""
+    console.print(f"[green]marked[/green] {channel}: {status}{note_part}")
+
+
+@safe_command(name="reuse-query")
+def reuse_query(
+    channel: str = typer.Argument("", help="Filter by channel. Empty = all marks."),
+    status: str = typer.Option("", help="Filter: flagged | drafted | published."),
+    json_output: bool = typer.Option(False, "--json"),
+) -> None:
+    """What material do I have for a channel? (e.g. plaud reuse-query newsletter)"""
+    import json as _json
+
+    from core import reuse as reuse_mod
+
+    if channel:
+        channel = reuse_mod.validate_channel(channel)
+    if status:
+        status = reuse_mod.validate_status(status)
+    rows = Storage().query_reuse(channel=channel or None, status=status or None)
+    if json_output:
+        payload = [
+            {
+                "file_id": r["file_id"],
+                "filename": r["filename"],
+                "channel": r["channel"],
+                "status": r["status"],
+                "note": r["note"] or "",
+                "updated_at": r["updated_at"],
+            }
+            for r in rows
+        ]
+        console.print_json(json=_json.dumps(payload, ensure_ascii=False))
+        return
+    if not rows:
+        console.print("[dim]no reuse marks[/dim]")
+        return
+    table = Table(box=None)
+    table.add_column("channel")
+    table.add_column("status")
+    table.add_column("recording")
+    table.add_column("note")
+    for r in rows:
+        table.add_row(
+            r["channel"], r["status"], (r["filename"] or r["file_id"])[:48], r["note"] or ""
+        )
+    console.print(table)
+
+
 @safe_command(name="metadata-auto")
 def metadata_auto(
     limit: int = typer.Option(0, help="Max files this run. 0 = configured limit."),
-    since_days: int = typer.Option(7, help="Only files whose content was cached in the last N days."),
-    backfill: bool = typer.Option(False, "--backfill", help="Ignore recency — process the whole backlog."),
+    since_days: int = typer.Option(
+        7, help="Only files whose content was cached in the last N days."
+    ),
+    backfill: bool = typer.Option(
+        False, "--backfill", help="Ignore recency — process the whole backlog."
+    ),
     model: str = typer.Option("", help=MODEL_HELP + " Empty = configured metadata model."),
-    dry_run: bool = typer.Option(False, "--dry-run", help="List what would be generated, change nothing."),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="List what would be generated, change nothing."
+    ),
     json_output: bool = typer.Option(False, "--json", help="Print the report as JSON."),
 ) -> None:
     """Generate metadata for eligible files (cached content, no metadata yet).
@@ -1369,10 +1832,26 @@ def classify_recordings(
     only: list[str] = typer.Option(
         None, "--only", help="Restrict to these file ids (repeatable). Used by the app preview."
     ),
+    llm: bool | None = typer.Option(
+        None,
+        "--llm/--no-llm",
+        help="Let the classify model arbitrate weak rule verdicts (default: config classify_llm_assist).",
+    ),
+    folder: str = typer.Option(
+        "",
+        "--folder",
+        help="Force this taxonomy folder for the --only files (app preview override).",
+    ),
+    append_undo: bool = typer.Option(
+        False, "--append-undo", help="Append to the previous undo group (app multi-folder apply)."
+    ),
 ) -> None:
-    """Classify recordings into the Plaud folder taxonomy."""
+    """Classify recordings into the Plaud folder taxonomy (rules first, LLM arbitration for weak verdicts)."""
     import json as _json
+    from core.auto_folder import classify_with_assist
+    from core.classify_history import capture_state, write_manifest
     from core.metadata import build_recording_snapshot
+    from core.paths import DATA_DIR
 
     storage = Storage()
     rows = storage.files_for_classification(
@@ -1383,77 +1862,121 @@ def classify_recordings(
         wanted = set(only)
         rows = [r for r in rows if r["id"] in wanted]
     results = []
-    moved_manifest: list[dict[str, str]] = []
+    moved_manifest: list[dict] = []
+    manifest_path = DATA_DIR / "last_classify.json"
+    if apply and append_undo and manifest_path.exists():
+        moved_manifest = _json.loads(manifest_path.read_text(encoding="utf-8")).get("moved", [])
+    manifest = {"version": 2, "at": int(time.time()), "moved": moved_manifest}
     for row in rows:
         snapshot = build_recording_snapshot(storage, row["id"])
-        classification = classify_snapshot(snapshot)
+        if folder:
+            from core.classification import classification_from_rule, rule_by_folder
+
+            rule = rule_by_folder(folder)
+            if rule is None:
+                raise typer.BadParameter(f"unknown taxonomy folder: {folder}")
+            from core.auto_folder import AssistedClassification
+
+            assisted = AssistedClassification(
+                classification_from_rule(
+                    rule,
+                    keywords=list(snapshot.get("keywords") or []),
+                    confidence=1.0,
+                    reason="chosen by user",
+                    source="manual",
+                )
+            )
+        else:
+            assisted = classify_with_assist(snapshot, use_llm=llm)
+        classification = assisted.classification
         moved_to = ""
-        error = ""
+        error = assisted.llm_error if assisted.llm_error and not assisted.used_llm else ""
         if apply and classification.confidence >= min_confidence:
+            before = capture_state(storage, row["id"])
+            entry = None
             try:
+                if len(before["folder_ids"]) > 1:
+                    raise ValueError("repair multiple folder assignments with folder-doctor first")
                 moved_to = move_to_named_folder(storage, row["id"], classification.folder_name)
+                previous = next(
+                    (item for item in moved_manifest if item["file_id"] == row["id"]), None
+                )
+                entry = {
+                    "file_id": row["id"],
+                    "folder_id": moved_to,
+                    "folder_name": classification.folder_name,
+                    "title": snapshot["title"],
+                    "before": previous.get("before", before) if previous else before,
+                    "after": capture_state(storage, row["id"]),
+                }
+                if previous:
+                    moved_manifest[moved_manifest.index(previous)] = entry
+                else:
+                    moved_manifest.append(entry)
+                write_manifest(manifest_path, manifest)
                 now = int(time.time())
+                # usage_status=None → COALESCE keeps an existing lifecycle
+                # value (metadata-ready / vault-linked) instead of resetting
+                # it to "unused" on every re-classify.
+                existing = storage.get_note_metadata(row["id"])
+                existing_json = _json.loads(existing["metadata_json"] or "{}") if existing else {}
                 storage.upsert_note_metadata(
                     file_id=row["id"],
                     title=snapshot["title"],
                     note_type=classification.note_type,
-                    status="inProgress",
-                    usage_status="unused",
-                    category=classification.cmds_category,
+                    status=None if existing else "inProgress",
+                    usage_status=None if existing else "unused",
+                    category=classification.cmds or classification.cmds_category,
                     folder_id=moved_to,
                     folder_name=classification.folder_name,
                     metadata={
+                        **existing_json,
                         "file_id": row["id"],
                         "title": snapshot["title"],
-                        "category": classification.cmds_category,
+                        "category": classification.cmds or classification.cmds_category,
+                        "cmds": classification.cmds,
+                        "index": classification.index,
+                        "vault_dest": classification.vault_dest,
                         "folder_name": classification.folder_name,
                         "classification_confidence": classification.confidence,
                         "classification_reason": classification.reason,
-                        "usage_status": "unused",
+                        "classification_source": classification.source,
+                        "classification_alternatives": list(classification.alternatives),
                     },
                     now=now,
                 )
                 storage.replace_generated_note_tags(
                     row["id"],
-                    classification.tags,
+                    normalize_tags([*classification.tags, *assisted.llm_tags]),
                     source="auto",
                     now=now,
                 )
-                # All classify sources are Unfiled by default, so the exact
-                # undo of a move is "put it back to Unfiled".
-                moved_manifest.append(
-                    {
-                        "file_id": row["id"],
-                        "folder_id": moved_to,
-                        "folder_name": classification.folder_name,
-                        "title": snapshot["title"],
-                    }
-                )
             except Exception as exc:
                 error = str(exc)
-                console.print(f"[yellow]classify apply skipped[/yellow] {row['id']}: {error}")
+                Console(stderr=json_output).print(
+                    f"[yellow]classify apply skipped[/yellow] {row['id']}: {error}"
+                )
+            finally:
+                if entry is not None:
+                    entry["after"] = capture_state(storage, row["id"])
+                    write_manifest(manifest_path, manifest)
         payload = {
             "file_id": row["id"],
             "title": snapshot["title"],
             "folder_name": classification.folder_name,
             "note_type": classification.note_type,
-            "category": classification.cmds_category,
+            "category": classification.cmds or classification.cmds_category,
+            "cmds": classification.cmds,
+            "index": classification.index,
+            "vault_dest": classification.vault_dest,
             "confidence": classification.confidence,
             "reason": classification.reason,
+            "source": classification.source,
+            "alternatives": list(classification.alternatives),
             "moved_to": moved_to,
             "error": error,
         }
         results.append(payload)
-
-    # Persist a manifest of this run's moves so the app (and `classify-undo`)
-    # can revert exactly what was just applied.
-    if apply and moved_manifest:
-        from core.paths import DATA_DIR
-
-        manifest = {"at": int(time.time()), "moved": moved_manifest}
-        (DATA_DIR / "last_classify.json").write_text(
-            _json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
 
     if json_output:
         console.print_json(json=_json.dumps(results, ensure_ascii=False))
@@ -1462,9 +1985,10 @@ def classify_recordings(
     for item in results:
         action = f" -> {item['moved_to']}" if item["moved_to"] else ""
         error = f" [red]{item['error']}[/red]" if item["error"] else ""
+        src = " [magenta]llm[/magenta]" if item["source"] == "llm" else ""
         console.print(
-            f"{item['confidence']:.2f}  [bold]{item['folder_name']}[/bold]{action}  "
-            f"[dim]{item['title']}[/dim]{error}"
+            f"{item['confidence']:.2f}{src}  [bold]{item['folder_name']}[/bold]{action}  "
+            f"[dim]{item['title']} · {item['cmds'] or '-'} · {item['index']}[/dim]{error}"
         )
     if apply:
         console.print(
@@ -1547,8 +2071,9 @@ def prune_empty_cache(
 def classify_undo(
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
-    """Revert the most recent `classify --apply` — put those files back to Unfiled."""
+    """Restore the most recent classify run's folders, metadata, and tags."""
     import json as _json
+    from core.classify_history import capture_state, restore_state, write_manifest
     from core.paths import DATA_DIR
 
     manifest_path = DATA_DIR / "last_classify.json"
@@ -1564,21 +2089,49 @@ def classify_undo(
     cfg = load_config()
     storage = Storage()
     reverted = 0
+    failed = []
+    errors = {}
     with PlaudClient(cfg) as client:
         for entry in moved:
             fid = entry["file_id"]
             try:
-                client.set_file_folders(fid, [])  # back to Unfiled
-                storage.set_file_folders(fid, [])
-                storage.update_note_folder(fid, folder_id=None, folder_name=None)
+                before = entry.get("before")
+                if before is not None:
+                    current = capture_state(storage, fid)
+                    if entry.get("after") is not None and current not in (entry["after"], before):
+                        raise ValueError("recording changed since classification; undo skipped")
+                    client.set_file_folders(fid, before["folder_ids"])
+                    restore_state(storage, fid, before)
+                else:
+                    # Old manifests did not capture pre-existing metadata.
+                    # Preserve it; only undo the folder move they recorded.
+                    client.set_file_folders(fid, [])
+                    storage.set_file_folders(fid, [])
+                    storage.update_note_folder(
+                        fid, folder_id=None, folder_name=None, now=int(time.time())
+                    )
                 reverted += 1
             except Exception as exc:  # noqa: BLE001 — report, keep going
-                console.print(f"[yellow]skip[/yellow] {fid}: {exc}")
-    manifest_path.unlink(missing_ok=True)
-    if json_out:
-        _emit_json({"status": "ok", "reverted": reverted})
+                failed.append(entry)
+                errors[fid] = str(exc)
+                Console(stderr=json_out).print(f"[yellow]skip[/yellow] {fid}: {exc}")
+    if failed:
+        write_manifest(manifest_path, {**manifest, "moved": failed})
     else:
-        console.print(f"[green]reverted {reverted}[/green] files back to Unfiled")
+        manifest_path.unlink(missing_ok=True)
+    if json_out:
+        _emit_json(
+            {
+                "status": "partial" if failed else "ok",
+                "reverted": reverted,
+                "failed": list(errors),
+                "errors": errors,
+            }
+        )
+    else:
+        console.print(f"[green]reverted {reverted}[/green] files; {len(failed)} pending")
+    if failed:
+        raise typer.Exit(1)
 
 
 def move_to_named_folder(storage: Storage, file_id: str, folder_name: str) -> str:
@@ -1825,6 +2378,27 @@ def web(
         subprocess.run(["open", url], check=False)
     if copy:
         subprocess.run(["pbcopy"], input=url.encode(), check=False)
+
+
+@safe_command(name="elevenlabs-status")
+def elevenlabs_status_cmd(json_out: bool = typer.Option(False, "--json")) -> None:
+    """Remaining ElevenLabs STT credits and the next reset date."""
+    from core.transcribe import elevenlabs_subscription
+
+    info = elevenlabs_subscription()
+    if json_out:
+        _emit_json(info)
+        return
+    if info["status"] != "ok":
+        console.print(f"[yellow]{info['status']}[/yellow] — {info.get('detail', '')}")
+        raise typer.Exit(1)
+    reset = (
+        datetime.fromtimestamp(info["reset_at"]).strftime("%Y-%m-%d") if info["reset_at"] else "?"
+    )
+    console.print(
+        f"ElevenLabs [bold]{info['tier']}[/bold]: "
+        f"{info['remaining']:,} / {info['limit']:,} credits left · resets {reset}"
+    )
 
 
 @safe_command(name="cmds-transcribe")
@@ -2351,8 +2925,7 @@ def config_show() -> None:
     )
     auto_meta = "on" if app_config.auto_metadata_enabled() else "off"
     console.print(
-        f"[bold]Auto metadata[/bold]: {auto_meta}"
-        f" (limit {app_config.auto_metadata_limit()}/batch)"
+        f"[bold]Auto metadata[/bold]: {auto_meta} (limit {app_config.auto_metadata_limit()}/batch)"
     )
     console.print("\n[bold]Path overrides[/bold] (empty = default)")
     for k, v in cfg["paths"].items():
@@ -2376,6 +2949,140 @@ def config_classify(model: str) -> None:
     console.print(f"[green]ok[/green] classify model -> {model} (backend: {backend})")
 
 
+@safe_command(name="vault-base")
+def vault_base(
+    vault: Path | None = None,
+    dest: str = typer.Option(
+        "00. Inbox/08. Transcripts/08-1. Plaud", help="Folder (inside the vault) to install into."
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing Plaud Lane.base."),
+) -> None:
+    """Install the `Plaud Lane.base` Obsidian Bases view next to the Plaud inbox lane."""
+    from core.paths import TEMPLATES_DIR
+
+    root = _require_vault(vault)
+    src = TEMPLATES_DIR / "plaud-lane.base"
+    target = root / dest / "Plaud Lane.base"
+    if target.exists() and not force:
+        console.print(f"[yellow]exists[/yellow] {target} — use --force to overwrite")
+        return
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    console.print(f"[green]installed[/green] {target}")
+
+
+@safe_command(name="vault-lint")
+def vault_lint(
+    vault: Path | None = None,
+    lane: str = typer.Option(
+        "00. Inbox/08. Transcripts/08-1. Plaud", help="Folder (inside the vault) to lint."
+    ),
+    fix: bool = typer.Option(False, "--fix", help="Rewrite frontmatter lines in place."),
+) -> None:
+    """Check Plaud-lane notes against the vault frontmatter standard (ISO dates,
+    aliases, date modified, quoted description/wikilinks, model/effort)."""
+    from core.frontmatter import model_label
+    from core.vault_lint import lint_lane
+
+    root = _require_vault(vault)
+    results = lint_lane(
+        root, lane=lane, fix=fix, model_label=model_label(app_config.metadata_model())
+    )
+    if not results:
+        console.print("[dim]no Plaud notes found in the lane[/dim]")
+        return
+    bad = 0
+    for r in results:
+        if r.ok and not r.fixed:
+            continue
+        bad += 1
+        console.print(f"[bold]{r.path.name}[/bold]")
+        for issue in r.issues:
+            console.print(f"  [yellow]•[/yellow] {issue}")
+        for done in r.fixed:
+            console.print(f"  [green]✓[/green] {done}")
+    console.print(
+        f"{len(results)} notes checked · {bad} with findings"
+        + (" (fixed in place)" if fix else " — rerun with --fix to rewrite")
+    )
+
+
+@safe_command(name="llm-auth")
+def llm_auth_status(json_output: bool = typer.Option(False, "--json")) -> None:
+    """Show OAuth/subscription login state for Claude · Codex(GPT) · Gemini · Grok CLIs."""
+    import json as _json
+    from core.llm_auth import inspect_all
+
+    rows = inspect_all()
+    if json_output:
+        console.print_json(json=_json.dumps([r.to_dict() for r in rows], ensure_ascii=False))
+        return
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("provider")
+    table.add_column("backend")
+    table.add_column("CLI")
+    table.add_column("OAuth login")
+    table.add_column("account")
+    table.add_column("API key env")
+    table.add_column("ready")
+    for r in rows:
+        login = "-" if r.oauth_logged_in is None else ("yes" if r.oauth_logged_in else "no")
+        table.add_row(
+            r.label,
+            r.backend,
+            "installed" if r.cli_installed else "[red]missing[/red]",
+            login if r.cli_installed else "-",
+            r.account or "-",
+            f"{r.api_key_env}={'set' if r.api_key_set else 'unset'}",
+            "[green]ok[/green]" if r.ready else "[red]no[/red]",
+        )
+    console.print(table)
+    for r in rows:
+        if not r.ready:
+            if r.cli_installed:
+                console.print(f"  [yellow]{r.label}[/yellow]: run `{r.login_command}` — {r.note}")
+            else:
+                console.print(
+                    f"  [yellow]{r.label}[/yellow]: `{r.provider}` CLI not installed — "
+                    f"install it, then `{r.login_command}`. {r.note}"
+                )
+
+
+@safe_command(name="llm-auth-login")
+def llm_auth_login(
+    provider: str = typer.Argument(..., help="claude | codex | gemini | grok"),
+) -> None:
+    """Launch the vendor CLI's interactive OAuth login in this terminal."""
+    from core.llm_auth import PROVIDERS, launch_login
+
+    if provider not in PROVIDERS:
+        raise typer.BadParameter(f"provider must be one of {', '.join(PROVIDERS)}")
+    code = launch_login(provider)
+    if code == 127:
+        console.print(f"[red]{provider} CLI not installed[/red]")
+        raise typer.Exit(code=1)
+    if code != 0:
+        console.print(f"[yellow]{provider} login exited with {code}[/yellow]")
+        raise typer.Exit(code=code)
+    console.print(f"[green]{provider} login complete[/green] — verify with `plaud llm-auth`")
+
+
+@safe_command(name="config-classify-assist")
+def config_classify_assist(
+    enabled: bool | None = typer.Argument(None, help="true/false. Omit to show."),
+) -> None:
+    """Toggle LLM arbitration for weak folder classifications."""
+    if enabled is None:
+        state = "on" if app_config.classify_llm_assist() else "off"
+        console.print(
+            f"classify LLM assist: [bold]{state}[/bold] "
+            f"(threshold {app_config.classify_llm_threshold():.2f}, model {app_config.classify_model()})"
+        )
+        return
+    app_config.set_classify_llm_assist(enabled)
+    console.print(f"classify LLM assist → [bold]{'on' if enabled else 'off'}[/bold]")
+
+
 @safe_command(name="config-metadata-model")
 def config_metadata_model(
     model: str,
@@ -2394,8 +3101,7 @@ def config_metadata_model(
         app_config.set_model_id(model, model_id)
     app_config.set_metadata_model(model)
     console.print(
-        f"[green]ok[/green] metadata model -> {model}"
-        f" (backend: {app_config.backend_for(model)})"
+        f"[green]ok[/green] metadata model -> {model} (backend: {app_config.backend_for(model)})"
     )
 
 
@@ -2595,6 +3301,63 @@ def build_obsidian_prompt(*, content, vault: Path, folder: str) -> str:
 ## 전체 트랜스크립트
 {transcript[:50000]}
 """
+
+
+_CLAUDE_TASKS = {
+    "ask": (
+        "Plaud 녹음 {file_id} (제목: {title}) 에 대해 사용자가 질문한다.\n"
+        "plaud-shared 스킬 규약대로 진행하되, 이 저장소의 CLI가 가장 빠른 경로다:\n"
+        "  uv run plaud brief {file_id}        # L1 개요\n"
+        "  uv run plaud contents {file_id}     # 요약/하이라이트\n"
+        "  uv run plaud transcript {file_id}   # 전체 전사\n"
+        "듀얼 최종본이 있으면 data/integrated/{file_id}/ 의 *.transcript.md 를 우선 사용.\n\n"
+        "질문: {prompt}"
+    ),
+    "followup": (
+        "plaud-followup 스킬을 사용해 Plaud 녹음 {file_id} (제목: {title}) 의 "
+        "후속 조치를 진행해줘 — 액션 아이템 추출과 필요한 후속 이메일/메시지 초안까지.\n"
+        "전사·요약은 이 저장소 CLI(uv run plaud contents/transcript {file_id}) 또는 "
+        "data/integrated/{file_id}/ 의 듀얼 최종본을 사용.\n"
+        "{prompt}"
+    ),
+    "digest": (
+        "plaud-digest 스킬로 최근 Plaud 녹음들을 롤업 다이제스트해줘. "
+        "로컬 캐시가 최신이니 uv run plaud query -n 20 으로 시작하면 빠르다.\n"
+        "{prompt}"
+    ),
+    "custom": "{prompt}",
+}
+
+
+@safe_command(name="claude")
+def claude_cmd(
+    file_id: str = typer.Argument("", help="Recording id (digest/custom may omit)."),
+    task: str = typer.Option(
+        "ask", help="ask | followup | digest | custom — which skill chain to drive."
+    ),
+    prompt: str = typer.Option("", help="Your question / extra instructions."),
+) -> None:
+    """Open Claude Code preloaded with this recording's context (plaud-* skill chain).
+
+    Bridges the app to the CLI/MCP layer: the launched session has the plaud
+    skills, the Plaud MCP server, and this repo's CLI all available.
+    """
+    if task not in _CLAUDE_TASKS:
+        raise typer.BadParameter(f"task must be one of: {', '.join(_CLAUDE_TASKS)}")
+    if task in ("ask", "followup") and not file_id:
+        raise typer.BadParameter(f"task '{task}' needs a file id")
+    if task in ("ask", "custom") and not prompt.strip():
+        raise typer.BadParameter(f"task '{task}' needs --prompt")
+
+    title = ""
+    if file_id:
+        row = Storage().get_file_row(file_id)
+        title = (row["filename"] if row else "") or file_id
+    text = _CLAUDE_TASKS[task].format(file_id=file_id, title=title, prompt=prompt.strip()).strip()
+    from core.config import PROJECT_ROOT
+
+    launch_claude(text, cwd=PROJECT_ROOT)
+    console.print(f"[green]launched Claude Code[/green] ({task}) in {PROJECT_ROOT}")
 
 
 def launch_claude(prompt: str, *, cwd: Path) -> None:

@@ -1,13 +1,13 @@
 ---
 date created: 2026-06-15T13:46
-date modified: 2026-09-02T20:05
+date modified: 2026-09-06
 ---
 # Plaud Access Layers — Web · Desktop · MCP · CLI · Skill · App
 
 Plaud Cloud 데이터에 접근·조작·생산하는 여섯 가지 채널을 한 곳에 정리. 어떤 작업을 어떤 채널로 해야 하는지 결정할 때 본 문서를 SSOT로 사용한다.
 
 - 최초 작성: 2026-05-20
-- 최신 갱신: 2026-09-03 (**공식 CLI를 6번째 채널로 추가** — `@plaud-ai/cli` v0.3.11, 공식 개발자 API + OAuth)
+- 최신 갱신: 2026-09-06 (**공식 CLI/MCP 배포 코드 재검증 + 앱 0.8.2 읽기 어댑터·인증 경로 반영** — CLI 0.3.11, MCP 0.3.10)
 - 대상 저장소: `~/DEV/plaud-note-manager`
 - 공개 랜딩: <https://plaud.cmdspace.work> — `web/` 서브폴더 + Vercel 배포
 - Obsidian 요약: `<your-obsidian-vault>/70. Outputs/74. Projects/Plaud Note Manager/2026-05-20-plaud-access-layers.md`
@@ -27,17 +27,17 @@ Desktop은 두 역할 모두 수행하는 유일한 소프트웨어 채널 — P
 |---|---|---|---|---|---|
 | **Web** | `https://web.plaud.ai` | 브라우저 세션 | UI 클릭 | ✅ 공식 | Manage |
 | **Desktop** | Plaud Desktop App (Mac Intel/Apple Silicon · Windows) | Plaud 계정 로그인 (앱 내장) | 네이티브 GUI | ✅ 공식 | **Capture + Manage** |
-| **MCP** | `mcp__plaud__*` (Claude Code MCP server) | OAuth (자동 refresh) — `~/.plaud/tokens-mcp.json` | LLM tool call | ✅ 공식 | Manage |
-| **CLI** | `@plaud-ai/cli` (npm 전역 `plaud`) | OAuth 브라우저 로그인 — `~/.plaud/tokens.json` 자동 갱신 | 터미널 명령 | ✅ 공식 (2026-08-24 공개) | Manage (읽기 전용) |
+| **MCP** | `mcp__plaud__*` (MCP 연결 클라이언트) | 독립 OAuth (자동 refresh) — 로컬 서버는 `~/.plaud/tokens-mcp.json` | LLM tool call | ✅ 공식 | Manage (녹음 읽기) |
+| **CLI** | `@plaud-ai/cli` (npm 전역 `plaud`) | 독립 OAuth 브라우저 로그인 — `~/.plaud/tokens.json` 자동 갱신 | 터미널 명령 | ✅ 공식 (changelog GA 2026-05-12 · 소개 글 08-24) | Manage (읽기 전용) |
 | **Skill** | `~/.claude/skills/plaud-cloud-tools/` | cURL 캡쳐 → `.env` | bash 스크립트 | ⚠️ 비공식 (web API 리버스) | Manage |
-| **App** | `~/DEV/plaud-note-manager/` | 앱 Auth 시트 (browser cURL import 우선 · embedded Web Login fallback) 또는 cURL 캡쳐 → `.env` (`plaud refresh-auth` / `plaud web-auth` / `pbpaste \| uv run plaud onboard`) | Python CLI · SwiftUI macOS 앱 · agent | ⚠️ 비공식 (web API 리버스) | Manage |
+| **App** | `~/DEV/plaud-note-manager/` | Web 쓰기: Keychain workspace pair + 앱 전용 WebKit session; 공식 읽기: 별도 CLI OAuth | Python CLI · SwiftUI macOS 앱 (agent 실행기는 향후) | Web API 비공식 + 공식 CLI 읽기 어댑터 | Manage |
 
 > [!important] 명령 이름 규약 — `plaud` 는 두 개다
-> 2026-08 공개된 **공식 CLI**의 실행 명령도 `plaud`, 본 저장소 **App**의 실행 명령도 `plaud` 다.
+> **공식 CLI**의 실행 명령도 `plaud`, 본 저장소 **App**의 실행 명령도 `plaud` 다.
 > `transcript` · `summary` · `search` 는 **이름이 같고 동작이 다르다**.
-> - 이 문서에서 **App 열의 `plaud X` 는 언제나 `uv run plaud X`** 를 뜻한다 (프로젝트 venv).
-> - 전역 PATH의 `plaud` 는 **공식 CLI** 다 (`npm i -g @plaud-ai/cli`).
-> 환경변수는 겹치지 않는다 — 공식은 `PLAUD_API_BASE`, App은 `PLAUD_BASE_URL`/`PLAUD_AUTHORIZATION`.
+> - 이 문서에서 **App 열의 `plaud X` 는 프로젝트 `.venv/bin/python -m cli.main X`** 를 뜻한다 (`uv run plaud X`도 개발용 진입점).
+> - 이 Mac의 전역 `plaud`는 공식 CLI지만 PATH 순서는 환경마다 다르다. 앱은 검증한 공식 package와 전용 Node의 절대 경로를 사용한다.
+> 공식은 `PLAUD_API_BASE`, App은 `PLAUD_BASE_URL`/`PLAUD_AUTHORIZATION`을 사용한다. 인증 파일·OAuth grant를 공유하거나 복사하지 않는다.
 
 App 구조 요약:
 
@@ -46,14 +46,15 @@ plaud-note-manager/
 ├── core/    # 공유 Python 라이브러리 (API 클라이언트·SQLite·메타데이터)
 ├── cli/     # typer CLI: uv run plaud <command>
 ├── skill/   # Claude Code skill (얇은 래퍼)
-├── agent/   # 자율 에이전트 (주기 sync + 후처리)
+├── agent/   # 향후 자율 자동화를 위한 운영 레시피 (실행기·scheduler 미구현)
 ├── app/     # SwiftUI macOS 앱 (GRDB)
 ├── web/     # 공개 랜딩 (plaud.cmdspace.work · Vercel)
 ├── tests/   # pytest 스위트
 └── data/    # SQLite, 다운로드, 메타 캐시
 ```
 
-핵심 원칙: 인증·API 호출·메타 저장은 `core` 한 곳에만. skill/agent/app 모두 core 경유.
+핵심 원칙: 인증·API 호출·메타 저장은 `core` 한 곳에만. 현재 CLI/skill/app과 향후
+agent가 같은 core 계약을 공유한다.
 
 ## 2. Capture 능력 (Desktop 전용)
 
@@ -76,17 +77,19 @@ plaud-note-manager/
 | 파일 리스트 (id/name/duration/date) | ✅ | ✅ | ✅ `list_files` | ✅ `plaud files` | ✅ `list-files.sh` | ✅ `plaud sync` (+ SQLite 캐시) |
 | `is_trans` / `is_summary` / `is_markmemo` 플래그 | △ UI 표시 | △ UI 표시 | ❌ | ✅ `plaud file` (보유 불리언) | ✅ | △ 캐시 후 derived (raw flag 미노출) |
 | 트랜스크립트 (`transaction`) — 112개 언어 + 스피커 라벨 | ✅ | ✅ | ✅ `get_transcript` (+페이지네이션) | ✅ `plaud transcript` (`-o` 저장) | ✅ `transcript.sh` | ✅ `plaud transcript` |
-| 정제 전사 (`transaction_polish`) — 화자 **실명** 반영 | ✅ | ✅ | ✅ `get_transcript block=transaction_polish` ← 2026-09-02 | ❌ | ✅ | ✅ |
+| 정제 전사 (`transaction_polish`) — 화자 **실명** 반영 | ✅ | ✅ | ✅ `get_transcript block=transaction_polish` | ✅ `transcript --polished` | ✅ | ✅ |
 | AI 요약 (`auto_sum_note`) | ✅ | ✅ | ✅ `get_note` | ✅ `plaud summary` (`-o` MD) | ✅ `summary.sh` | ✅ `plaud summary` |
-| 다중 요약 / 템플릿 탭 (`consumer_note`) — Multidimensional | ✅ | ✅ | ✅ `get_note` 탭 배열 ← 2026-09-02 | ❌ | ✅ | ✅ |
-| Outline | ✅ | ✅ | ✅ `get_transcript block=outline` | ❌ | ✅ | ✅ `plaud outline` |
-| Highlight (`high_light`) | ✅ | ✅ | △ `block=mark_memo` (누른 녹음만) ← 2026-09-02 | ❌ | ✅ | ✅ (`plaud contents`) |
-| MarkMemo / Consumer Note (사용자 메모) | ✅ | ✅ | △ 템플릿 탭은 `get_note`로 ✅ · markMemo는 `block=mark_memo` | ❌ | ✅ | ✅ |
+| 다중 요약 / 템플릿 탭 (`consumer_note`) — Multidimensional | ✅ | ✅ | ✅ `get_note` 탭 배열·링크 본문 해석 | ✅ `summary --json` / `--all` (아래 한계 참조) | ✅ | ✅ |
+| Outline | ✅ | ✅ | ✅ `get_transcript block=outline` | ✅ `transcript --block outline` | ✅ | ✅ `plaud outline` |
+| Highlight (`high_light`) | ✅ | ✅ | △ `block=mark_memo` (누른 녹음만) | △ `transcript --highlights` (`mark_memo`) | ✅ | ✅ (`plaud contents`) |
+| MarkMemo / Consumer Note (사용자 메모) | ✅ | ✅ | △ 템플릿 탭 `get_note` · markMemo `block=mark_memo` | △ `summary --json` / `transcript --block mark_memo` | ✅ | ✅ |
 | 오디오 MP3 | ✅ | ✅ + 로컬 캐시 | △ 24h presigned URL | ✅ `plaud audio` (24h URL) | ✅ `download-file.sh` | ✅ `plaud download` |
 | 스크린샷 (Desktop 녹음 시 첨부된 이미지) | ✅ | ✅ | ❌ | ❌ | ❌ | ❌ |
 | **Ask Plaud** (자연어 Q&A, 인용 포함) | ✅ | ✅ | △ 도구 조합으로 유사 구현 · **저장된 답변 탭**은 `get_note`로 읽기 | ❌ | ❌ | △ `plaud cmds-summarize` 등으로 우회 |
 | 폴더 트리 (`/filetag/`) | ✅ | ✅ | ❌ | ❌ | ❌ | ✅ `plaud folders` |
-| 인증 사용자 정보 | ✅ | ✅ | ✅ `get_current_user` (+`workspace_id`/`member_id` ← 2026-09-02) | ✅ `plaud me` | ❌ | △ `.env` 기반 |
+| 인증 사용자 정보 | ✅ | ✅ | ✅ `get_current_user` (+`workspace_id`/`member_id` ← 2026-09-02) | ✅ `plaud me` | ❌ | ✅ `plaud auth` (Keychain, ID mask, optional live probe) |
+
+**2026-09-06 배포 코드 확인:** CLI 0.3.11의 `summary --json`은 탭 배열을 보존하지만 `data_link` 본문은 가져오지 않는다. `--all`은 `auto_sum_note`가 없을 때 다른 탭이 있어도 조기 반환할 수 있다. MCP 0.3.10 `get_note`는 링크 본문을 해석한다. 전사는 본문이 없어도 CLI exit 0일 수 있어 export 파일 존재·내용을 확인해야 한다. [CLI 배포물](https://registry.npmjs.org/@plaud-ai/cli/-/cli-0.3.11.tgz), [MCP 배포물](https://registry.npmjs.org/@plaud-ai/mcp/-/mcp-0.3.10.tgz)
 
 ## 4. 쓰기 / 편집 능력
 
@@ -151,21 +154,23 @@ App은 Plaud (및 Desktop) 이 지원하지 않는 사용자 워크플로우용 
 |---|---|
 | Claude 대화 중 자연어로 "최근 녹음 / 요약" | **MCP** |
 | **터미널·스크립트·크론에서 전사/요약 파일 뽑기** | **CLI** (공식 · `plaud summary <id> -o s.md`) |
-| 화면 없는 서버(Mac mini·홈서버)에서 정기 추출 | **CLI** |
+| 화면 없는 서버(Mac mini·홈서버)에서 정기 추출 | **CLI** (독립 OAuth 초기 연결·갱신 실패 처리 필요) |
 | 빠른 GUI 브라우징 + 인앱 Q&A (Ask Plaud) | **Desktop** 또는 **Web** |
 | 오디오 일괄 백업 (다수 파일) | **CLI** (공식 우선) · **Skill** · **App** |
 | `is_summary=true` 인 것만 일괄 처리 | **Skill** |
-| 사용자 markMemo · highlight 접근 (API) | **Skill** 또는 **App** |
+| 사용자 markMemo · highlight 접근 (API) | **MCP** `block=mark_memo` 또는 **CLI** `--highlights`; 보유 블록 확인 |
 | 노션 / 이메일 / Slack 등 다운스트림 푸시 | **MCP** → `plaud-export` skill 체인 (자동) · 또는 **Desktop** → Zapier |
 | **폴더 만들기 · 옮기기** | **Web** · **Desktop** · **App** (셋 다 가능) |
 | **AI 기반 자동 폴더 분류** | **App** (유일 경로 — 규칙 taxonomy → 약한 판정만 LLM 중재, v0.8) |
 | **세션 제목 변경** | **Web** · **Desktop** · **App** |
-| Plaud 서버에 스피커 라벨 반영 | **Web** 또는 **Desktop** (자동화 불가) |
+| Plaud 서버에 스피커 라벨 반영 | **App** `plaud-relabel` 또는 **Web · Desktop** |
 | Obsidian 회의록 / 강의록 생성 | **App** (`plaud meeting-note` · `plaud obsidian`) |
 | 자체 STT 재전사 · 자체 스피커 라벨 (로컬 보존) | **App** (`cmds-transcribe` · `cmds-relabel`) |
 | 세션 삭제 / 휴지통 | **Web** 또는 **Desktop** |
 | 27+ 형식 export | **Desktop** |
 | **폴더 / 태그 조회** | **Web · Desktop · App** (CLI·MCP는 폴더를 못 본다) |
+
+전체 라이브러리 수집에는 **필터 없는 MCP pagination → 로컬 검색**을 사용한다. CLI `search`와 필터 있는 MCP `list_files`는 최근 500개까지 검사하며, CLI `recent`는 최대 300개·`today`는 최대 50개다. `files`/`file`의 잘린 사람용 표는 JSON 캐시로 파싱하지 않는다. 긴 전사는 MCP `next_cursor`가 없어질 때까지 수집한다. 구체적인 자동화 설계와 근거는 [`REVIEW-2026-09-06-AUTH-ACCESS.md`](REVIEW-2026-09-06-AUTH-ACCESS.md)에 있다.
 
 ## 8. 데이터 모델 차이 노트
 
@@ -199,8 +204,10 @@ MCP는 여전히 7 tools · read-only 지만, 두 도구의 범위가 넓어졌�
 
 > [!warning] 출처 주의 — 이 절은 공식 문서에 없다
 > 2026-09-03 <https://docs.plaud.ai/plaud-mcp-cli/mcp> 전문 대조 결과, 위 확장(`block`·페이지네이션·멀티탭·`workspace_id`)은
-> **공식 문서에 한 줄도 기재돼 있지 않다.** 유일한 출처는 라이브 호출 실측이다.
+> **공식 문서에 한 줄도 기재돼 있지 않았다.** 당시 근거는 라이브 호출 실측이었다.
 > → Plaud MCP 의존 코드는 분기마다 **설치된 tool schema 자체를 diff** 해서 재검증할 것. 문서 갱신을 기다리면 늦는다.
+
+2026-09-06에는 공식 MCP 0.3.10 배포 코드에서도 블록·cursor·다중 탭 처리를 확인했다. 다만 소스의 지원 옵션은 모든 녹음에서 해당 콘텐츠가 존재한다는 증거가 아니다.
 
 ### 8.3 스피커 정보 구조
 - 각 transcript segment: `{ start_time, end_time, content, speaker, original_speaker }`
@@ -240,7 +247,7 @@ App 에서 사용:
 |---|---|
 | Web | 브라우저 쿠키 |
 | Desktop | 앱 내장 (계정 로그인 후 OS keychain 으로 추정) |
-| MCP | `~/.plaud/tokens-mcp.json` (자동 refresh) |
+| MCP | 로컬 공식 서버는 `~/.plaud/tokens-mcp.json` (독립 OAuth 자동 refresh) |
 | **CLI (공식 `@plaud-ai/cli`)** | `~/.plaud/tokens.json` (OAuth, 자동 갱신) · 설정 `~/.plaud/cli.yaml` |
 | Skill `plaud-cloud-tools` | `~/.claude/skills/plaud-cloud-tools/.env` |
 | App `plaud-note-manager` | workspace 자격증: macOS Keychain 단일 항목 · 계정 HttpOnly 세션: 영속 WebKit store |
@@ -263,30 +270,44 @@ token 쌍을 발급한다. 새 쌍은 WebKit localStorage와 Keychain에 같은 
 상호작이 필요한 Plaud Web Login을 연다. `pld_ut`/`pld_urt`는 WebKit 밖으로
 복사하지 않는다.
 
-**App Tier-1 복구 (2026-08 신규 · 2026-08-17 무인화)**: refresh 체인이 끊겼을 때
-(`not_bootstrapped` / `rejected`) `uv run plaud auth-recover`가 브라우저에 이미
-로그인돼 있는 web.plaud.ai 세션에서 `workspaceList`를 재수확해 (localStorage
-읽기 — 비밀번호 입력 없음) `ws-bootstrap`을 재가동한다. 드라이버 사다리는
-매 단계 capture → bootstrap 검증이며, 한 단계가 실패해도 다음으로 넘어간다:
+**App 브라우저 복구 (2026-09-06 경계 정리)**: 일상적인 자동 복구는 Keychain의
+workspace refresh → **앱 전용 영속 WKWebView 세션** 순서다. cURL import는
+검증한 access를 저장하지만 자동으로 Chrome 프로필을 읽지 않는다. Auth 시트의
+"자동 갱신 연결"은 앱 전용 Web Login을 사용한다.
+
+기존 Chrome 세션에서 인증 자료를 읽는 기능은 설명이 있는 **"Chrome 연결" 버튼을
+직접 선택하는 경우**에만 실행한다. CLI의 `auth-recover`는 아래 드라이버를 유지하지만
+그 존재가 앱의 자동 실행을 뜻하지 않는다. 브라우저 보안 설정은 변경하지 않는다.
+각 단계는 capture → 서버 검증 → bootstrap 순서다.
 
 | 순위 | 드라이버 | 조건 | 비고 |
 |---|---|---|---|
-| 1 | `chrome-disk` | 없음 (완전 무인) | Chrome localStorage LevelDB를 **읽기 전용** 파싱 (`ccl_chromium_reader`). Chrome 실행/설정 불필요. 전 프로필 스캔 후 `refreshExpiresAt` 최신값 채택 |
+| 1 | `chrome-disk` | 사용자가 기존 Chrome 인증 자료 연결을 명시적으로 선택 | Chrome localStorage LevelDB 파싱 (`ccl_chromium_reader`). Chrome 실행/보안 설정 변경 불필요 |
 | 2 | `chrome` | Chrome 실행 + View→Developer→"Allow JavaScript from Apple Events" | AppleScript `execute javascript` — 라이브 세션이라 디스크 사본이 로테이션돼 낡았을 때의 보루 |
 | 3 | `cmux` | cmux 브라우저에 Plaud 로그인 | `cmux browser open/wait/eval` |
 | 4 | Tier 2 | 사용자 1회 로그인 | 앱 Auth 시트 Embedded Web Login |
 
-앱은 만료를 감지하면 **사용자에게 배너를 띄우기 전에 스스로** `ws-refresh` →
-`auth-recover`를 시도한다 (`FileStore+Auth.selfHealAuthIfNeeded`, 세션당 1회).
-aside 등 MCP 브라우저를 가진 Claude 세션은 `core/auth_recover.py`의 `CAPTURE_JS`를
-직접 실행해 `uv run plaud ws-bootstrap --stdin`으로 파이프해도 된다.
+`FileStore+Auth.selfHealAuthIfNeeded`는 토큰 세대별로 자동 복구를 제한하며,
+네트워크·로컬 저장소 오류를 로그인 만료로 단정하지 않는다. 아직 유효한 cURL
+access만 있는 경우 현재 사용을 계속 허용하고 자동 갱신 연결을 따로 안내한다.
+
+공식 CLI/MCP는 자신의 OAuth token을 만료 60초 전부터 갱신하며, 서버의 `expires_in`을
+따른다. 고정된 refresh token 수명은 확인되지 않았다. CLI와 MCP는 파일·기본 OAuth
+client가 달라 인증을 복사하지 않는다. 문서의 24시간 오디오 URL 수명과 token 수명도
+구분한다. [공식 CLI 설정](https://docs.plaud.ai/plaud-mcp-cli/cli)
+
+**0.8.2 공식 읽기 연결:** `official-status`는 설치 metadata·토큰 파일 존재만 확인하고,
+`--live`만 독립 OAuth 연결을 검증한다. `official-read FILE_ID`는 요약·전사를 읽어
+미리보기로 반환하며 기존 DB나 Cloud를 변경하지 않는다. 9월 6일 live 진단은
+MCP 인증 성공 / 최종 앱의 공식 CLI 연결·요약·전사 읽기가 성공했다. 초기 제한된 CLI 환경의 `needs_login` 결과와 달랐으므로 실행 환경을 함께 확인해야 한다. Web access 유효 여부와 별개다.
 
 401 발생 시:
 - MCP → `login` 도구 호출
+- 공식 CLI → 공식 package의 `plaud login` (이 앱 CLI와 실행 경로 구분)
 - Skill → web.plaud.ai 에서 cURL 재캡쳐 후 `onboard` 재실행
 - App → 부트스트랩되어 있으면 자동 복구 (아무 명령이나 실행, 또는
-  `uv run plaud ws-refresh`) · 체인 단절 시 `uv run plaud auth-recover`
-  (Tier-1, 위 참고) · 미부트스트랩: 앱 Auth 버튼 (Embedded Web
+  `uv run plaud ws-refresh`) · 체인 단절 시 앱 전용 WebKit 세션 복구 ·
+  Chrome 인증 자료 연결은 Auth 시트에서 명시적으로 선택 · 미부트스트랩: 앱 Auth 버튼 (Embedded Web
   Login 권장 — 자동 갱신까지 활성화) · CLI: cURL 복사 후
   `uv run plaud refresh-auth` (클립보드 자동) ·
   최후 fallback `pbpaste | uv run plaud onboard`
@@ -331,7 +352,8 @@ DevTools 캡쳐(`Copy as cURL`)로 확인. 인증은 기존 cURL 헤더 그대�
 ### 12.1 회의 워크플로우 (가장 흔한 풀스택 시나리오)
 1. **Desktop** — Zoom 회의 자동 감지 → 녹음 + 슬라이드 스크린샷
 2. (자동 sync) — Plaud Cloud 업로드
-3. **App** `plaud sync` 후 `plaud classify --apply` — 자동 폴더 분류
+3. **App** `plaud sync` 후 `plaud classify`로 미리보기 → 결과를 확인한 뒤에만
+   `plaud classify --apply` — 자동 폴더 분류
 4. **App** `plaud meeting-note <file-id>` — Obsidian 회의록 생성
 5. **MCP** — Claude 대화 중 follow-up 이메일 초안 (`plaud-followup`)
 6. **Web** — Plaud Web URL 박은 노션 페이지에서 원본 재청취
@@ -349,6 +371,12 @@ DevTools 캡쳐(`Copy as cURL`)로 확인. 인증은 기존 cURL 헤더 그대�
 
 ## 13. 변경 이력
 
+- **2026-09-06**: 공식 CLI 0.3.11 / MCP 0.3.10 배포물·설치 코드 재검증.
+  - CLI 정제 전사·Outline·mark_memo·다중 요약 지원과 링크 본문 한계를 반영.
+  - 전체 목록 수집과 최근 500개 검색을 구분하고 서버 화자 편집 라우팅 정정.
+  - 0.8.2 공식 읽기 어댑터·독립 인증 상태·앱 WebKit 자동 복구와 명시적 Chrome 연결 경계 반영.
+  - 공식 changelog GA **2026-05-12**, 소개 블로그 게시일 **2026-08-24**를 구분.
+  - 저장소 문서만 갱신했으며 공개 랜딩은 배포하지 않음.
 - **2026-09-03** (2차): 공식 문서 전문 대조 + 정정
   - <https://docs.plaud.ai/plaud-mcp-cli/mcp> · `/cli` 전문을 읽어 §3 표와 대조.
   - 정정: §3 "인증 사용자 정보" 의 CLI 열 ❌ → ✅ `plaud me` (공식 CLI에 존재).
@@ -414,10 +442,11 @@ DevTools 캡쳐(`Copy as cURL`)로 확인. 인증은 기존 cURL 헤더 그대�
 
 ## 14. 관련 문서
 
-- 본 저장소: `STATUS.md` (개발 현황), `docs/STORAGE.md` (SQLite 스키마), `docs/REQUESTS.md` (인증·요청 패턴), `docs/DISCLOSURE.md` (공시 / 정책)
+- 본 저장소: `docs/APP-FEATURES-AND-DESIGN.md` (현재 앱 기능·설계 정본), `STATUS.md` (개발 현황), `docs/STORAGE.md` (SQLite 스키마), `docs/REQUESTS.md` (인증·요청 패턴), `docs/DISCLOSURE.md` (공시 / 정책)
 - 위성 위키 볼트: `20. Wiki/22. Entities/Plaud MCP Server.md`
 - Obsidian 볼트 요약본: `<your-obsidian-vault>/70. Outputs/74. Projects/Plaud Note Manager/2026-05-20-plaud-access-layers.md`
 - 외부:
+  - <https://docs.plaud.ai/plaud-mcp-cli/changelog> — GA 2026-05-12 (문서의 v1.0.0과 npm 패키지 버전은 별도)
   - <https://www.plaud.ai/pages/plaud-desktop> — Desktop 공식 페이지
   - <https://docs.plaud.ai/plaud-mcp-cli/mcp> — MCP 개발자 문서 (현행 URL)
   - <https://docs.plaud.ai/plaud-mcp-cli/cli> — **공식 CLI 개발자 레퍼런스** (현행 URL)

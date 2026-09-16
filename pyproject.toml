@@ -1,6 +1,6 @@
 [project]
 name = "plaud-note-manager"
-version = "0.5.1"
+version = "0.8.3"
 description = "Plaud Cloud sync, management, and processing workspace"
 requires-python = ">=3.11"
 dependencies = [
@@ -10,6 +10,7 @@ dependencies = [
     "typer>=0.12",
     "python-dotenv>=1.0",
     "rich>=13.7",
+    "ccl-chromium-reader",
 ]
 
 [dependency-groups]
@@ -31,3 +32,6 @@ packages = ["core", "cli"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.uv.sources]
+ccl-chromium-reader = { git = "https://github.com/cclgroupltd/ccl_chromium_reader" }

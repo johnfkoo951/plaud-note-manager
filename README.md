@@ -1,7 +1,8 @@
 # Plaud Note Manager
 
 Plaud Cloud의 녹음 파일을 동기화 · 관리 · 가공하는 통합 워크스페이스.
-하나의 Python core를 skill / agent / SwiftUI app 세 surface가 공유합니다.
+하나의 Python core를 CLI / skill / SwiftUI app이 공유하며, agent는 향후 자동화
+surface로 남아 있습니다.
 
 ## Architecture
 
@@ -10,11 +11,11 @@ plaud-note-manager/
 ├── core/           # 공유 Python 라이브러리 (API 클라이언트, 모델, SQLite 저장소)
 ├── cli/            # typer 기반 CLI (sync / classify / metadata / meeting-note / cmds-* / query / export)
 ├── skill/          # Claude Code skill (core/cli를 호출하는 얇은 래퍼)
-├── agent/          # 자율 에이전트 (주기 동기화 + 후처리)
+├── agent/          # 향후 자율 자동화를 위한 운영 레시피 (실행기·scheduler 미구현)
 ├── app/            # SwiftUI 네이티브 macOS 앱
 ├── data/           # SQLite, 다운로드, 메타 캐시 (gitignored)
 ├── web/            # 공개 랜딩 (plaud.cmdspace.work · Vercel)
-├── docs/           # PLAUD-ACCESS-LAYERS.md (6채널 비교 SSOT) + STORAGE/REQUESTS/DISCLOSURE
+├── docs/           # 현재 기능·설계 정본 + 접근 비교·저장·운영 문서
 └── tests/
 ```
 
@@ -26,7 +27,43 @@ plaud-note-manager/
 - 콘텐츠 SSOT: `docs/PLAUD-ACCESS-LAYERS.md`
 
 핵심 원칙: **인증 · API 호출 · 메타데이터 저장은 core 한 곳에만 존재.**
-skill/agent/app은 모두 core를 통해 Plaud에 접근합니다.
+현재 CLI/skill/app은 core를 통해 Plaud에 접근하고, 향후 agent도 같은 계약을 따릅니다.
+
+현재 앱에 실제로 연결된 기능, 각 기능의 목적과 설계 원리, 데이터·보안 경계,
+부분 구현·미구현 항목은
+[`docs/APP-FEATURES-AND-DESIGN.md`](docs/APP-FEATURES-AND-DESIGN.md)를 기준으로 봅니다.
+공개 접근 방식 비교는 `docs/PLAUD-ACCESS-LAYERS.md`가 정본입니다. `STATUS.md`,
+`docs/SPEC.md`, PLAN/REQUESTS 문서는 시점별 기록이며 현재 구현 상태의 정본이 아닙니다.
+
+## 0.8.3 로그인 창·Google 팝업 수정
+
+- 설정창의 420pt 임베디드 로그인 화면을 별도 크기 조절 창으로 이동했습니다. 기본 폭 1120pt, 높이는 최대 900pt로 현재 화면 안에 맞추며 사용자가 조절한 크기를 기억합니다.
+- Google 로그인 팝업을 별도 WebKit 창으로 열어 원래 Plaud 페이지와 로그인 완료 전달 경로를 유지합니다.
+- 이전 접속 헤더가 새 로그인 캡처를 막지 않게 하고, 현재 workspace access token과 일치하는 갱신 정보만 연결합니다.
+- Google 패스키 오류를 상태에 표시합니다. 같은 Google 계정에서 ‘다른 방법 시도’를 사용하거나 기본 브라우저에서 로그인 후 cURL을 가져올 수 있습니다. 창 크기 변경만으로 Google 패스키 지원을 보장하지 않습니다.
+- 수정과 실제 검증 범위: [`docs/REVIEW-2026-09-07-LOGIN-WINDOW.md`](docs/REVIEW-2026-09-07-LOGIN-WINDOW.md).
+
+## 0.8.2 로그인·기본 폭 개선
+
+- 현재 접속과 자동 갱신 상태를 구분하고, 통신·저장소 장애에 반복 로그인을 요구하지 않습니다.
+- 전사·요약이 없는 녹음은 1시간, 실패는 5분 뒤 재요청합니다. 백그라운드 부분 실패가 모달 오류창을 반복하지 않습니다. 수동 `sync-content --force`는 즉시 재시도합니다.
+- 인증 후보 검증 후 Keychain 교체, 요청 세대별 거절 처리, 오프라인 상태 조회로 세션 회귀와 불필요한 네트워크 대기를 줄였습니다.
+- 기본 창 1608×854pt, 사이드바 280pt / 목록 420pt / 작업 패널 350pt. 이후 사용자가 조절한 폭은 저장합니다.
+- 인증 화면의 ‘공식 CLI · MCP 읽기 연결’에서 공식 CLI 연결을 확인하고 선택한 녹음의 요약·전사를 읽을 수 있습니다.
+- `uv run plaud official-status --json --live`, `uv run plaud official-read <id> --kind summary --json`을 추가했습니다. 설치된 공식 `@plaud-ai/cli`를 절대경로로 호출하므로 같은 이름의 자체 `plaud` 명령과 충돌하지 않습니다.
+- API 쓰기/동기화, 공식 CLI 읽기, MCP의 AI 도구 조회 역할과 실제 검증 범위는 [`docs/REVIEW-2026-09-06-AUTH-ACCESS.md`](docs/REVIEW-2026-09-06-AUTH-ACCESS.md)에 정리합니다.
+
+## 0.8.1 개인용 앱 개선
+
+- 수천 개 태그로 실행이 멈추던 사이드바를 전체 태그 검색·80행씩 표시로 개선했습니다.
+- 준비된 Python 환경을 직접 사용하고, CLI 출력 교착과 무제한 대기를 막는 실행기를 공용화했습니다.
+- 중복 DB reload와 긴 본문·슬롯의 화면 렌더 중 파일 조회를 줄이고, custom integrated 출력 경로를 연결했습니다.
+- Cloud 목록 pagination·batch 저장, 기존 사용 상태 보존, 분류 snapshot Undo와 실패 재시도를 보강했습니다.
+- 앱 설치는 검증한 staging bundle로 교체하고 이전 bundle과 build provenance를 보존합니다.
+
+수정 전 문제와 전체 기능 검토, 남은 구조 개선 제안은
+[`docs/REVIEW-2026-09-05.md`](docs/REVIEW-2026-09-05.md)에 정리했습니다.
+외부 계정의 sync·유료 생성·Cloud 변경·Vault 송출은 로컬 실행 확인과 구분해 검증합니다.
 
 ## Quick Start
 
@@ -36,10 +73,10 @@ uv sync
 
 # 2. 자격증명 설정
 #    macOS 앱: 툴바 Auth 버튼 → Authenticate with Plaud
-#    Plaud Web Login으로 1회 로그인하면 자동 갱신까지 검증·활성화됨.
-#    cURL import는 내장 로그인이 멈출 때 쓰는 비상 경로입니다. Plaud가
-#    access token을 확인한 뒤 Keychain에 저장하고, 로그인된 Chrome 세션에서
-#    장기 갱신 토큰도 별도로 복구해 봅니다.
+#    Plaud Web Login에서 workspace refresh pair까지 정상 캡처되면 자동 갱신이 활성화됨.
+#    cURL import는 현재 읽기·쓰기 접속을 연결합니다. Plaud가 검증한 뒤
+#    Keychain에 저장합니다. 자동 갱신은 앱 로그인으로 별도 연결하며,
+#    Chrome의 인증 자료 연결은 인증 화면의 명시적인 버튼으로만 실행합니다.
 #    CLI: web.plaud.ai에서 cURL 복사 후
 pbpaste | uv run plaud onboard
 #    + 자동 갱신 활성화(1회): devtools Application > Local Storage에서
@@ -53,12 +90,14 @@ uv run plaud sync
 uv run plaud download <file-id>
 
 # 5. stable Plaud id 기준 로컬 metadata/tag 생성
-uv run plaud metadata-generate <file-id>
+uv run plaud metadata-generate <file-id> --no-auto-folder  # 먼저 로컬 metadata만
 uv run plaud tag-add <file-id> "회의록"
 uv run plaud meeting-note <file-id>
 uv run plaud models
 uv run plaud folder-plan                 # taxonomy + CMDS(📚)/index(🏷) 매핑
-uv run plaud classify --apply            # 규칙 → 약한 판정만 LLM 중재 (--no-llm 으로 끔)
+uv run plaud classify                    # dry run: 규칙 → 약한 판정만 LLM 중재
+# 결과를 확인한 뒤 Cloud 폴더를 실제 변경할 때만:
+uv run plaud classify --apply
 uv run plaud llm-auth                    # Claude/ChatGPT/Gemini/Grok OAuth 로그인 상태
 ```
 
@@ -66,9 +105,12 @@ uv run plaud llm-auth                    # Claude/ChatGPT/Gemini/Grok OAuth 로�
 `<your-obsidian-vault>/40. Docs/49. API Information`
 frontmatter에서 읽습니다 (볼트 경로는 `PLAUD_OBSIDIAN_VAULT`로 설정).
 앱/CLI의 AI Summary를 수정할 때는 이 경로를 먼저 확인합니다.
-Grok은 xAI API(`XAI_API_KEY`) backend로 사용합니다.
+Grok도 기본은 vendor CLI의 구독 OAuth backend이며, 사용자가 API backend를
+명시적으로 선택한 경우에만 xAI API(`XAI_API_KEY`)를 사용합니다.
 `metadata-generate`는 녹음 제목/요약/볼트 맥락을 기준으로 로컬 메타데이터,
 Obsidian-style tags, `usage_status`, Plaud 폴더 분류를 함께 갱신합니다.
+`--no-auto-folder`를 빼면 confidence 기준을 넘는 경우 Plaud Cloud 폴더도 실제로
+이동할 수 있습니다.
 
 **토큰 갱신 — 자동 갱신이 기본입니다.** 워크스페이스 refresh token을
 한 번 부트스트랩하면 (앱 Plaud Web Login 1회, 또는 `plaud ws-bootstrap`)
@@ -154,11 +196,11 @@ export PLAUD_OBSIDIAN_VAULT="<your-obsidian-vault>"
 - [x] cli: sync, content backfill, folder CRUD, download/export, Obsidian 송출
 - [x] metadata: Plaud file_id 기준 local metadata DB, Obsidian-style tags,
       usage status, auto folder routing, main-vault meeting note generation
-- [x] taxonomy: `core/classification.py` SSOT 기반 14개 카테고리 분류 +
+- [x] taxonomy: `core/classification.py` SSOT 기반의 설정 가능한 카테고리 분류 +
       `folder-plan` / `classify --apply` CLI, 앱 사이드바 Work 섹션
 - [x] v0.8: 규칙이 약할 때만 LLM 중재하는 자동 폴더링(`core/auto_folder.py`),
-      taxonomy에 `CMDS:`/`index:` 매핑, 볼트 노트 프론트매터를 CMDS 표준 빌더
-      (`core/frontmatter.py`)로 통일 + `related:` 실존 노트 위키링크,
+      taxonomy에 `CMDS:`/`index:` 매핑, deterministic direct/dual 볼트 경로에 CMDS
+      frontmatter builder(`core/frontmatter.py`) 적용 + `related:` 실존 노트 위키링크,
       `plaud llm-auth`로 4사 CLI OAuth 상태 확인 (`docs/PLAN-v0.8.md`)
 - [x] CMDS: ElevenLabs Scribe 전사, speaker relabel, saved speakers
 - [x] AI: Claude/Codex/Gemini/Grok — 기본은 각 CLI의 구독 OAuth(API 키 0), API 모드 선택 가능, CMDS 볼트

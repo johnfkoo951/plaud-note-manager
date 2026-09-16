@@ -13,9 +13,9 @@ from typing import Any
 from . import app_config
 from .paths import integrated_dir
 from .storage import Storage
+from .classification import classify_snapshot
 from .tags import normalize_tags
 from .templates import load_template
-from .classification import classify_snapshot
 
 VAULT_CONTEXT_FILES = [
     "AGENTS.md",
@@ -67,14 +67,22 @@ def generate_note_metadata(
         source = "ai"
 
     fallback = fallback_metadata(snapshot)
-    classification = classify_snapshot(snapshot)
+    from .auto_folder import classify_with_assist
+
+    assisted = classify_with_assist(snapshot, model=model, use_llm=use_ai and bool(metadata))
+    classification = assisted.classification
     merged = {**fallback, **{k: v for k, v in metadata.items() if v not in (None, "")}}
     merged["file_id"] = file_id
     merged["stable_id"] = file_id
-    merged["category"] = classification.cmds_category
+    merged["category"] = classification.cmds or classification.cmds_category
     merged["folder_name"] = classification.folder_name
     merged["classification_confidence"] = classification.confidence
     merged["classification_reason"] = classification.reason
+    merged["classification_source"] = classification.source
+    merged["classification_alternatives"] = list(classification.alternatives)
+    merged["cmds"] = classification.cmds
+    merged["index"] = classification.index
+    merged["vault_dest"] = classification.vault_dest
     merged["usage_status"] = merged.get("usage_status") or "metadata-ready"
     merged["tags"] = normalize_tags(
         [
@@ -82,10 +90,34 @@ def generate_note_metadata(
             *classification.tags,
             *fallback.get("tags", []),
             *as_list(merged.get("tags")),
+            *assisted.llm_tags,
         ]
     )
+    # Link candidates: Plaud keywords + LLM key topics/keywords + speakers.
+    # Only terms that resolve to an existing vault note become `related:`.
+    link_terms = [
+        *snapshot["keywords"],
+        *as_list(merged.get("key_topics")),
+        *assisted.llm_keywords,
+        *[s for s in str(snapshot.get("speakers") or "").replace(",", " ").split() if s],
+    ]
+    merged["link_candidates"] = list(dict.fromkeys(str(t).strip() for t in link_terms if t))[:24]
+    try:
+        from .vault_index import related_wikilinks
+
+        merged["related"] = related_wikilinks(merged["link_candidates"])
+    except Exception:  # vault index absent or unreadable — links are optional
+        merged["related"] = []
 
     now = int(time.time())
+    existing = storage.get_note_metadata(file_id)
+    # Generating text should not undo a user's completed/vault-linked/archive
+    # decisions. Only advance the initial states when metadata first appears.
+    if existing:
+        if existing["status"] != "unread":
+            merged["status"] = existing["status"]
+        if existing["usage_status"] != "unused":
+            merged["usage_status"] = existing["usage_status"]
     storage.upsert_note_metadata(
         file_id=file_id,
         title=str(merged.get("title") or snapshot["title"]),
@@ -346,7 +378,6 @@ def fallback_meeting_note(snapshot: dict[str, Any], *, draft_context: str = "") 
     date = recorded_date(snapshot)
     title = snapshot["title"]
     tags = normalize_tags(["MeetingMinutes", "meeting", "plaud", *snapshot["keywords"][:8]])
-    tag_block = "\n".join(f"  - {tag}" for tag in tags)
     draft_section = (
         f"\n## Draft Context\n\n{draft_context.strip()}\n" if draft_context.strip() else ""
     )
@@ -355,32 +386,45 @@ def fallback_meeting_note(snapshot: dict[str, Any], *, draft_context: str = "") 
     # When no author is configured, leave the author/attendee/self-speaker
     # fields blank rather than inserting a name.
     if self_name:
-        author_block = f'author:\n  - "[[{self_name}]]"\n'
-        attendees_block = f'attendees:\n  - "[[{self_name}]]"\n'
         attendees_callout = f">- Attendees: [[{self_name}]]\n"
         speaker_row = f"| {self_name} | 본인 | 기본 포함 |"
     else:
-        author_block = "author:\n"
-        attendees_block = "attendees:\n"
         attendees_callout = ""
         speaker_row = "|  |  |  |"
 
-    return f"""---
-type: meeting
-aliases: []
-description: "Meeting minutes generated from Plaud recording {snapshot["file_id"]}. Reference when reviewing discussion, decisions, next steps, and raw transcript evidence."
-{author_block}date created: {date}
-date modified: {date}
-date: {date}
-{attendees_block}organization:
-CMDS:
-index: "[[🏷 Meeting Notes]]"
-status: inProgress
-tags:
-{tag_block}
-source: plaud
-plaud_id: {snapshot["file_id"]}
----
+    from .frontmatter import CmdsFrontmatter, iso_minute, model_label
+
+    cls = classify_snapshot(snapshot)
+    related: list[str] = []
+    try:
+        from .vault_index import related_wikilinks
+
+        related = related_wikilinks([*snapshot["keywords"], *([self_name] if self_name else [])])
+    except Exception:
+        related = []
+    fm = CmdsFrontmatter(
+        type="meeting",
+        description=(
+            f"Meeting minutes generated from Plaud recording {snapshot['file_id']}. "
+            "Reference when reviewing discussion, decisions, next steps, and raw transcript evidence."
+        ),
+        author=self_name,
+        model=model_label(app_config.metadata_model()),
+        date_created=iso_minute(),
+        date=date,
+        tags=tags,
+        cmds=cls.cmds,
+        index="🏷 Meeting Notes",
+        status="inProgress",
+        source="plaud",
+        plaud_id=snapshot["file_id"],
+        attendees=[self_name] if self_name else [],
+        keywords=[str(k) for k in snapshot["keywords"][:12]],
+        related=related,
+        extra={"organization": ""},
+    )
+    frontmatter = fm.render()
+    return f"""{frontmatter}
 
 >[!info]
 >- Meeting Title: {title} Meeting
