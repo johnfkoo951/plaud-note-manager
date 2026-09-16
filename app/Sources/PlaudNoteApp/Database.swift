@@ -849,6 +849,11 @@ final class Database: @unchecked Sendable {
         /// the Codex CLI subscription login
         /// (top-level `metadata_model` key; `plaud config-metadata-model`).
         var metadataModel: String
+        /// Which model runs the dual-transcribe cross-analysis. Falls back to
+        /// metadataModel when unset — that fusion prompt carries two full
+        /// transcripts, so it is worth pointing somewhere else than the short
+        /// metadata calls (top-level `dual_model`; `plaud config-dual-model`).
+        var dualModel: String
         /// Auto-generate metadata for fresh files after sync
         /// (top-level `auto_metadata` key; `plaud config-auto-metadata`).
         var autoMetadata: Bool
@@ -902,6 +907,7 @@ final class Database: @unchecked Sendable {
             paths: ["transcripts": "", "summaries": "", "integrated": ""],
             classifyModel: "claude",
             metadataModel: "codex",
+            dualModel: "",
             autoMetadata: true,
             pinnedTags: []
         )
@@ -914,6 +920,7 @@ final class Database: @unchecked Sendable {
         if let p = obj["paths"] as? [String: String] { cfg.paths.merge(p) { _, new in new } }
         if let c = obj["classify_model"] as? String, !c.isEmpty { cfg.classifyModel = c }
         if let m = obj["metadata_model"] as? String, !m.isEmpty { cfg.metadataModel = m }
+        if let m = obj["dual_model"] as? String, !m.isEmpty { cfg.dualModel = m }
         if let a = obj["auto_metadata"] as? Bool { cfg.autoMetadata = a }
         if let t = obj["pinned_tags"] as? [String] {
             cfg.pinnedTags = t

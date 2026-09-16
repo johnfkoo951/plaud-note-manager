@@ -72,11 +72,39 @@ class ModelFailed(RuntimeError):
 # -------- public entry --------
 
 
+def _node_version_key(path: Path) -> tuple[int, ...]:
+    """Sort key for an `~/.nvm/versions/node/vX.Y.Z` directory."""
+    try:
+        return tuple(int(part) for part in path.name.lstrip("v").split("."))
+    except ValueError:
+        return (0,)
+
+
+def _nvm_candidates(name: str) -> list[Path]:
+    """Node-installed CLIs, newest nvm version first.
+
+    A GUI-launched app inherits a minimal PATH with no nvm shims, so
+    `shutil.which` misses a CLI the user installed with npm and the provider
+    reports as "CLI missing" even though it is right there in the terminal.
+    """
+    nvm = Path.home() / ".nvm/versions/node"
+    if not nvm.is_dir():
+        return []
+    versions = sorted(nvm.glob("v*"), key=_node_version_key, reverse=True)
+    return [v / "bin" / name for v in versions]
+
+
 def _resolve_binary(model: str, name: str) -> str | None:
     found = shutil.which(name)
     if found:
         return found
-    for candidate in CLI_FALLBACK_PATHS.get(model, []):
+    candidates = [
+        *CLI_FALLBACK_PATHS.get(model, []),
+        *_nvm_candidates(name),
+        Path("/opt/homebrew/bin") / name,
+        Path("/usr/local/bin") / name,
+    ]
+    for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return None

@@ -1472,6 +1472,10 @@ final class FileStore: ObservableObject {
         await runPlaud(args: ["config-metadata-model", model])
     }
 
+    func setDualModel(_ model: String) async {
+        await runPlaud(args: ["config-dual-model", model])
+    }
+
     /// Toggle automatic metadata generation after sync.
     func setAutoMetadata(_ enabled: Bool) async {
         await runPlaud(args: ["config-auto-metadata", enabled ? "on" : "off"])

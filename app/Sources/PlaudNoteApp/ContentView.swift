@@ -997,6 +997,28 @@ private struct SettingsSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
+                    section("Dual transcribe") {
+                        settingsRow("Cross-analysis model") {
+                            Picker("", selection: Binding(
+                                get: { config.dualModel.isEmpty
+                                       ? config.metadataModel : config.dualModel },
+                                set: { newVal in
+                                    config.dualModel = newVal
+                                    Task { await store.setDualModel(newVal) }
+                                }
+                            )) {
+                                ForEach(models, id: \.self) { Text($0).tag($0) }
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(width: 280)
+                        }
+                        Text(dualModelCaption)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
                     section("Metadata") {
                         settingsRow("Metadata model") {
                             Picker("", selection: Binding(
@@ -1092,6 +1114,14 @@ private struct SettingsSheet: View {
     }
 
     /// Billing route for the metadata model (mirrors classifyModelCaption).
+    private var dualModelCaption: String {
+        let model = config.dualModel.isEmpty ? config.metadataModel : config.dualModel
+        let route = (config.backends[model] ?? "cli") == "api" ? "API" : "CLI (구독)"
+        let inherited = config.dualModel.isEmpty ? " — metadata 설정을 따름" : ""
+        return "Dual Transcribe의 Plaud × ElevenLabs 교차분석을 \(model) \(route)로 실행합니다\(inherited). "
+            + "전사본 두 벌을 한 프롬프트에 담으므로 컨텍스트 여유가 있는 모델이 유리합니다."
+    }
+
     private var metadataModelCaption: String {
         let model = config.metadataModel
         let providerLabels = [

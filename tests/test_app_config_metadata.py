@@ -52,3 +52,32 @@ def test_auto_metadata_limit_guards_bad_values(config_file: Path) -> None:
     cfg["auto_metadata_limit"] = "nope"
     app_config.save(cfg)
     assert app_config.auto_metadata_limit() == 20
+
+
+# -------- dual_model: the cross-analysis provider --------
+
+
+def test_dual_model_inherits_metadata_model_when_unset(config_file: Path) -> None:
+    # Existing configs have no dual_model key, and must keep behaving as before.
+    app_config.set_metadata_model("claude")
+    assert app_config.dual_model() == "claude"
+
+
+def test_dual_model_can_differ_from_metadata_model(config_file: Path) -> None:
+    # The point of the setting: the dual run fuses two full transcripts, so it
+    # may need a different provider from the short metadata calls.
+    app_config.set_metadata_model("claude")
+    app_config.set_dual_model("grok")
+    assert app_config.dual_model() == "grok"
+    assert app_config.metadata_model() == "claude"
+
+
+def test_dual_model_survives_a_metadata_model_change(config_file: Path) -> None:
+    app_config.set_dual_model("grok")
+    app_config.set_metadata_model("codex")
+    assert app_config.dual_model() == "grok"
+
+
+def test_dual_model_is_written_under_its_own_key(config_file: Path) -> None:
+    app_config.set_dual_model("gemini")
+    assert json.loads(config_file.read_text())["dual_model"] == "gemini"

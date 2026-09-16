@@ -190,7 +190,7 @@ def advance(
     """Run every stage that can run right now; stop at human checkpoints."""
     from . import app_config
 
-    model = model or app_config.metadata_model()
+    model = model or app_config.dual_model()
     model_id = model_id or app_config.model_id_for(model) or ""
     report = DualReport(file_id=file_id)
     mark(storage, file_id)

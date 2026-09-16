@@ -166,6 +166,22 @@ def set_metadata_model(model: str) -> None:
     save(cfg)
 
 
+def dual_model() -> str:
+    """Model used by the dual-transcribe cross-analysis (Plaud x ElevenLabs).
+
+    Falls back to metadata_model when unset. The dual run fuses two full
+    transcripts in one prompt, so it is the most context-hungry job here and
+    is worth pointing at a different provider from the short metadata calls.
+    """
+    return load().get("dual_model") or metadata_model()
+
+
+def set_dual_model(model: str) -> None:
+    cfg = load()
+    cfg["dual_model"] = model
+    save(cfg)
+
+
 def auto_metadata_enabled() -> bool:
     return bool(load().get("auto_metadata", True))
 

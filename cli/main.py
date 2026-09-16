@@ -3118,6 +3118,28 @@ def config_classify_assist(
     console.print(f"classify LLM assist → [bold]{'on' if enabled else 'off'}[/bold]")
 
 
+@safe_command(name="config-dual-model")
+def config_dual_model(
+    model: str,
+    backend: str = typer.Option("", help="Optionally also set the provider backend: cli | api."),
+    model_id: str = typer.Option("", "--id", help="Optionally pin the API model id."),
+) -> None:
+    """Set which model the dual transcribe (Plaud x ElevenLabs) cross-analysis uses."""
+    valid = ("claude", "codex", "gemini", "grok")
+    if model not in valid:
+        raise typer.BadParameter(f"model must be one of: {', '.join(valid)}")
+    if backend:
+        if backend not in ("cli", "api"):
+            raise typer.BadParameter("backend must be 'cli' or 'api'")
+        app_config.set_backend(model, backend)
+    if model_id:
+        app_config.set_model_id(model, model_id)
+    app_config.set_dual_model(model)
+    console.print(
+        f"[green]ok[/green] dual model -> {model} (backend: {app_config.backend_for(model)})"
+    )
+
+
 @safe_command(name="config-metadata-model")
 def config_metadata_model(
     model: str,
