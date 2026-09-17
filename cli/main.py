@@ -2264,6 +2264,67 @@ def obsidian(
     console.print(f"[green]launched Claude Code[/green] for {file_id}")
 
 
+@safe_command(name="vaults")
+def vaults_cmd(json_out: bool = typer.Option(False, "--json")) -> None:
+    """List the configured Obsidian vaults that actually exist on disk."""
+    from core.vault_compose import vault_choices
+
+    choices = vault_choices()
+    if json_out:
+        _emit_json(choices)
+        return
+    if not choices:
+        console.print("[yellow]no vault configured[/yellow] — `plaud config-vault <path>`")
+        return
+    for c in choices:
+        console.print(f"  {c['key']:>5}  {c['name']}  [dim]{c['path']}[/dim]")
+
+
+@safe_command(name="vault-compose")
+def vault_compose_cmd(
+    file_id: str,
+    template: str = typer.Option(..., "--template", help="Template name, e.g. note-meeting."),
+    to: str = typer.Option("main", "--to", help="main | wiki | <absolute vault path>"),
+    dest: str = typer.Option("", "--dest", help="Subfolder; main vault only."),
+    collection_purpose: str = typer.Option(
+        "",
+        "--collection-purpose",
+        help="Why this was collected and how it will be reused. Required for --to wiki.",
+    ),
+    model: str = typer.Option("", help=MODEL_HELP + " Empty = configured model."),
+    model_id: str = typer.Option("", "--id", help="Pin the API model id."),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Generate but do not write the note."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Run a template over a recording and file the result in a vault.
+
+    The main vault gets a note about the recording. The wiki gets an immutable
+    raw source: the verbatim transcript under `## Original Content` with the
+    summary above it, landed in `10. Raw Sources/`.
+    """
+    from core.vault_compose import compose
+
+    result = compose(
+        file_id,
+        template=template,
+        to=to,
+        dest=dest,
+        collection_purpose=collection_purpose,
+        model=model,
+        model_id=model_id,
+        dry_run=dry_run,
+    )
+    if json_out:
+        _emit_json(result.as_dict())
+        return
+    if result.status != "ok":
+        console.print(f"[red]{result.status}[/red] — {result.detail}")
+        raise typer.Exit(1)
+    console.print(f"[green]ok[/green] {result.detail}")
+    if result.path:
+        console.print(f"  {result.path}")
+
+
 @safe_command(name="vault-send")
 def vault_send_cmd(
     file_id: str,
