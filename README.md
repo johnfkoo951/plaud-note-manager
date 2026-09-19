@@ -46,6 +46,8 @@ plaud-note-manager/
 [`docs/APP-FEATURES-AND-DESIGN.md`](docs/APP-FEATURES-AND-DESIGN.md)를 기준으로 봅니다.
 공개 접근 방식 비교는 `docs/PLAUD-ACCESS-LAYERS.md`가 정본입니다. `STATUS.md`,
 `docs/SPEC.md`, PLAN/REQUESTS 문서는 시점별 기록이며 현재 구현 상태의 정본이 아닙니다.
+남은 개발 과제와 미해결 결함은 [`docs/BACKLOG.md`](docs/BACKLOG.md)에 파일·라인과 함께
+정리합니다.
 
 ## 0.8.3 로그인 창·Google 팝업 수정
 
