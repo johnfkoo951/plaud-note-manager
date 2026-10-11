@@ -58,6 +58,8 @@
 `VaultComposeArguments.build(fileID:template:vault:purpose:) -> [String]`,
 `PlaudTagCommandArgumentsTests`와 같은 형태.
 
+**해결 (2026-10-12):** 설정에 읽기 전용 Templates 보기를, 녹음마다 `note-*` 템플릿과 볼트를 골라 `vault-compose`로 보내는 작성 시트(위키는 수집 목적 필수)를 추가했다 — app-01 39793ca, app-03 827112d, core-03 8b2109e, core-05 8cc23b6
+
 ---
 
 ## B. `note_context` 화자 공백 분리 — 데이터 오염
@@ -87,6 +89,8 @@ author:
 **조치**: `vault_compose.human_speakers()`를 `vault_send`로 올려 공유. 쉼표 분리 + 플레이스홀더
 필터. 기존 노트 소급 수정은 하지 않는다(역사 기록).
 
+**해결 (2026-10-12):** 화자 처리를 `core.metadata.human_speakers`(쉼표 분리, NFC 후 플레이스홀더 제외·중복 제거) 하나로 모아 메인 볼트 송출에도 `[[Speaker]]`·`[[3]]` 조각이 더는 생기지 않는다 — core-02 97aaf00
+
 ---
 
 ## C. `vault_send --to wiki` — 스키마 위반 경로가 살아 있음
@@ -109,6 +113,8 @@ author:
 2번이 깔끔하다 — 두 벌의 위키 로직을 남길 이유가 없다. 단 `collectionPurpose` 입력이
 필요하므로 **A2와 묶어서** 처리해야 한다.
 
+**해결 (2026-10-12):** 2번으로 처리했다 — `vault-send`는 위키로 떨어지는 모든 대상(`--dest` 포함)을 `wiki_unsupported`로 거절하고, 앱의 Wiki 메뉴·팔레트는 수집 목적을 받는 `vault-compose --to wiki` 시트를 연다 — core-05 8cc23b6, app-03 827112d
+
 ---
 
 ## D. legacy `cmds-*` 템플릿 — 이중 frontmatter
@@ -126,6 +132,8 @@ Obsidian Properties 패널이 깨진다.
 deprecated 표시. 삭제는 기존 슬롯 설정이 깨지므로 하지 않는다 — `data/slots.json`이
 템플릿명을 문자열로 들고 있다.
 
+**해결 (2026-10-12):** 세 템플릿에 `deprecated`·`replaced_by`를 달아 CLI가 대체 템플릿을 안내하고, 새 슬롯 선택지와 템플릿 작성에서는 빠지며 기존 슬롯은 그대로 돈다(이미 만든 출력의 YAML 2겹은 남음) — core-04 4e337f7, app-02 734db1e
+
 ---
 
 ## E. `default.md`가 summarize 기본값
@@ -141,6 +149,8 @@ summarize 경로로 `default`를 돌리면 **세 섹션이 빈 문자열로 렌�
 
 **조치**: summarize 기본값을 `note-general`로 교체. `default.md`는 integrate 전용으로 남긴다.
 기존 슬롯(`data/slots.json`)은 사용자 설정이므로 건드리지 않는다.
+
+**해결 (2026-10-12):** `cmds-summarize`와 기본 슬롯(Python·앱 모두)의 기본 템플릿을 `note-general`로 바꾸고 `default.md`를 `kind: integrated`로 선언했다; 기존 `data/slots.json`은 건드리지 않는다 — core-04 4e337f7, core-03 8b2109e, app-02 734db1e
 
 ---
 
@@ -159,6 +169,8 @@ if slot.template == "integrated" { return .integrated }
 파서는 `description:`만 읽고, `save_template()`은 다른 키를 **파괴**한다(`templates.py:90-98`).
 가장 싼 방법은 명명 규약(`*-integrated`) 또는 `core/templates.py`에 `kind:` 필드 추가.
 후자가 옳지만 `save_template` 왕복 보존까지 함께 고쳐야 한다.
+
+**해결 (2026-10-12):** 템플릿 front matter에 `kind`(summary·integrated·internal)를 도입하고 `template-save`가 다른 키를 보존하게 했으며, 앱 슬롯은 이름 대신 `kind`로 열리는 모드·Generate·Generate All을 정한다 — core-03 8b2109e, app-01 39793ca, app-02 734db1e
 
 ---
 
@@ -180,6 +192,8 @@ CLI는 `--on-duplicate skip|overwrite|new` 플래그.
 새로 쓴다(`tests/test_dual_vault.py`가 이 동작을 고정). 목록 컨텍스트 메뉴의 구형
 "Send to Obsidian"(`plaud obsidian`)은 Claude가 참조 기록 없이 파일링한다. meeting-note는
 기존 노트를 묻지 않고 제자리에서 덮어쓴다.
+
+**해결 (2026-10-12):** `vault-send`·`vault-compose`에 `--on-duplicate ask|skip|overwrite|new`(기본 ask, 모델·Terminal 전에 판단)를 더했고, 앱은 열기·덮어쓰기·새로 만들기·취소 대화상자로 같은 요청을 다시 실행한다(위키·Claude Terminal은 덮어쓰기 없음) — core-06 60ff8d9, app-04 6f2ee73
 
 ---
 
@@ -220,6 +234,8 @@ if "source: plaud" not in text.split("\n---", 2)[0] if text.startswith("---") el
 
 참고로 이 lint는 모든 plaud 레인 노트에 `model:`을 요구하는데, 실제 레인 노트 3건에는
 없다(필드 도입 전 생성). 지금 돌리면 전부 issue로 잡힌다.
+
+**해결 (2026-10-12):** 조건식을 `frontmatter` 변수와 단순한 `if` 두 줄로 풀고, 세 경우를 고정하는 회귀 테스트를 더했다(동작 동일; `model:` 누락 레인 노트 건은 그대로) — core-01 ef73fc5
 
 ---
 
