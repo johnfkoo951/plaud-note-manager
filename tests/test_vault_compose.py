@@ -334,6 +334,21 @@ def test_compose_to_the_wiki_path_lands_in_raw_sources(storage, vaults, recordin
     assert not (vaults["wiki"] / "00. Inbox").exists()
 
 
+@pytest.mark.parametrize("form", ["absolute", "parent"])
+def test_a_main_compose_whose_dest_is_in_the_wiki_stops_before_the_model(
+    storage, vaults, recording_model, form
+) -> None:
+    dest = (
+        str(vaults["wiki"] / "00. Inbox")
+        if form == "absolute"
+        else f"../{vaults['wiki'].name}/00. Inbox"
+    )
+    result = vc.compose("f1", template="note-meeting", to="main", dest=dest, storage=storage)
+    assert result.status == "wiki_unsupported"
+    assert recording_model == []
+    assert not [p for p in vaults["wiki"].rglob("*") if p.is_file()]
+
+
 def test_compose_to_the_main_vault_path_stays_main(storage, vaults, recording_model) -> None:
     result = vc.compose("f1", template="note-meeting", to=str(vaults["main"]), storage=storage)
     assert result.status == "ok"

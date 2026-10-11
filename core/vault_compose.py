@@ -41,6 +41,7 @@ from .vault_send import (
     note_tags,
     obsidian_open_url,
     resolve_vault,
+    sends_into_wiki,
     vault_send,
 )
 from .wiki_frontmatter import (
@@ -88,7 +89,8 @@ def wiki_slug(title: str, *, max_len: int = 80) -> str:
 @dataclass
 class ComposeResult:
     # ok | bad_template | needs_purpose | no_vault | no_transcript | model_failed |
-    # schema_error, and from the main-vault send: no_content | write_failed.
+    # schema_error | wiki_unsupported (a main --dest that lands in the wiki), and
+    # from the main-vault send: no_content | write_failed.
     # `vault-compose --json` emits every one with exit 0; the app maps them.
     status: str
     detail: str = ""
@@ -333,6 +335,16 @@ def compose(
         return ComposeResult(
             "no_vault",
             f"vault '{to}' not configured/found — set it via `plaud config-vault`",
+            template=template,
+        )
+    # A --dest can still walk into the wiki (absolute, `..`, symlink); vault_send
+    # would refuse it only after the summary had been generated.
+    if sends_into_wiki(to, vault, dest):
+        return ComposeResult(
+            "wiki_unsupported",
+            f"--dest '{dest}' lands in the wiki, which takes raw sources only — "
+            'use `--to wiki --collection-purpose "..."` instead',
+            vault=str(vault),
             template=template,
         )
 

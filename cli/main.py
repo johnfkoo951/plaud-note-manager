@@ -2419,9 +2419,9 @@ def vault_send_cmd(
         WIKI_SEND_REFUSAL,
         VaultSendResult,
         build_filing_prompt,
-        is_wiki_target,
         resolve_content,
         resolve_vault,
+        sends_into_wiki,
         vault_send,
     )
 
@@ -2434,8 +2434,9 @@ def vault_send_cmd(
         from core.metadata import build_recording_snapshot
 
         vault_path = resolve_vault(to)
-        # Same refusal as vault_send, before the database or a Terminal opens.
-        if is_wiki_target(to, vault_path):
+        # Same refusal as vault_send — target and effective --dest folder —
+        # before the database or a Terminal opens.
+        if sends_into_wiki(to, vault_path, dest):
             if json_out:
                 refused = VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, via=via)
                 _emit_json(_asdict(refused))

@@ -367,6 +367,58 @@ def test_cli_vault_send_to_the_wiki_is_refused(wiki: Path) -> None:
     assert _files(wiki) == []
 
 
+def _wiki_dest(form: str, sandbox: dict, wiki: Path) -> str:
+    """A `--dest` under the main vault whose effective folder is in the wiki."""
+    if form == "absolute":
+        return str(wiki / "00. Inbox")  # Path joining lets it replace the root
+    if form == "parent":
+        return f"../{wiki.name}/00. Inbox"  # the wiki is the main vault's sibling
+    link = sandbox["vault"] / "wiki-link"
+    link.symlink_to(wiki, target_is_directory=True)
+    return "wiki-link/00. Inbox"
+
+
+@pytest.mark.parametrize("via", ["direct", "claude"])
+@pytest.mark.parametrize("form", ["absolute", "parent", "symlink"])
+def test_a_dest_that_lands_in_the_wiki_is_refused(sandbox, wiki: Path, form: str, via: str) -> None:
+    dest = _wiki_dest(form, sandbox, wiki)
+    result = vault_send(FILE_ID, to="main", dest=dest, via=via)
+    assert result.status == "wiki_unsupported"
+    assert _files(wiki) == []
+
+
+def test_a_dest_through_an_unconfigured_wiki_folder_is_refused(sandbox, monkeypatch) -> None:
+    monkeypatch.setattr(vault_send_mod, "wiki_vault", lambda: None)
+    dest = sandbox["tmp"] / "x" / vault_send_mod.WIKI_VAULT_DIRNAME / "00. Inbox"
+    _write_integrated(sandbox["tmp"])
+    result = vault_send(FILE_ID, to="main", dest=str(dest), storage=sandbox["storage"])
+    assert result.status == "wiki_unsupported"
+    assert not dest.exists()
+
+
+def test_an_ordinary_dest_still_sends(sandbox, wiki: Path, monkeypatch) -> None:
+    monkeypatch.setattr(vault_send_mod, "Storage", lambda: sandbox["storage"])
+    result = vault_send(FILE_ID, to="main", dest="60. Collections/63. Meetings")
+    assert result.status == "ok"
+    assert Path(result.path).parent == sandbox["vault"] / "60. Collections/63. Meetings"
+
+
+@pytest.mark.parametrize("via", ["direct", "claude-window"])
+@pytest.mark.parametrize("form", ["absolute", "parent", "symlink"])
+def test_cli_dest_into_the_wiki_opens_nothing(
+    sandbox, wiki: Path, monkeypatch, form: str, via: str
+) -> None:
+    launched: list = []
+    monkeypatch.setattr(cli, "launch_claude", lambda *a, **k: launched.append(a))
+    dest = _wiki_dest(form, sandbox, wiki)
+    argv = ["vault-send", FILE_ID, "--to", "main", "--dest", dest, "--via", via, "--json"]
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "wiki_unsupported"
+    assert launched == []
+    assert _files(wiki) == []
+
+
 def test_cli_claude_window_to_the_wiki_launches_nothing(wiki: Path, monkeypatch) -> None:
     launched: list = []
     monkeypatch.setattr(cli, "launch_claude", lambda *a, **k: launched.append(a))

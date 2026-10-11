@@ -132,6 +132,24 @@ def is_wiki_target(to: str, vault: Path | None = None) -> bool:
     return WIKI_VAULT_DIRNAME in target.parts
 
 
+def send_destination(vault: Path, dest: str = "") -> Path:
+    """The folder a send writes into: `dest` (default 00. Inbox) under `vault`.
+    An absolute `dest` replaces the root, as Path joining does."""
+    return vault / (dest.strip() or DEFAULT_DEST)
+
+
+def sends_into_wiki(to: str, vault: Path | None, dest: str = "") -> bool:
+    """Whether a send would land in the wiki — by its target, or by the folder
+    it actually writes into: an absolute `dest`, a `..` walk or a symlink can
+    all reach the wiki from the main vault. Resolving the folder before
+    checking it covers all three."""
+    if is_wiki_target(to):
+        return True
+    if vault is None:
+        return False
+    return is_wiki_target(to, vault) or is_wiki_target(to, send_destination(vault, dest))
+
+
 def _latest(paths: list[Path]) -> Path | None:
     existing = [p for p in paths if p.exists()]
     return max(existing, key=lambda p: p.stat().st_mtime) if existing else None
@@ -516,8 +534,9 @@ def vault_send(
     the CLI launches the Terminal itself using build_filing_prompt.
 
     The wiki is refused: it takes raw sources, which `vault-compose --to wiki`
-    writes. Both checks run before the database is opened. `note_model` names
-    the model that wrote the content, for the note's `model:`/`effort:`."""
+    writes. Both checks — the target, then the folder the note would really be
+    written into — run before the database is opened. `note_model` names the
+    model that wrote the content, for the note's `model:`/`effort:`."""
     if is_wiki_target(to):
         return VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, via=via)
     vault = vault_override or resolve_vault(to)
@@ -527,7 +546,7 @@ def vault_send(
             f"vault '{to}' not configured/found — set it via `plaud config-vault`",
             via=via,
         )
-    if is_wiki_target(to, vault):
+    if sends_into_wiki(to, vault, dest):
         return VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, vault=str(vault), via=via)
     storage = storage or Storage()
 
@@ -620,8 +639,8 @@ def vault_send(
             **_ctx_kwargs(ctx),
         )
 
+    folder = send_destination(vault, dest)  # the folder sends_into_wiki() checked
     dest = dest.strip() or DEFAULT_DEST
-    folder = vault / dest
     try:
         folder.mkdir(parents=True, exist_ok=True)
         target = unique_note_path(folder, date.replace("-", ""), title)
