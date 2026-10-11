@@ -363,6 +363,7 @@ final class FileStore: ObservableObject {
 
         NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
             .sink { [weak self] _ in
+                self?.templatesMayHaveChanged()
                 Task { @MainActor in await self?.sync(showError: false) }
             }
             .store(in: &cancellables)
@@ -1124,6 +1125,16 @@ final class FileStore: ObservableObject {
     @Published var composeRequest: VaultComposeRequest?
     /// A send or compose found an existing note; the root dialog asks.
     @Published var pendingVaultDuplicate: VaultDuplicatePrompt?
+    /// The one signal that `templates/*.md` may have changed. Every view that
+    /// reads templates (Settings viewer, AI inspector) reloads when it moves,
+    /// so an edited `kind:` gates Generate before the CLI has to refuse it.
+    @Published private(set) var templatesRevision = 0
+
+    /// Settings › Reload, closing Settings, and returning to the app — after
+    /// "Open templates folder" the edits happen in another app.
+    func templatesMayHaveChanged() {
+        templatesRevision &+= 1
+    }
 
     /// Generate metadata + auto tags. By default no `--model` is passed so the
     /// CLI resolves the configured classify model (`plaud config-classify`) —

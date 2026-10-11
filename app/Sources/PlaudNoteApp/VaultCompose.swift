@@ -94,6 +94,25 @@ enum VaultComposeArguments {
     }
 }
 
+/// What a compose costs, in the sheet's words. It must match the CLI's
+/// `_summarize_with`: an existing summary is reused only when it was made for
+/// this recording and template by the model compose itself runs — the metadata
+/// model for the main vault, the dual model for the wiki (`<model id>__<template>`).
+/// Slot outputs are named after the slot's model, so they usually do not count.
+enum VaultComposeCaption {
+    static func cost(vault: String) -> String {
+        let model: String
+        switch vault {
+        case "main": model = "Settings › Metadata의 Metadata model"
+        case "wiki": model = "Settings › Dual transcribe의 Cross-analysis model(비어 있으면 Metadata model)"
+        default: model = "이 볼트에 쓰는 모델"
+        }
+        return "작성은 \(model)로 선택한 템플릿을 실행합니다. 이 녹음에 그 모델로 만든 같은 템플릿 "
+            + "요약이 있을 때만 재사용하고, 없으면 모델을 새로 실행합니다 — 몇 분과 구독 사용량이 "
+            + "듭니다. 슬롯이 다른 모델로 만든 요약은 재사용되지 않습니다."
+    }
+}
+
 /// User-facing text for `vault-compose --json` statuses.
 enum VaultComposeOutcome {
     /// nil for `ok`, and for `duplicate`, which the duplicate dialog answers

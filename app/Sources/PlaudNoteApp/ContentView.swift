@@ -905,7 +905,6 @@ private struct SettingsSheet: View {
 
     @State private var config: Database.AppConfig = Database.shared.loadAppConfig()
     @State private var presets: [ModelPresetVM] = []
-    @State private var templateReload = 0
     @AppStorage("defaultContentViewMode") private var defaultViewModeRaw: String =
         ContentViewMode.rendered.rawValue
     @AppStorage("appearanceMode") private var appearanceModeRaw: String =
@@ -1115,12 +1114,12 @@ private struct SettingsSheet: View {
                     }
 
                     section("Templates") {
-                        TemplateViewer(reloadToken: templateReload)
+                        TemplateViewer(reloadToken: store.templatesRevision)
                         settingsRow("Folder") {
                             Button("Open templates folder") {
                                 store.openProjectFolder("templates")
                             }
-                            Button("Reload") { templateReload += 1 }
+                            Button("Reload") { store.templatesMayHaveChanged() }
                         }
                         Text("Read-only. To change a template, edit its `.md` file in "
                              + "`templates/`, then Reload.")
@@ -1154,6 +1153,8 @@ private struct SettingsSheet: View {
             guard !Task.isCancelled else { return }
             presets = loaded
         }
+        // Templates may have been edited while Settings was open.
+        .onDisappear { store.templatesMayHaveChanged() }
         .task { await store.refreshLLMAuth() }
     }
 
@@ -5021,7 +5022,8 @@ private struct AIInspectorPanel: View {
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
         .background(Color(NSColor.windowBackgroundColor))
-        .task(id: refreshTick) {
+        .task(id: SlotListLoadKey(refreshTick: refreshTick,
+                                  templatesRevision: store.templatesRevision)) {
             let loaded = await Task.detached(priority: .userInitiated) {
                 (Database.shared.loadSlots(), Database.shared.listTemplateInfos())
             }.value

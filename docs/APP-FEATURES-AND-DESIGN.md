@@ -663,8 +663,11 @@ content 선택 우선순위는 통합본, slot summary, Plaud summary 순이다.
   - Main의 목적지는 CLI 기본값인 `00. Inbox`이며 폴더를 고르는 UI는 없다.
   - Wiki는 `10. Raw Sources/` 아래 raw source로 저장되고, 수집 목적
     (`collectionPurpose`)을 반드시 적어야 한다. 비어 있으면 보낼 수 없다.
-- **실행:** 작성은 고른 template을 설정된 모델로 실행하므로 사용량과 몇 분의 시간이 든다.
-  같은 template의 요약이 이미 있으면 그것을 재사용한다. sheet는 보내는 즉시 닫힌다.
+- **실행:** 작성은 고른 template을 작성용 모델로 실행하므로 사용량과 몇 분의 시간이 든다.
+  - 작성용 모델은 Main이 metadata model이고, Wiki가 dual model(비어 있으면 metadata model)이다.
+  - 그 모델로 만든 같은 template 요약이 이 녹음에 이미 있을 때만 재사용한다.
+  - slot 결과는 slot 모델 이름으로 저장되므로 모델이 다르면 재사용되지 않는다.
+  - sheet 문구도 같은 조건을 말한다. sheet는 보내는 즉시 닫힌다.
   - 진행은 Send to Vault spinner로, 결과는 Actions 줄로 보인다.
   - 실패는 상태별 한국어 알림으로 보인다: 수집 목적 없음, vault 없음, 전사본 없음, 모델 실패,
     스키마 검사 실패, 내용 없음, 쓰기 실패, 쓸 수 없는 template.
