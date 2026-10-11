@@ -21,6 +21,7 @@ own summary.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -553,19 +554,27 @@ def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
     return path
 
 
-# The identity check reads only a small, fully understood subset of YAML —
-# exactly what this app writes: single-line `key: value` with a plain or a
-# same-line quoted scalar, `  - scalar` block-list items under an empty key,
-# the empty list `[]`, whole-line comments and blank lines. Anything else
-# anywhere in the block (flow collections, block or multi-line scalars,
-# anchors, aliases, tags, quoted keys, other indentation) means the note
-# makes no ownership claim. A missed match only costs a numbered new note.
+# The identity check reads front matter by a strict line grammar — exactly
+# the shapes this app writes. Every line of the block must be one of:
+#   1. `key: value` or `key:` at column 0: the key is ASCII words (letters,
+#      digits, `_`, `-`) joined by single spaces (`date created`), the value
+#      a single-line plain scalar, a quoted scalar closed on the same line,
+#      or the literal empty list `[]`;
+#   2. `  - scalar`, exactly two spaces, under a `key:` with no value;
+#   3. `#comment` at column 0;
+#   4. blank.
+# Any other line, a tab anywhere, or an identity key (`plaud_id`, `source`)
+# that appears twice means the note makes no ownership claim. A missed match
+# only costs a numbered new note; a wrong one could overwrite another's note.
 
+_KEY_LINE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*(?: [A-Za-z0-9_-]+)*):(?: (.*))?")
+_ITEM_LINE = re.compile(r"  - (.*)")
+IDENTITY_KEYS = ("plaud_id", "source")
 # The value of a key that holds a list (block items or `[]`); equals no id.
 _LIST = "\x00"
 # The escapes a double-quoted scalar may use; any other means no claim.
 _ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t", "r": "\r", " ": " "}
-# A plain key or value may not start with these: each opens another construct.
+# A plain value may not start with these: each opens another construct.
 _INDICATORS = "[]{}&*!|>%@`,#'\""
 
 
@@ -598,62 +607,37 @@ def _read_quoted(text: str) -> tuple[str, str]:
     raise _Unsupported  # it runs onto the next line, or never closes
 
 
-def _comment_at(text: str) -> int:
-    """Where a `#comment` starts in `text` (at the start or after a blank)."""
-    for j, ch in enumerate(text):
-        if ch == "#" and (j == 0 or text[j - 1] in " \t"):
-            return j
-    return -1
-
-
-def _uncommented(text: str) -> str:
-    cut = _comment_at(text)
-    return (text[:cut] if cut != -1 else text).rstrip(" \t")
-
-
 def _read_scalar(text: str) -> str:
-    """One single-line scalar, plain or quoted, with an optional comment after
-    a blank, as YAML reads it."""
+    """One single-line scalar, plain or quoted, with an optional ` #comment`,
+    as YAML reads it. `text` holds no tab (see `_read_mapping`)."""
+    text = text.lstrip(" ")
     if text[:1] in ('"', "'"):
         value, after = _read_quoted(text)
-        rest = after.lstrip(" \t")
+        rest = after.lstrip(" ")
         if rest and not (rest.startswith("#") and rest != after):
             raise _Unsupported  # only a blank-separated comment may follow
         return value
-    value = _uncommented(text)
+    cut = text.find(" #")
+    value = (text[:cut] if cut != -1 else text).rstrip(" ")
     if not value or value[0] in _INDICATORS or value[:2].rstrip() in ("-", "?", ":"):
         raise _Unsupported
-    if ": " in value or ":\t" in value or value.endswith(":"):
+    if ": " in value or value.endswith(":"):
         raise _Unsupported  # a mapping, not a scalar
     return value
-
-
-def _read_key(line: str) -> tuple[str, str]:
-    """The plain key of a column-0 `key: value` line and the text after it."""
-    colon = next(
-        (j for j, ch in enumerate(line) if ch == ":" and line[j + 1 : j + 2] in ("", " ", "\t")),
-        -1,
-    )
-    key = line[:colon].rstrip(" ") if colon > 0 else ""
-    if not key or key[0] in _INDICATORS or key[:2].rstrip() in ("-", "?", ":"):
-        raise _Unsupported
-    if _comment_at(key) != -1:
-        raise _Unsupported
-    return key, line[colon + 1 :]
 
 
 def _front_matter_fields(path: Path) -> dict[str, list[str]] | None:
     """The `key: value` pairs of the note's leading front matter, every value
     of a repeated key kept, `_LIST` for a list. None when there is no complete
-    block at the very top of the file, or anything in it lies outside the
-    subset described above."""
+    block at the very top of the file, or any line of it breaks the grammar
+    described above."""
     try:
         with path.open("rb") as fh:
             head = fh.read(65536).decode("utf-8", errors="ignore")
     except OSError:
         return None
     lines = head.replace("\r\n", "\n").split("\n")
-    if lines[0].rstrip() != "---":
+    if lines[0] != "---":
         return None
     try:
         return _read_mapping(lines[1:])
@@ -664,34 +648,33 @@ def _front_matter_fields(path: Path) -> dict[str, list[str]] | None:
 def _read_mapping(lines: list[str]) -> dict[str, list[str]]:
     """`_front_matter_fields` over the lines after the opening `---`."""
     fields: dict[str, list[str]] = {}
-    list_key: str | None = None  # an empty key whose `  - ` items may follow
-    list_indent = ""
+    list_key: str | None = None  # a `key:` with no value, whose items may follow
     for line in lines:
-        if line.rstrip() == "---":
+        if line == "---":
             return fields
-        body = line.lstrip(" ")
-        if not body.strip() or body.startswith("#"):
-            continue  # blank, or a whole-line comment
-        if line[0] in " \t":
-            indent = line[: len(line) - len(body)]
-            if (
-                list_key is None
-                or "\t" in body[:1]
-                or not body.startswith("- ")
-                or (list_indent and indent != list_indent)
-            ):
+        if "\t" in line:
+            raise _Unsupported
+        if not line.strip(" "):  # 4. blank
+            continue
+        if line.startswith("#"):  # 3. a comment at column 0
+            continue
+        item = _ITEM_LINE.fullmatch(line)
+        if item:  # 2. `  - scalar` under a key with no value
+            if list_key is None:
                 raise _Unsupported
-            list_indent = indent
-            _read_scalar(body[2:].lstrip(" "))
+            _read_scalar(item.group(1))
             fields[list_key][-1] = _LIST
             continue
-        key, rest = _read_key(line)
-        value_text = rest.strip(" \t")
-        list_key, list_indent = None, ""
-        if not _uncommented(value_text):
-            value = ""  # null, or the head of a block list
-            list_key = key
-        elif _uncommented(value_text) == "[]":
+        pair = _KEY_LINE.fullmatch(line)
+        if not pair:  # 1. `key: value` — or a line this grammar does not know
+            raise _Unsupported
+        key, value_text = pair.group(1), (pair.group(2) or "").strip(" ")
+        if key in IDENTITY_KEYS and key in fields:
+            raise _Unsupported  # an identity given twice is no identity
+        list_key = None
+        if not value_text:
+            value, list_key = "", key  # null, or the head of a block list
+        elif value_text == "[]":
             value = _LIST  # the empty list this app writes for no aliases/tags
         else:
             value = _read_scalar(value_text)

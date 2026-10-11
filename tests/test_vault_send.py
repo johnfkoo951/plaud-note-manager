@@ -689,6 +689,14 @@ def _never_claimed(sandbox, tmp_path: Path, text: str) -> None:
             f'# end"]\n---\nForeign recording original body\n',
             id="r2-flow-collection-wrapping-a-multiline-scalar",
         ),
+        pytest.param(
+            f"---\nplaud_id: {FILE_ID}\nplaud_id\t: {FOREIGN_ID}\n---\nForeign body\n",
+            id="r3-tab-before-the-colon-after",
+        ),
+        pytest.param(
+            f"---\nplaud_id\t: {FOREIGN_ID}\nplaud_id: {FILE_ID}\n---\nForeign body\n",
+            id="r3-tab-before-the-colon-before",
+        ),
     ],
 )
 def test_the_reviewers_cases_never_claim_the_note(sandbox, tmp_path: Path, text: str) -> None:
@@ -717,7 +725,32 @@ UNSUPPORTED = [
     pytest.param("? key\n: value", id="complex-key"),
     pytest.param('title: "a\\qb"', id="unknown-escape"),
     pytest.param("title: a: b", id="mapping-in-a-value"),
+    # The grammar's own edges: no tab anywhere, keys of ASCII words, comments
+    # only at column 0, items only at two spaces.
+    pytest.param("title\t: x", id="tab-before-the-colon"),
+    pytest.param("ti\ttle: x", id="tab-inside-a-key"),
+    pytest.param("title: x\t# c", id="tab-before-a-comment"),
+    pytest.param("title :x", id="space-before-the-colon"),
+    pytest.param("title:x", id="no-space-after-the-colon"),
+    pytest.param("title: # only a comment", id="comment-only-value"),
+    pytest.param("제목: x", id="non-ascii-key"),
+    pytest.param("date  created: x", id="double-space-in-a-key"),
+    pytest.param("  # indented comment", id="indented-comment"),
+    pytest.param("tags: [] # none", id="empty-list-with-a-comment"),
+    pytest.param("tags:\n   - a", id="three-space-item"),
+    pytest.param("  - orphan item", id="item-without-a-key"),
 ]
+
+
+@pytest.mark.parametrize(
+    "front",
+    [
+        pytest.param(f"plaud_id: {FILE_ID}\nplaud_id: {FILE_ID}", id="plaud_id-twice-same-value"),
+        pytest.param(f"plaud_id: {FILE_ID}\nsource: plaud\nsource: plaud", id="source-twice"),
+    ],
+)
+def test_an_identity_key_given_twice_means_no_claim(sandbox, tmp_path: Path, front: str) -> None:
+    _never_claimed(sandbox, tmp_path, f"---\n{front}\n---\nbody\n")
 
 
 @pytest.mark.parametrize("construct", UNSUPPORTED)
@@ -773,10 +806,11 @@ def test_the_apps_own_note_format_is_still_found(sandbox, tmp_path: Path) -> Non
         f"---\nplaud_id: {FILE_ID} # sent from the laptop\n---\n",
         # core-09 r1 #2: a quoted id followed by a comment.
         f'---\nplaud_id: "{FILE_ID}" # correct owner\n---\nOriginal\n',
-        f"---\nplaud_id: '{FILE_ID}'\t# after a tab\n---\n",
-        f"---\nplaud_id: {FILE_ID}\t# after a tab\n---\n",
-        f"---\ntags:\n  - a\n  - 'b' # c\naliases: [] # none\nplaud_id: {FILE_ID}\n---\n",
-        f"---\n# a comment\nplaud_id: {FILE_ID}\n\n  # indented comment\n---\n",
+        f"---\nplaud_id: '{FILE_ID}'  # after two spaces\n---\n",
+        # Rule 2 items, the `[]` literal, a multi-word key.
+        f"---\ntags:\n  - a\n  - 'b' # c\naliases: []\ndate created: x\nplaud_id: {FILE_ID}\n---\n",
+        # Rules 3 and 4: a column-0 comment and blank lines.
+        f"---\n# a comment\nplaud_id: {FILE_ID}\n\n   \n---\n",
     ],
 )
 def test_a_genuine_same_recording_note_is_still_found(sandbox, tmp_path: Path, text: str) -> None:

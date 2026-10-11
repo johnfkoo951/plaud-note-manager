@@ -513,7 +513,7 @@ def test_wiki_skip_returns_the_existing_raw_source(
     [
         None,  # as written
         'source: "https://web.plaud.ai/file/f1" # canonical',
-        "source: 'https://web.plaud.ai/file/f1'\t# canonical",
+        "source: 'https://web.plaud.ai/file/f1'  # canonical",
     ],
 )
 def test_a_raw_source_is_found_by_its_source_url_without_a_reference(
@@ -543,6 +543,13 @@ def test_a_raw_source_is_found_by_its_source_url_without_a_reference(
             'source: "https://web.plaud.ai/file/f1"',
             'source: "https://web.plaud.ai/file/f2"\nnote: "see\nsource: https://web.plaud.ai/file/f1\n"',
         ),
+        # The identity key twice, even with this recording's own link.
+        (
+            'source: "https://web.plaud.ai/file/f1"',
+            'source: "https://web.plaud.ai/file/f1"\nsource: "https://web.plaud.ai/file/f1"',
+        ),
+        # A tab anywhere in the block.
+        ("type: raw-source", "type:\traw-source"),
     ],
 )
 def test_a_raw_source_owned_by_another_recording_is_never_this_ones(
