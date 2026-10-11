@@ -2364,7 +2364,11 @@ def vault_compose_cmd(
 @safe_command(name="vault-send")
 def vault_send_cmd(
     file_id: str,
-    to: str = typer.Option("main", "--to", help="main | wiki | <absolute vault path>"),
+    to: str = typer.Option(
+        "main",
+        "--to",
+        help="main | <absolute vault path>. The wiki takes raw sources: use vault-compose --to wiki.",
+    ),
     dest: str = typer.Option(
         "",
         "--dest",
@@ -2400,17 +2404,24 @@ def vault_send_cmd(
     Examples:
       plaud vault-send <id>                          # integrated → main vault 00. Inbox
       plaud vault-send <id> --dest meetings          # → 60. Collections/63. Meetings
-      plaud vault-send <id> --to wiki                # → CMDS_LLM_Wiki/00. Inbox
       plaud vault-send <id> --via claude             # claude -p가 CMDS 컨벤션으로 정형화
       plaud vault-send <id> --via claude-window      # Terminal의 Claude Code가 직접 파일링
+
+    The wiki is not a target: it takes raw sources, written by
+    `plaud vault-compose <id> --to wiki --template <note-...> --collection-purpose "..."`.
     """
     from dataclasses import asdict as _asdict
 
+    from rich.markup import escape
+
     from core.vault_send import (
         MEETINGS_DEST,
+        WIKI_SEND_REFUSAL,
+        VaultSendResult,
         build_filing_prompt,
         resolve_content,
         resolve_vault,
+        sends_into_wiki,
         vault_send,
     )
 
@@ -2423,6 +2434,15 @@ def vault_send_cmd(
         from core.metadata import build_recording_snapshot
 
         vault_path = resolve_vault(to)
+        # Same refusal as vault_send — target and effective --dest folder —
+        # before the database or a Terminal opens.
+        if sends_into_wiki(to, vault_path, dest):
+            if json_out:
+                refused = VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, via=via)
+                _emit_json(_asdict(refused))
+                return
+            console.print(f"[red]wiki_unsupported[/red] — {escape(WIKI_SEND_REFUSAL)}")
+            raise typer.Exit(1)
         if vault_path is None:
             console.print("[red]vault not configured[/red] — run: uv run plaud config-vault <path>")
             raise typer.Exit(1)
@@ -3342,7 +3362,7 @@ def config_vault(path: str = "") -> None:
 
 @safe_command(name="config-wiki-vault")
 def config_wiki_vault(path: str = "") -> None:
-    """Set the wiki (LLM satellite) vault path for `vault-send --to wiki`.
+    """Set the wiki (LLM satellite) vault path for `vault-compose --to wiki`.
 
     Empty clears the override; the sibling `CMDS_LLM_Wiki` directory next to
     the main vault is then used when it exists.

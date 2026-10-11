@@ -36,10 +36,12 @@ from .templates import (
 from .vault_send import (
     VaultSendResult,
     _pick_transcript,
+    is_wiki_target,
     note_context,
     note_tags,
     obsidian_open_url,
     resolve_vault,
+    sends_into_wiki,
     vault_send,
 )
 from .wiki_frontmatter import (
@@ -86,7 +88,10 @@ def wiki_slug(title: str, *, max_len: int = 80) -> str:
 
 @dataclass
 class ComposeResult:
-    # ok | bad_template | no_transcript | no_vault | model_failed | schema_error | needs_purpose
+    # ok | bad_template | needs_purpose | no_vault | no_transcript | model_failed |
+    # schema_error | wiki_unsupported (a main --dest that lands in the wiki), and
+    # from the main-vault send: no_content | write_failed.
+    # `vault-compose --json` emits every one with exit 0; the app maps them.
     status: str
     detail: str = ""
     path: str = ""
@@ -170,7 +175,10 @@ def compose_to_wiki(
     model_id: str = "",
     dry_run: bool = False,
 ) -> ComposeResult:
-    if not collection_purpose.strip():
+    # One line: yaml_quote does not escape newlines, so a pasted multi-line
+    # purpose would be folded silently by YAML.
+    collection_purpose = re.sub(r"\s*[\r\n]+\s*", " ", collection_purpose).strip()
+    if not collection_purpose:
         return ComposeResult(
             "needs_purpose",
             "the wiki requires collectionPurpose — state why this was collected "
@@ -310,11 +318,12 @@ def compose(
     if notice := deprecation_notice(loaded):
         return ComposeResult("bad_template", notice, template=template)
 
-    storage = storage or Storage()
-
-    if to == "wiki":
+    # `wiki`, the wiki's path or a folder inside it all take the raw-source
+    # route; vault_send would refuse them anyway, after a wasted model call.
+    vault = resolve_vault(to)
+    if is_wiki_target(to, vault):
         return compose_to_wiki(
-            storage,
+            storage or Storage(),
             file_id,
             template=template,
             collection_purpose=collection_purpose,
@@ -322,9 +331,26 @@ def compose(
             model_id=model_id,
             dry_run=dry_run,
         )
+    if vault is None or not vault.is_dir():
+        return ComposeResult(
+            "no_vault",
+            f"vault '{to}' not configured/found — set it via `plaud config-vault`",
+            template=template,
+        )
+    # A --dest can still walk into the wiki (absolute, `..`, symlink); vault_send
+    # would refuse it only after the summary had been generated.
+    if sends_into_wiki(to, vault, dest):
+        return ComposeResult(
+            "wiki_unsupported",
+            f"--dest '{dest}' lands in the wiki, which takes raw sources only — "
+            'use `--to wiki --collection-purpose "..."` instead',
+            vault=str(vault),
+            template=template,
+        )
 
-    # Main vault (or an explicit path): generate, then hand the existing
+    # Main vault (or another explicit path): generate, then hand the existing
     # sender the freshly written summary to file.
+    storage = storage or Storage()
     snapshot = build_recording_snapshot(storage, file_id)
     transcript = _pick_transcript(storage, file_id, snapshot)
     if transcript is None or not transcript.transcript.strip():
@@ -349,11 +375,10 @@ def compose(
         return ComposeResult("model_failed", str(exc), template=template)
 
     if dry_run:
-        vault = resolve_vault(to)
         return ComposeResult(
             "ok",
             "dry run — summary generated, not filed",
-            vault=str(vault) if vault else "",
+            vault=str(vault),
             dest=dest,
             template=template,
         )
@@ -366,6 +391,7 @@ def compose(
         model=model_id or model,
         template=template,
         storage=storage,
+        note_model=model_id or model,
     )
     return ComposeResult(
         sent.status,

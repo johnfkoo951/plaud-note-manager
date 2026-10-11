@@ -7,10 +7,13 @@ import json
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+import cli.main as cli
 import core.paths as paths_mod
 import core.summarize as summarize_mod
 import core.vault_index as vault_index_mod
+import core.vault_send as vault_send_mod
 from core.metadata import build_recording_snapshot
 from core.models import FileContent, PlaudFile, TranscriptSegment
 from core.storage import Storage
@@ -273,3 +276,156 @@ def test_reference_recorded(sandbox) -> None:
     result = vault_send(FILE_ID, storage=sandbox["storage"])
     refs = sandbox["storage"].list_note_references(FILE_ID)
     assert any(r["kind"] == "vault-send" and r["path"] == result.path for r in refs)
+
+
+# ------------------------------------------------- the wiki takes raw sources only
+
+
+@pytest.fixture()
+def wiki(sandbox, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A configured wiki; Storage and the model blow up if a refused send reaches them."""
+    root = sandbox["tmp"] / "CMDS_LLM_Wiki"
+    (root / "10. Raw Sources").mkdir(parents=True)
+    monkeypatch.setattr(vault_send_mod, "wiki_vault", lambda: root)
+
+    def boom(*_a, **_k):
+        raise AssertionError("a refused wiki send reached the database or the model")
+
+    monkeypatch.setattr(vault_send_mod, "Storage", boom)
+    monkeypatch.setattr(cli, "Storage", boom)
+    monkeypatch.setattr(summarize_mod, "run_model", boom)
+    _write_integrated(sandbox["tmp"])
+    return root
+
+
+def _files(root: Path) -> list[Path]:
+    return [p for p in root.rglob("*") if p.is_file()]
+
+
+@pytest.mark.parametrize("via", ["direct", "claude"])
+@pytest.mark.parametrize("to", ["wiki", " Wiki ", "WIKI"])
+def test_wiki_keyword_is_refused_before_anything_is_opened(wiki: Path, to: str, via: str) -> None:
+    result = vault_send(FILE_ID, to=to, via=via)
+    assert result.status == "wiki_unsupported"
+    assert "vault-compose" in result.detail and "--to wiki" in result.detail
+    assert _files(wiki) == []
+
+
+def test_wiki_refusal_precedes_vault_resolution(sandbox, monkeypatch) -> None:
+    # No wiki configured anywhere: still a refusal, not no_vault.
+    monkeypatch.setattr(vault_send_mod, "wiki_vault", lambda: None)
+    assert vault_send(FILE_ID, to="wiki").status == "wiki_unsupported"
+
+
+@pytest.mark.parametrize("inside", ["", "10. Raw Sources"])
+def test_paths_into_the_wiki_are_refused(wiki: Path, inside: str) -> None:
+    result = vault_send(FILE_ID, to=str(wiki / inside) if inside else str(wiki))
+    assert result.status == "wiki_unsupported"
+    assert _files(wiki) == []
+
+
+def test_unconfigured_wiki_is_recognised_by_its_folder_name(sandbox, monkeypatch) -> None:
+    root = sandbox["tmp"] / "elsewhere" / vault_send_mod.WIKI_VAULT_DIRNAME / "00. Inbox"
+    root.mkdir(parents=True)
+    monkeypatch.setattr(vault_send_mod, "wiki_vault", lambda: None)
+    assert vault_send(FILE_ID, to=str(root), storage=sandbox["storage"]).status == (
+        "wiki_unsupported"
+    )
+    assert _files(root) == []
+
+
+def test_is_wiki_target_and_resolve_vault_share_the_keyword(sandbox, monkeypatch) -> None:
+    other = sandbox["tmp"] / "wiki-ish"
+    other.mkdir()
+    root = sandbox["tmp"] / "the-wiki"
+    root.mkdir()
+    monkeypatch.setattr(vault_send_mod, "wiki_vault", lambda: root)
+    for spelling in ("wiki", " Wiki ", "WIKI"):
+        assert vault_send_mod.is_wiki_target(spelling)
+        assert resolve_vault(spelling) == root
+    assert not vault_send_mod.is_wiki_target("main", sandbox["vault"])
+    assert not vault_send_mod.is_wiki_target(str(other), other)
+    assert vault_send_mod.is_wiki_target(str(root), root)
+
+
+def test_main_note_carries_no_wiki_only_fields(sandbox) -> None:
+    _write_integrated(sandbox["tmp"])
+    text = Path(vault_send(FILE_ID, storage=sandbox["storage"]).path).read_text(encoding="utf-8")
+    assert "source-vault:" not in text
+    assert "mainVaultRelated:" not in text
+
+
+def test_cli_vault_send_to_the_wiki_is_refused(wiki: Path) -> None:
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["vault-send", FILE_ID, "--to", "wiki", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "wiki_unsupported"
+
+    result = runner.invoke(cli.app, ["vault-send", FILE_ID, "--to", "wiki"])
+    assert result.exit_code == 1
+    assert "vault-compose" in result.output
+    assert _files(wiki) == []
+
+
+def _wiki_dest(form: str, sandbox: dict, wiki: Path) -> str:
+    """A `--dest` under the main vault whose effective folder is in the wiki."""
+    if form == "absolute":
+        return str(wiki / "00. Inbox")  # Path joining lets it replace the root
+    if form == "parent":
+        return f"../{wiki.name}/00. Inbox"  # the wiki is the main vault's sibling
+    link = sandbox["vault"] / "wiki-link"
+    link.symlink_to(wiki, target_is_directory=True)
+    return "wiki-link/00. Inbox"
+
+
+@pytest.mark.parametrize("via", ["direct", "claude"])
+@pytest.mark.parametrize("form", ["absolute", "parent", "symlink"])
+def test_a_dest_that_lands_in_the_wiki_is_refused(sandbox, wiki: Path, form: str, via: str) -> None:
+    dest = _wiki_dest(form, sandbox, wiki)
+    result = vault_send(FILE_ID, to="main", dest=dest, via=via)
+    assert result.status == "wiki_unsupported"
+    assert _files(wiki) == []
+
+
+def test_a_dest_through_an_unconfigured_wiki_folder_is_refused(sandbox, monkeypatch) -> None:
+    monkeypatch.setattr(vault_send_mod, "wiki_vault", lambda: None)
+    dest = sandbox["tmp"] / "x" / vault_send_mod.WIKI_VAULT_DIRNAME / "00. Inbox"
+    _write_integrated(sandbox["tmp"])
+    result = vault_send(FILE_ID, to="main", dest=str(dest), storage=sandbox["storage"])
+    assert result.status == "wiki_unsupported"
+    assert not dest.exists()
+
+
+def test_an_ordinary_dest_still_sends(sandbox, wiki: Path, monkeypatch) -> None:
+    monkeypatch.setattr(vault_send_mod, "Storage", lambda: sandbox["storage"])
+    result = vault_send(FILE_ID, to="main", dest="60. Collections/63. Meetings")
+    assert result.status == "ok"
+    assert Path(result.path).parent == sandbox["vault"] / "60. Collections/63. Meetings"
+
+
+@pytest.mark.parametrize("via", ["direct", "claude-window"])
+@pytest.mark.parametrize("form", ["absolute", "parent", "symlink"])
+def test_cli_dest_into_the_wiki_opens_nothing(
+    sandbox, wiki: Path, monkeypatch, form: str, via: str
+) -> None:
+    launched: list = []
+    monkeypatch.setattr(cli, "launch_claude", lambda *a, **k: launched.append(a))
+    dest = _wiki_dest(form, sandbox, wiki)
+    argv = ["vault-send", FILE_ID, "--to", "main", "--dest", dest, "--via", via, "--json"]
+    result = CliRunner().invoke(cli.app, argv)
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["status"] == "wiki_unsupported"
+    assert launched == []
+    assert _files(wiki) == []
+
+
+def test_cli_claude_window_to_the_wiki_launches_nothing(wiki: Path, monkeypatch) -> None:
+    launched: list = []
+    monkeypatch.setattr(cli, "launch_claude", lambda *a, **k: launched.append(a))
+    result = CliRunner().invoke(
+        cli.app, ["vault-send", FILE_ID, "--to", str(wiki), "--via", "claude-window", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    assert (data["status"], data["via"]) == ("wiki_unsupported", "claude-window")
+    assert launched == []
