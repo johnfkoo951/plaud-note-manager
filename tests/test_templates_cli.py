@@ -148,6 +148,22 @@ def test_template_save_rejects_an_unknown_kind(tdir: Path, tmp_path: Path) -> No
     assert (tdir / "default.md").read_bytes() == before
 
 
+def test_template_save_refuses_a_description_it_cannot_store_faithfully(
+    tdir: Path, tmp_path: Path
+) -> None:
+    body = tmp_path / "body.md"
+    body.write_text("replacement\n", encoding="utf-8")
+    before = (tdir / "default.md").read_bytes()
+    result = runner.invoke(
+        cli.app,
+        ["template-save", "default", "--body-file", str(body), "--description", 'Bob\'s "Plan" #2'],
+    )
+    assert result.exit_code == 1
+    assert isinstance(result.exception, SystemExit)  # a message, not a traceback
+    assert "both" in result.output
+    assert (tdir / "default.md").read_bytes() == before
+
+
 # ----- pipelines refuse before doing anything -------------------------------
 
 

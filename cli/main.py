@@ -3016,7 +3016,11 @@ def template_save(
     if not body.strip():
         console.print("[red]empty body[/red]")
         raise typer.Exit(1)
-    path = save_template(name, body, description=description, kind=kind)
+    try:
+        path = save_template(name, body, description=description, kind=kind)
+    except ValueError as exc:  # a value the front matter cannot hold; nothing written
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+        raise typer.Exit(1) from None
     console.print(f"[green]saved[/green] {path}")
 
 

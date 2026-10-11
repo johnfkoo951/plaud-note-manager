@@ -338,12 +338,41 @@ def test_save_sets_description_in_place_and_flattens_newlines(tdir: Path) -> Non
     assert _front_lines(path) == ["name: t", "description: line one line two", "kind: summary"]
 
 
-def test_save_quotes_a_description_the_reader_would_otherwise_cut(tdir: Path) -> None:
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Meeting #2 notes",
+        '"quoted" start',
+        "'single' lead",
+        "Bob's plan #2",
+        'say "hi" #2',
+        " padded ",
+        "#hashtag first",
+        "tab\t#x",
+        "C# tips",
+        'a "b" c',
+        "it's",
+    ],
+)
+def test_save_writes_a_description_the_reader_returns_unchanged(
+    tdir: Path, description: str
+) -> None:
     _write(tdir, "t", "name: t")
-    save_template("t", "b", description="Meeting #2 notes")
-    assert load_template("t").description == "Meeting #2 notes"
-    save_template("t", "b", description='"quoted" start')
-    assert load_template("t").description == '"quoted" start'
+    save_template("t", "b", description=description)
+    assert load_template("t").description == description
+
+
+@pytest.mark.parametrize("existing", [True, False])
+def test_save_refuses_a_description_the_reader_cannot_recover(tdir: Path, existing: bool) -> None:
+    # Needs quotes (the ` #` would be read as a comment) but contains both kinds,
+    # so no form the shared reader decodes gives it back. Refuse, write nothing.
+    path = tdir / "t.md"
+    if existing:
+        _write(tdir, "t", "name: t\ndescription: before")
+    before = path.read_bytes() if existing else None
+    with pytest.raises(ValueError, match="both"):
+        save_template("t", "new body", description='Bob\'s "Plan" #2')
+    assert (path.read_bytes() if path.exists() else None) == before
 
 
 def test_save_sets_kind_in_place(tdir: Path) -> None:

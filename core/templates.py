@@ -245,14 +245,20 @@ def list_templates() -> list[Template]:
 
 
 def _field_line(key: str, value: str) -> str:
-    """`key: value`, quoted when the reader would otherwise cut or unquote it."""
+    """`key: value` in the first form the reader returns unchanged: as is,
+    then double- or single-quoted. Raises ValueError when none does — the
+    shared format has no escapes, so a value that needs quoting but holds
+    both quote characters cannot be stored faithfully."""
     value = re.sub(r"\r\n|[\r\n]", " ", value)
-    if _clean_value(value) != value:
-        for quote in ('"', "'"):
-            if quote not in value:
-                value = f"{quote}{value}{quote}"
-                break
-    return f"{key}: {value}" if value else f"{key}:"
+    for written in (value, f'"{value}"', f"'{value}'"):
+        if _clean_value(written) == value:
+            return f"{key}: {written}" if written else f"{key}:"
+    raise ValueError(
+        f"{key} {value!r} cannot be stored as written: the template front matter "
+        "would cut it (a ' #', a leading quote or #, or edge spaces need quotes), "
+        "and it contains both ' and \" so neither quote can wrap it — "
+        "drop one kind of quote or the ' #'"
+    )
 
 
 def _set_field(lines: list[str], key: str, line: str) -> bool:
