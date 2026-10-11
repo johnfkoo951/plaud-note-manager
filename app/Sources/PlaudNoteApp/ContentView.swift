@@ -856,6 +856,7 @@ private struct SettingsSheet: View {
 
     @State private var config: Database.AppConfig = Database.shared.loadAppConfig()
     @State private var presets: [ModelPresetVM] = []
+    @State private var templateReload = 0
     @AppStorage("defaultContentViewMode") private var defaultViewModeRaw: String =
         ContentViewMode.rendered.rawValue
     @AppStorage("appearanceMode") private var appearanceModeRaw: String =
@@ -1060,6 +1061,20 @@ private struct SettingsSheet: View {
                                 defaultText: "data/integrated/")
                         Text("Empty = use the project default. "
                              + "Paths starting with `~/` are expanded.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    section("Templates") {
+                        TemplateViewer(reloadToken: templateReload)
+                        settingsRow("Folder") {
+                            Button("Open templates folder") {
+                                store.openProjectFolder("templates")
+                            }
+                            Button("Reload") { templateReload += 1 }
+                        }
+                        Text("Read-only. To change a template, edit its `.md` file in "
+                             + "`templates/`, then Reload.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
