@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 
 from core.models import FileContent, Folder, PlaudFile, SummaryBlock, TranscriptSegment
 from core.metadata import write_meeting_note
@@ -147,6 +148,20 @@ def test_regenerating_metadata_keeps_completed_lifecycle(tmp_path, monkeypatch) 
     assert result["status"] == "done" and result["usage_status"] == "archived"
     row = storage.get_note_metadata("f")
     assert row["status"] == "done" and row["usage_status"] == "archived"
+
+
+def test_list_note_references_filters_by_kind(tmp_path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_note_reference(file_id="f", path=tmp_path / "a.md", kind="vault-send", now=1)
+    storage.upsert_note_reference(file_id="f", path=tmp_path / "b.md", kind="meeting-note", now=2)
+    storage.upsert_note_reference(file_id="f", path=tmp_path / "c.md", kind="vault-send", now=3)
+    sent = storage.list_note_references("f", kind="vault-send")
+    assert [Path(r["path"]).name for r in sent] == ["c.md", "a.md"]  # newest first
+    assert [Path(r["path"]).name for r in storage.list_note_references("f")] == [
+        "c.md",
+        "b.md",
+        "a.md",
+    ]
 
 
 def test_link_candidates_keep_whole_speaker_names(tmp_path, monkeypatch) -> None:

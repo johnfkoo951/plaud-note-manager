@@ -66,9 +66,15 @@ class ResolvedContent:
     source_path: str = ""
 
 
+#: What a send does when this app already wrote a note for the recording in
+#: the vault: ask (report it, write nothing) | skip | overwrite | new.
+ON_DUPLICATE = ("ask", "skip", "overwrite", "new")
+
+
 @dataclass(slots=True)
 class VaultSendResult:
-    status: str  # ok | no_content | no_vault | write_failed | model_failed | wiki_unsupported
+    # ok | duplicate | no_content | no_vault | write_failed | model_failed | wiki_unsupported
+    status: str
     detail: str = ""
     path: str = ""
     vault: str = ""
@@ -77,6 +83,16 @@ class VaultSendResult:
     via: str = ""
     obsidian_url: str = ""
     tags: list[str] = field(default_factory=list)
+    action: str = ""  # created | overwritten | skipped (on ok)
+    # Notes already in the vault for this recording, newest first:
+    # [{"path", "updated_at", "modified_after_send", "obsidian_url"}]
+    existing: list[dict] = field(default_factory=list)
+
+
+def validate_on_duplicate(value: str) -> str:
+    if value not in ON_DUPLICATE:
+        raise ValueError(f"on_duplicate must be one of: {', '.join(ON_DUPLICATE)} (got {value!r})")
+    return value
 
 
 def wiki_vault() -> Path | None:
@@ -353,10 +369,12 @@ def build_note_markdown(
     related: list[str] | None = None,
     model: str = "",
     aliases: list[str] | None = None,
+    date_created: str = "",
 ) -> str:
     """Deterministic CMDS-style note (direct mode). Frontmatter follows the
     vault's frontmatter-standard (7 required fields + CMDS/index + Plaud lane
-    extras) via `core.frontmatter.CmdsFrontmatter`."""
+    extras) via `core.frontmatter.CmdsFrontmatter`. `date_created` keeps an
+    overwritten note's original creation time."""
     from .frontmatter import CmdsFrontmatter, iso_minute, model_label
 
     now = now or datetime.now()
@@ -367,7 +385,8 @@ def build_note_markdown(
         description=f"Plaud recording note: {title}. Generated from the {resolved.kind} output.",
         author=author,
         model=model_label(model) if model else "",
-        date_created=iso_minute(now),
+        date_created=date_created or iso_minute(now),
+        date_modified=iso_minute(now),
         date=date,
         tags=tags,
         cmds=cmds,
@@ -493,14 +512,141 @@ def _ctx_kwargs(ctx: dict) -> dict:
     }
 
 
+def note_stem(date_compact: str, title: str) -> str:
+    """`YYYYMMDD_제목` — the filename a send gives a note before numbering."""
+    return f"{date_compact}_{safe_filename(title) or 'plaud-note'}"
+
+
 def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
-    stem = f"{date_compact}_{safe_filename(title) or 'plaud-note'}"
+    stem = note_stem(date_compact, title)
     path = folder / f"{stem}.md"
     counter = 2
     while path.exists():
         path = folder / f"{stem} ({counter}).md"
         counter += 1
     return path
+
+
+def _front_matter_names(path: Path, file_id: str) -> bool:
+    """Whether the note's leading front matter block mentions `file_id` —
+    `plaud_id:` on main notes, the `source:` URL on wiki raw sources."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(4096).decode("utf-8", errors="ignore")
+    except OSError:
+        return False
+    if not head.startswith("---"):
+        return False
+    end = head.find("\n---", 3)
+    return file_id in (head[3:end] if end != -1 else head)
+
+
+def existing_notes(
+    storage: Storage,
+    file_id: str,
+    *,
+    vault: Path,
+    kind: str = "vault-send",
+    same_name: Path | None = None,
+) -> list[dict]:
+    """Notes of `kind` this app already wrote for `file_id` that still exist
+    inside `vault` (any folder), newest first. `same_name` adds a note at that
+    path whose front matter names the recording even without a reference row
+    — written on another machine, before references existed, or by Claude."""
+    root = vault.resolve()
+    seen: set[Path] = set()
+    out: list[dict] = []
+    for row in storage.list_note_references(file_id, kind=kind):
+        path = Path(row["path"])
+        resolved = path.resolve()
+        if resolved in seen or not path.is_file() or not resolved.is_relative_to(root):
+            continue
+        seen.add(resolved)
+        updated_at = int(row["updated_at"] or 0)
+        out.append(
+            {
+                "path": str(path),
+                "updated_at": updated_at,
+                # Slack for the gap between writing the file and recording it.
+                "modified_after_send": path.stat().st_mtime > updated_at + 2,
+                "obsidian_url": obsidian_open_url(vault, path),
+            }
+        )
+    if (
+        same_name is not None
+        and same_name.is_file()
+        and same_name.resolve() not in seen
+        and same_name.resolve().is_relative_to(root)
+        and _front_matter_names(same_name, file_id)
+    ):
+        out.append(
+            {
+                "path": str(same_name),
+                "updated_at": int(same_name.stat().st_mtime),
+                "modified_after_send": False,
+                "obsidian_url": obsidian_open_url(vault, same_name),
+            }
+        )
+    return sorted(out, key=lambda e: e["updated_at"], reverse=True)
+
+
+def send_duplicates(
+    storage: Storage, file_id: str, *, vault: Path, dest: str, title: str, date: str
+) -> list[dict]:
+    """Earlier vault-send notes for this recording in `vault`, including a
+    same-name note in the destination folder that names the recording."""
+    same_name = send_destination(vault, dest) / f"{note_stem(date.replace('-', ''), title)}.md"
+    return existing_notes(storage, file_id, vault=vault, same_name=same_name)
+
+
+def folder_in_vault(vault: Path, path: str) -> str:
+    """`path`'s folder relative to `vault` (as `dest` is reported)."""
+    parent = Path(path).resolve().parent
+    try:
+        return str(parent.relative_to(vault.resolve()))
+    except ValueError:
+        return str(parent)
+
+
+def duplicate_detail(existing: list[dict]) -> str:
+    return (
+        f"already in the vault: {Path(existing[0]['path']).name} — "
+        "choose --on-duplicate skip|overwrite|new"
+    )
+
+
+def early_duplicate_result(
+    existing: list[dict], on_duplicate: str, *, vault: Path, content: str, via: str
+) -> VaultSendResult | None:
+    """The result for ask (`duplicate`) or skip (`ok`/skipped) when a note
+    already exists; None when the send should go ahead."""
+    if not existing or on_duplicate not in ("ask", "skip"):
+        return None
+    asked = on_duplicate == "ask"
+    return VaultSendResult(
+        "duplicate" if asked else "ok",
+        duplicate_detail(existing) if asked else "already in the vault — skipped",
+        path=existing[0]["path"],
+        vault=str(vault),
+        dest=folder_in_vault(vault, existing[0]["path"]),
+        content=content,
+        via=via,
+        obsidian_url=existing[0]["obsidian_url"],
+        action="" if asked else "skipped",
+        existing=existing,
+    )
+
+
+def _existing_date_created(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return ""
+    head = text.split("\n---", 1)[0] if text.startswith("---") else ""
+    for line in head.splitlines():
+        if line.startswith("date created:"):
+            return line.split(":", 1)[1].strip()
+    return ""
 
 
 def obsidian_open_url(vault: Path, note_path: Path) -> str:
@@ -528,6 +674,7 @@ def vault_send(
     storage: Storage | None = None,
     vault_override: Path | None = None,
     note_model: str = "",
+    on_duplicate: str = "ask",
 ) -> VaultSendResult:
     """Resolve content, build the note (direct or headless-AI), write it into
     the vault, and record the reference. `claude-window` is NOT handled here —
@@ -536,7 +683,13 @@ def vault_send(
     The wiki is refused: it takes raw sources, which `vault-compose --to wiki`
     writes. Both checks — the target, then the folder the note would really be
     written into — run before the database is opened. `note_model` names the
-    model that wrote the content, for the note's `model:`/`effort:`."""
+    model that wrote the content, for the note's `model:`/`effort:`.
+
+    When this app already sent a note for the recording to the vault,
+    `on_duplicate` decides, before any model call: ask (status `duplicate`,
+    nothing written), skip, overwrite (in place, wherever the note now is) or
+    new (a numbered copy)."""
+    validate_on_duplicate(on_duplicate)
     if is_wiki_target(to):
         return VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, via=via)
     vault = vault_override or resolve_vault(to)
@@ -565,6 +718,14 @@ def vault_send(
 
     title = snapshot["title"]
     date = recorded_date(snapshot)
+    existing = send_duplicates(storage, file_id, vault=vault, dest=dest, title=title, date=date)
+    early = early_duplicate_result(
+        existing, on_duplicate, vault=vault, content=resolved.kind, via=via
+    )
+    if early is not None:
+        return early
+    overwrite = Path(existing[0]["path"]) if existing and on_duplicate == "overwrite" else None
+
     note_type = _note_type(storage, file_id, snapshot)
     tags = note_tags(snapshot, note_type)
     author = app_config.author()
@@ -636,14 +797,22 @@ def vault_send(
             author=author,
             reuse_channels=reuse_channels,
             model=note_model,
+            date_created=_existing_date_created(overwrite) if overwrite else "",
             **_ctx_kwargs(ctx),
         )
 
-    folder = send_destination(vault, dest)  # the folder sends_into_wiki() checked
-    dest = dest.strip() or DEFAULT_DEST
+    if overwrite is not None:
+        # Rewritten in place, never moved: where the note lives now is the
+        # vault's decision.
+        folder, target, action = overwrite.parent, overwrite, "overwritten"
+        dest = folder_in_vault(vault, str(overwrite))
+    else:
+        folder = send_destination(vault, dest)  # the folder sends_into_wiki() checked
+        dest = dest.strip() or DEFAULT_DEST
+        target, action = None, "created"
     try:
         folder.mkdir(parents=True, exist_ok=True)
-        target = unique_note_path(folder, date.replace("-", ""), title)
+        target = target or unique_note_path(folder, date.replace("-", ""), title)
         target.write_text(note_text.rstrip() + "\n", encoding="utf-8")
     except OSError as exc:
         return VaultSendResult("write_failed", str(exc), vault=str(vault), dest=dest, via=via)
@@ -656,7 +825,7 @@ def vault_send(
 
     return VaultSendResult(
         "ok",
-        f"{resolved.kind} note written",
+        f"{resolved.kind} note {'overwritten in place' if overwrite else 'written'}",
         path=str(target),
         vault=str(vault),
         dest=dest,
@@ -664,4 +833,6 @@ def vault_send(
         via=via,
         obsidian_url=obsidian_open_url(vault, target),
         tags=tags,
+        action=action,
+        existing=existing,
     )
