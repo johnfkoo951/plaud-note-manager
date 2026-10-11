@@ -1265,7 +1265,7 @@ enum RowDensity: String, CaseIterable, Identifiable {
     case compact
     case comfortable
     var id: String { rawValue }
-    var title: String { self == .compact ? "2줄 (조밀)" : "3줄 (여유)" }
+    var title: String { self == .compact ? "조밀" : "여유" }
     var symbol: String {
         self == .compact ? "list.dash" : "list.bullet.below.rectangle"
     }
@@ -1304,6 +1304,7 @@ private struct SidebarView: View {
     @AppStorage("tagSortMode") private var tagSortModeRaw: String =
         TagSortMode.frequency.rawValue
     @AppStorage("tagNestedView") private var tagNestedView: Bool = false
+    @AppStorage("showDateTags") private var showDateTags = false
     /// A bounded flat row list keeps macOS outline diffing responsive for large
     /// libraries. Parent groups start closed; search can reach every tag.
     @State private var expandedTagParents: Set<String> = []
@@ -1315,7 +1316,8 @@ private struct SidebarView: View {
         SidebarTags.Request(
             entries: store.tagCounts.map { SidebarTags.Entry(tag: $0.tag, count: $0.count) },
             pinned: store.pinnedTags, alphabetical: tagSortMode == .alphabetical,
-            nested: tagNestedView, expanded: expandedTagParents, query: tagQuery
+            nested: tagNestedView, expanded: expandedTagParents, query: tagQuery,
+            showDateTags: showDateTags
         )
     }
 
@@ -1410,6 +1412,9 @@ private struct SidebarView: View {
                     TextField("태그 검색", text: $tagQuery)
                         .textFieldStyle(.roundedBorder)
                         .help("전체 태그에서 검색")
+                    Toggle("날짜·숫자 태그 포함", isOn: $showDateTags)
+                        .font(AppUI.metaFont)
+                        .help("기본은 키워드 우선. 검색하거나 고정한 날짜 태그는 항상 표시합니다.")
                     // Exactly one row per stable id. The old nested ForEach
                     // returned a variable number of rows per parent and made
                     // NSOutlineView recursively walk the entire tag tree.
@@ -1462,6 +1467,7 @@ private struct SidebarView: View {
             if tagRows != rows { tagRows = rows }
         }
         .onChange(of: tagQuery) { _, _ in tagRowLimit = 80 }
+        .onChange(of: showDateTags) { _, _ in tagRowLimit = 80 }
         .onChange(of: tagNestedView) { _, _ in tagRowLimit = 80 }
         .onChange(of: tagSortModeRaw) { _, _ in tagRowLimit = 80 }
 
@@ -1635,7 +1641,7 @@ private struct FileListView: View {
     /// Persisted search scope: false = 파일명, true = 전체내용. Mirrored into the
     /// store so the filter/debounce logic can read it off the main actor.
     @AppStorage("searchScope") private var searchScopeContent: Bool = false
-    /// Row density — compact (2-line) or comfortable (3-line, larger title).
+    /// Row density — compact or comfortable (larger, wrapping title).
     @AppStorage("rowDensity") private var rowDensityRaw: String = RowDensity.compact.rawValue
     private var rowDensity: RowDensity { RowDensity(rawValue: rowDensityRaw) ?? .compact }
 
@@ -1654,6 +1660,7 @@ private struct FileListView: View {
     }
 
     var body: some View {
+        let activities = store.recordingActivities
         VStack(spacing: 0) {
             LibraryOverview(store: store)
                 .padding(.horizontal, AppUI.spacingM)
@@ -1702,7 +1709,7 @@ private struct FileListView: View {
                         .frame(width: 14, height: 14)
                 }
 
-                // Row density picker (2줄 ⇄ 3줄) — choose list compactness.
+                // Row density picker — the lifecycle badge keeps its own line.
                 Menu {
                     Picker("행 밀도", selection: $rowDensityRaw) {
                         ForEach(RowDensity.allCases) { d in
@@ -1718,7 +1725,7 @@ private struct FileListView: View {
                 .menuStyle(.borderlessButton)
                 .menuIndicator(.hidden)
                 .fixedSize()
-                .help("행 밀도: 2줄(조밀) 또는 3줄(여유)")
+                .help("행 밀도: 조밀 또는 여유 — 사용 단계는 별도 줄에 표시")
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
@@ -1738,6 +1745,7 @@ private struct FileListView: View {
                 store.contentSearchScope = newValue
             }
 
+            usageFilter
             Divider()
 
             List(selection: $store.selectedID) {
@@ -1745,6 +1753,7 @@ private struct FileListView: View {
                     FileRow(file: file,
                             isSelected: store.selectedID == file.id,
                             density: rowDensity,
+                            activity: activities[file.id] ?? [],
                             snippet: searchScopeContent
                                 ? store.contentSnippets[file.id] : nil,
                             onToggleStar: { store.toggleStar(file.id) })
@@ -1766,6 +1775,11 @@ private struct FileListView: View {
                             } label: {
                                 Label(file.starred ? "Unstar" : "Star",
                                       systemImage: file.starred ? "star.slash" : "star")
+                            }
+                            Divider()
+                            Menu("사용 단계") {
+                                UsageStageMenuItems(store: store, fileID: file.id,
+                                                    current: file.usageStatus)
                             }
                             Divider()
                             Button("Rename…") {
@@ -1843,7 +1857,14 @@ private struct FileListView: View {
             }
             .listStyle(.plain)
             .overlay {
-                if contentSearchEmpty {
+                if store.files.isEmpty && !store.usageStages.isEmpty {
+                    VStack(spacing: 10) {
+                        Text("선택한 사용 단계에 해당하는 녹음이 없습니다.")
+                            .multilineTextAlignment(.center)
+                        Button("사용 단계 필터 해제") { store.usageStages = [] }
+                    }
+                    .padding()
+                } else if contentSearchEmpty {
                     contentSearchEmptyState
                 }
             }
@@ -1855,6 +1876,44 @@ private struct FileListView: View {
         .onChange(of: store.selectedID) { _, _ in
             store.lastClassifyApply = nil
         }
+    }
+
+    private var usageFilter: some View {
+        HStack(spacing: 8) {
+            Menu {
+                Button("전체 단계") { store.usageStages = [] }
+                Divider()
+                ForEach(UsageStage.allCases) { stage in
+                    Toggle(stage.title, isOn: Binding(
+                        get: { store.usageStages.contains(stage) },
+                        set: { selected in
+                            if selected { store.usageStages.insert(stage) }
+                            else { store.usageStages.remove(stage) }
+                        }
+                    ))
+                }
+            } label: {
+                Label("사용 단계", systemImage: "line.3.horizontal.decrease.circle")
+            }
+            .fixedSize()
+            .help("여러 단계를 선택하면 선택한 단계 중 하나에 해당하는 녹음을 표시합니다.")
+            Text(store.usageStages.isEmpty ? "전체" : UsageStage.allCases
+                .filter { store.usageStages.contains($0) }.map(\.title).joined(separator: ", "))
+                .font(AppUI.metaFont)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            if !store.usageStages.isEmpty {
+                Button { store.usageStages = [] } label: {
+                    Image(systemName: "xmark.circle.fill")
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("사용 단계 필터 해제")
+                .help("사용 단계 필터 해제")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
     /// Shown when 전체내용 search settles with zero hits. Notes that only
@@ -2137,14 +2196,13 @@ private struct MiniMetricCard: View {
     }
 }
 
-/// Flat, dense, Superhuman-flavored row: no card chrome, full-width fill,
-/// selection shown by a 3pt accent bar on the left edge + a soft neutral
-/// fill. Two lines only — title + date on top, metadata chips below.
+/// Dense row with a lifecycle rail/badge and an independent selection fill.
 private struct FileRow: View {
     let file: PlaudFileVM
     let isSelected: Bool
-    /// 2-line (compact) or 3-line (comfortable) layout.
+    /// Compact or comfortable title/spacing layout.
     var density: RowDensity = .compact
+    var activity: [String] = []
     /// FTS snippet (with « » around the matched span) shown only in
     /// content-search mode; nil otherwise.
     var snippet: String? = nil
@@ -2183,9 +2241,26 @@ private struct FileRow: View {
                         .help(formatRecordingTimestampFull(date))
                 }
             }
-            // One packed metadata line in BOTH modes — comfortable just lets the
-            // title wrap to 2 lines and uses a larger font, so a row is at most
-            // 3 lines (title×2 + meta) instead of ballooning to 4.
+            // Give lifecycle its own line so folder/tag chips cannot squeeze it out.
+            if let usage = meaningfulUsage {
+                usageChip(usage)
+                    .padding(.leading, Self.metaIndent)
+            }
+            if let primary = activity.first {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.mini)
+                        .accessibilityHidden(true)
+                    Text(primary).font(Self.metaFont.weight(.medium))
+                    if activity.count > 1 {
+                        Text("+\(activity.count - 1)").font(Self.metaFont)
+                    }
+                }
+                .foregroundStyle(.secondary)
+                .padding(.leading, Self.metaIndent)
+                .help(activity.joined(separator: "\n"))
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(activity.joined(separator: ", "))
+            }
             metaLine
             if let snippet, !snippet.isEmpty {
                 snippetLine(snippet)
@@ -2196,12 +2271,12 @@ private struct FileRow: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .background(rowFill)
+        .background((meaningfulUsage?.color ?? .clear).opacity(0.045))
         .overlay(alignment: .leading) {
-            // Superhuman-style selection: a slim accent bar hugging the left
-            // edge instead of a loud filled card. Text colors stay unchanged.
-            if isSelected {
+            // Stage rail stays visible; neutral row fill independently marks selection.
+            if isSelected || meaningfulUsage != nil {
                 RoundedRectangle(cornerRadius: 1.5)
-                    .fill(Color.accentColor)
+                    .fill(meaningfulUsage?.color ?? Color.accentColor)
                     .frame(width: 3)
                     .padding(.vertical, 3)
             }
@@ -2279,7 +2354,7 @@ private struct FileRow: View {
     @ViewBuilder
     private var metaLine: some View {
         if file.durationMs != nil || folderLabel != nil
-            || meaningfulUsage != nil || !file.primaryTags.isEmpty
+            || !file.primaryTags.isEmpty
             || dualColor != nil {
             HStack(spacing: 6) {
                 if file.durationMs != nil {
@@ -2296,9 +2371,6 @@ private struct FileRow: View {
                 if let folderLabel {
                     if file.durationMs != nil { dotSeparator }
                     folderChip(folderLabel)
-                }
-                if let usage = meaningfulUsage {
-                    usageChip(usage)
                 }
                 ForEach(Array(file.primaryTags.prefix(comfortable ? 3 : 2)), id: \.self) { tag in
                     tagChip(tagLabel(tag))
@@ -2374,15 +2446,16 @@ private struct FileRow: View {
     private func usageChip(_ o: UsageStatusOption) -> some View {
         HStack(spacing: 3) {
             Image(systemName: o.symbolName)
-                .font(.system(size: 8.5, weight: .semibold))
+                .font(.system(size: 11, weight: .semibold))
             Text(o.title)
-                .font(Self.metaFont)
+                .font(Self.metaFont.weight(.semibold))
                 .lineLimit(1)
         }
         .foregroundStyle(o.color)
-        .padding(.horizontal, 5)
-        .padding(.vertical, 1.5)
-        .background(o.color.opacity(0.16), in: Capsule())
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(o.color.opacity(0.20), in: Capsule())
+        .fixedSize(horizontal: true, vertical: false)
         .help(o.title)
     }
 
@@ -2458,10 +2531,8 @@ private struct UsageStatusOption: Identifiable {
 
     var id: String { dbValue }
 
-    // Hierarchical workflow palette — distinct hues that read as a progression:
-    // idle(gray) → prepared(blue) → integrated(green) → reused(purple) →
-    // closed(bronze). Designed so an applied status pops in the row chip and
-    // the detail Status tile.
+    // PKM presentation: idle → prepared → tracking → completed.
+    // Tracking includes both vault-linked and used-elsewhere without migration.
     static let all: [UsageStatusOption] = [
         UsageStatusOption(
             dbValue: "unused",
@@ -2471,25 +2542,19 @@ private struct UsageStatusOption: Identifiable {
         ),
         UsageStatusOption(
             dbValue: "metadata-ready",
-            title: "Metadata Ready",
+            title: UsageStage.prepared.title,
             symbolName: "wand.and.sparkles",
             color: Color(red: 0.36, green: 0.56, blue: 0.95)  // blue — prepared
         ),
         UsageStatusOption(
             dbValue: "vault-linked",
-            title: "Vault Linked",
+            title: UsageStage.tracking.title,
             symbolName: "link.circle.fill",
             color: Color(red: 0.24, green: 0.74, blue: 0.49)  // green — integrated
         ),
         UsageStatusOption(
-            dbValue: "used-elsewhere",
-            title: "Used Elsewhere",
-            symbolName: "arrow.up.forward.app.fill",
-            color: Color(red: 0.60, green: 0.45, blue: 0.90)  // purple — reused
-        ),
-        UsageStatusOption(
             dbValue: "archived",
-            title: "Archived",
+            title: UsageStage.archived.title,
             symbolName: "archivebox.fill",
             color: Color(red: 0.66, green: 0.55, blue: 0.42)  // bronze — closed
         ),
@@ -2498,7 +2563,8 @@ private struct UsageStatusOption: Identifiable {
     static func resolve(_ raw: String?) -> UsageStatusOption? {
         guard let raw = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
               !raw.isEmpty else { return nil }
-        if let option = all.first(where: { $0.dbValue == raw }) {
+        let grouped = UsageStage.resolve(raw)?.dbValue ?? raw
+        if let option = all.first(where: { $0.dbValue == grouped }) {
             return option
         }
         return UsageStatusOption(
@@ -2507,6 +2573,27 @@ private struct UsageStatusOption: Identifiable {
             symbolName: "questionmark.circle",
             color: .secondary
         )
+    }
+}
+
+private struct UsageStageMenuItems: View {
+    @ObservedObject var store: FileStore
+    let fileID: String
+    let current: String?
+
+    var body: some View {
+        ForEach(UsageStage.allCases) { stage in
+            Button {
+                guard let value = stage.updateValue(current: current) else { return }
+                Task { await store.setUsageStatus(fileID, status: value) }
+            } label: {
+                if UsageStage.resolve(current) == stage {
+                    Label(stage.title, systemImage: "checkmark")
+                } else {
+                    Text(stage.title)
+                }
+            }
+        }
     }
 }
 
@@ -2996,39 +3083,6 @@ private enum SourceTab: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-private struct SidebarTogglePill: View {
-    let title: String
-    let systemName: String
-    var active: Bool = false
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) {
-            HStack(spacing: 7) {
-                Image(systemName: systemName)
-                    .font(.system(size: 15, weight: .semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .frame(width: 18, height: 18)
-                Text(title)
-                    .font(AppUI.controlFont)
-            }
-            .foregroundStyle(active ? .white : .primary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .background(
-                active ? AnuPalette.red : AppUI.subtleFill,
-                in: RoundedRectangle(cornerRadius: AppUI.radius)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: AppUI.radius)
-                    .stroke(Color(NSColor.separatorColor).opacity(active ? 0 : 0.45),
-                            lineWidth: 1)
-            )
-        }
-        .buttonStyle(.plain)
-    }
-}
-
 /// Derived pipeline stage for the Progress tile. Stage = highest reached:
 /// Integrated (any integrated .md on disk) > Transcribed (cmds_transcripts
 /// row) > Cached (file_content row) > New. Computed for the *selected* file
@@ -3074,81 +3128,6 @@ enum PipelineStage {
     }
 }
 
-private struct DetailMetricStrip: View {
-    let file: PlaudFileVM
-    let stage: PipelineStage
-
-    var body: some View {
-        HStack(spacing: 7) {
-            MiniMetricCard(
-                label: "Recorded",
-                value: formatRecordingStart(file.createdAt),
-                systemName: "calendar",
-                color: AnuPalette.flamingo
-            )
-            .help(recordedHelp)
-            MiniMetricCard(
-                label: "Duration",
-                value: formatRecordingDurationFull(file.durationMs),
-                systemName: "timer",
-                color: AnuPalette.sky
-            )
-            MiniMetricCard(
-                label: "Folder",
-                value: folderValue,
-                systemName: "folder.fill",
-                color: file.folderColor.flatMap { Color(hex: $0) } ?? AppUI.brandGreen
-            )
-            MiniMetricCard(
-                label: "Progress",
-                value: stage.title,
-                systemName: stage.symbolName,
-                color: stage.color
-            )
-            MiniMetricCard(
-                label: "Status",
-                value: statusValue,
-                systemName: statusSymbol,
-                color: statusColor,
-                // Tint the tile once the user sets a real status (not the
-                // default unused / not-set) so it's unmistakable.
-                tinted: statusIsMeaningful
-            )
-        }
-    }
-
-    private var statusIsMeaningful: Bool {
-        guard let o = statusOption else { return false }
-        return o.dbValue != "unused"
-    }
-
-    private var recordedHelp: String {
-        formatRecordingStartLong(file.createdAt) ?? "Recording start time unknown"
-    }
-
-    private var folderValue: String {
-        guard let first = file.folderNames.first else { return "Unfiled" }
-        let extra = file.folderNames.count - 1
-        return extra > 0 ? "\(first) +\(extra)" : first
-    }
-
-    private var statusOption: UsageStatusOption? {
-        UsageStatusOption.resolve(file.usageStatus)
-    }
-
-    private var statusValue: String {
-        statusOption?.title ?? "Not Set"
-    }
-
-    private var statusSymbol: String {
-        statusOption?.symbolName ?? "circle"
-    }
-
-    private var statusColor: Color {
-        statusOption?.color ?? .secondary
-    }
-}
-
 private struct DetailView: View {
     @ObservedObject var store: FileStore
     @State private var player: AVPlayer?
@@ -3164,7 +3143,7 @@ private struct DetailView: View {
     /// pencil) to edit; Enter commits, Esc/blur cancels.
     @State private var editingTitle = false
     @State private var titleDraft = ""
-    @State private var titleHovered = false
+    @State private var speakerSheetFileID: String?
     @FocusState private var titleFieldFocused: Bool
 
     var body: some View {
@@ -3180,9 +3159,11 @@ private struct DetailView: View {
                                 alignment: .topLeading
                             )
 
-                        AIInspectorPanel(store: store) {
+                        AIInspectorPanel(store: store, showSpeakers: {
+                            speakerSheetFileID = file.id
+                        }, collapse: {
                             showRightWorkSidebar = false
-                        }
+                        })
                         .frame(
                             minWidth: WorkspaceLayout.workRange.lowerBound,
                             idealWidth: WorkspaceLayout.clamped(CGFloat(workSidebarWidth),
@@ -3202,12 +3183,32 @@ private struct DetailView: View {
                 }
             }
             .toolbar { toolbar(file: file) }
+            .sheet(isPresented: Binding(
+                get: { speakerSheetFileID != nil },
+                set: { if !$0 { speakerSheetFileID = nil } }
+            )) {
+                if let fid = speakerSheetFileID, let dual = store.dualState,
+                   dual.fileID == fid {
+                    DualSpeakerSheet(store: store, fileID: fid, proposal: dual.proposal) {
+                        speakerSheetFileID = nil
+                    }
+                }
+            }
+            .onChange(of: store.dualState?.status) { previous, status in
+                guard store.dualState?.fileID == file.id else { return }
+                if status == "relabel-pending" {
+                    speakerSheetFileID = file.id
+                } else if status == "vault-ready", previous == "integrating" {
+                    sourceTab = .final
+                }
+            }
             .onChange(of: store.selectedID) { _, _ in
                 statusObserver = nil
                 player?.pause()
                 player = nil
                 store.audioURL = nil
                 editingTitle = false
+                speakerSheetFileID = nil
             }
             .onChange(of: store.audioURL) { _, url in
                 statusObserver = nil
@@ -3314,147 +3315,55 @@ private struct DetailView: View {
         }
     }
 
-    @ViewBuilder
     private func header(file: PlaudFileVM) -> some View {
-        // Prefer the *live* filename from the metadata sync over the cached
-        // file_content.title — Plaud renames files post-transcription and the
-        // cache lags behind. We also let the user click the title to force
-        // a detail re-fetch if they want fresh keywords.
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .top, spacing: 12) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("Recording Workspace")
-                        .font(.system(size: 10, weight: .heavy))
-                        .foregroundStyle(AppUI.brandGreen)
-                    HStack(spacing: 8) {
-                        if editingTitle {
-                            TextField("Recording title", text: $titleDraft)
-                                .textFieldStyle(.plain)
-                                .font(.system(size: 21, weight: .bold))
-                                .focused($titleFieldFocused)
-                                .onSubmit { commitTitleEdit(file: file) }
-                                .onExitCommand { cancelTitleEdit() }
-                                .onChange(of: titleFieldFocused) { _, focused in
-                                    // Losing focus without Enter cancels.
-                                    if !focused && editingTitle { cancelTitleEdit() }
-                                }
-                                .onAppear { titleFieldFocused = true }
-                                .frame(maxWidth: 480)
-                        } else {
-                            Text(file.filename ?? store.content?.title ?? "(untitled)")
-                                .font(.system(size: 21, weight: .bold))
-                                .lineLimit(2)
-                                .onTapGesture { beginTitleEdit(file: file) }
-                                .help("Click to rename")
-                            Button {
-                                beginTitleEdit(file: file)
-                            } label: {
-                                Image(systemName: "pencil")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.plain)
-                            .opacity(titleHovered ? 1 : 0)
-                            .help("Rename recording")
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                if editingTitle {
+                    TextField("Recording title", text: $titleDraft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 18, weight: .semibold))
+                        .focused($titleFieldFocused)
+                        .onSubmit { commitTitleEdit(file: file) }
+                        .onExitCommand { cancelTitleEdit() }
+                        .onChange(of: titleFieldFocused) { _, focused in
+                            if !focused && editingTitle { cancelTitleEdit() }
                         }
-                        // Grouped secondary actions for cleaner header
-                        HStack(spacing: 2) {
-                            Button {
-                                if let id = store.selectedID {
-                                    Task { await store.refetchDetail(id) }
-                                }
-                            } label: {
-                                Image(systemName: "arrow.clockwise.circle")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Re-fetch detail (transcript + summary) from Plaud")
-
-                            Button {
-                                store.openInPlaudWeb(file.id)
-                            } label: {
-                                Image(systemName: "safari")
-                                    .font(.system(size: 13, weight: .semibold))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            .buttonStyle(.plain)
-                            .help("Open in Plaud Web (web.plaud.ai/file/\(file.id))")
-                        }
+                        .onAppear { titleFieldFocused = true }
+                } else {
+                    Text(file.filename ?? store.content?.title ?? "(untitled)")
+                        .font(.system(size: 18, weight: .semibold))
+                        .lineLimit(2)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .onTapGesture { beginTitleEdit(file: file) }
+                        .help("클릭하여 이름 변경: \(file.filename ?? "")")
+                    Button { beginTitleEdit(file: file) } label: {
+                        Image(systemName: "pencil")
                     }
-                    .onHover { titleHovered = $0 }
-                    // Recording start time — the most important context for a
-                    // session, shown prominently right under the title.
-                    if let recorded = formatRecordingStartLong(file.createdAt) {
-                        HStack(spacing: 5) {
-                            Image(systemName: "calendar.badge.clock")
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(AnuPalette.flamingo)
-                            Text(recorded)
-                                .font(.system(size: 12, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                        .help("녹음 시작 시각")
-                    }
-                    HStack(spacing: 8) {
-                        Text(file.id).font(.caption2).foregroundStyle(.tertiary)
-                            .textSelection(.enabled)
-                        if let kw = store.content?.keywords, !kw.isEmpty {
-                            HStack(spacing: 4) {
-                                ForEach(Array(kw.prefix(5)), id: \.self) { keyword in
-                                    keywordChip(keyword)
-                                }
-                            }
-                        }
-                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel("녹음 이름 변경")
                 }
-                Spacer(minLength: 8)
-                if !showRightWorkSidebar {
-                    SidebarTogglePill(
-                        title: "Work Sidebar",
-                        systemName: "sidebar.trailing"
-                    ) {
-                        showRightWorkSidebar = true
-                    }
-                    .help("Show AI summaries and Obsidian actions")
+                Button { showRightWorkSidebar.toggle() } label: {
+                    Image(systemName: "sidebar.trailing")
                 }
+                .buttonStyle(.plain)
+                .help(showRightWorkSidebar ? "정보·작업 사이드바 숨기기" : "정보·작업 사이드바 열기")
+                .accessibilityLabel("정보·작업 사이드바 전환")
             }
-            // Stage comes from the store, refreshed off-main whenever the
-            // selection or the library changes (transcription / integration
-            // finishing both land through `reload()` -> `loadContent`).
-            DetailMetricStrip(file: file, stage: store.selectedStage)
-            MetadataBar(store: store, file: file)
+            HStack(spacing: 8) {
+                if let date = file.createdAt {
+                    Text(Self.shortDate(date))
+                }
+                Text(formatRecordingDurationFull(file.durationMs))
+            }
+            .font(AppUI.metaFont)
+            .foregroundStyle(.secondary)
         }
-        .padding(14)
-        // Modern floating header: glass material with subtle brand tint (Liquid Glass 2026 style)
-        .background(
-            RoundedRectangle(cornerRadius: AppUI.glassRadius)
-                .fill(.regularMaterial)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: AppUI.glassRadius)
-                .stroke(AppUI.glassStroke, lineWidth: 0.5)
-        )
+        .padding(12)
     }
 
-
-    /// Clickable keyword chip: clicking filters the file list by routing the
-    /// keyword through the same search field a user would type into.
-    private func keywordChip(_ keyword: String) -> some View {
-        Button {
-            store.search = keyword
-        } label: {
-            Text(keyword)
-                .font(AppUI.metaFont)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 2.5)
-                .background(Color.primary.opacity(0.07), in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .help("이 키워드로 검색")
+    private static func shortDate(_ date: Date) -> String {
+        date.formatted(date: .abbreviated, time: .shortened)
     }
 
     // MARK: Inline title editing
@@ -3567,7 +3476,7 @@ private struct DualSpeakerSheet: View {
                                 .font(.system(size: 12, design: .monospaced))
                                 .foregroundStyle(.secondary)
                                 .frame(width: 92, alignment: .leading)
-                            TextField("이름", text: binding(for: p))
+                            IMETextField("이름", text: binding(for: p))
                                 .textFieldStyle(.roundedBorder)
                                 .frame(width: 150)
                             if let match = hints.plaudMatches[p.speaker] {
@@ -3613,6 +3522,7 @@ private struct DualSpeakerSheet: View {
                 Button("Cancel") { onDone() }
                 Spacer()
                 Button {
+                    IMETextField.finishEditing()
                     let map = names.filter {
                         !$0.value.trimmingCharacters(in: .whitespaces).isEmpty
                     }
@@ -3657,179 +3567,108 @@ private struct DualSpeakerSheet: View {
     }
 }
 
-private struct MetadataBar: View {
+private struct RecordingInfoPanel: View {
     @ObservedObject var store: FileStore
     let file: PlaudFileVM
-    @State private var newTag: String = ""
-    @State private var showStatusPicker: Bool = false
-    @State private var showSpeakerSheet: Bool = false
+    let showSpeakers: () -> Void
+    @State private var newTag = ""
 
     private var metadata: NoteMetadataVM? {
         guard store.noteMetadata?.fileID == file.id else { return nil }
         return store.noteMetadata
     }
-
     private var tags: [NoteTagVM] { metadata?.tags ?? [] }
-    private var isGenerating: Bool { store.metadataGeneratingIDs.contains(file.id) }
-    private var isWritingMeeting: Bool { store.meetingNoteGeneratingIDs.contains(file.id) }
-    /// Provider + configured model id for meeting-note generation. Metadata
-    /// generation deliberately passes no model — the CLI resolves the
-    /// configured classify model (`plaud config-classify`) itself.
-    private var aiModelChoice: (provider: String, modelID: String) {
-        defaultAIModelChoice()
-    }
-    private var usageOption: UsageStatusOption? {
-        UsageStatusOption.resolve(metadata?.usageStatus)
-    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if !tags.isEmpty {
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 6) {
-                        ForEach(tags) { tag in
-                            tagChip(tag)
-                        }
-                    }
-                    .padding(.vertical, 1)
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("사용 단계·폴더").font(.headline)
+                Menu {
+                    UsageStageMenuItems(store: store, fileID: file.id,
+                                        current: metadata?.usageStatus ?? file.usageStatus)
+                } label: {
+                    let option = UsageStatusOption.resolve(metadata?.usageStatus ?? file.usageStatus)
+                        ?? UsageStatusOption.all[0]
+                    Label(option.title, systemImage: option.symbolName)
+                        .foregroundStyle(option.color)
                 }
-            }
-
-            // Plaud-synced data: note type (read-only) + folder. The folder
-            // is an interactive radio menu — picking a folder replaces the
-            // single assignment, picking the current one (or Unfiled) clears.
-            HStack(spacing: AppUI.spacingS) {
-                if let type = metadata?.noteType, !type.isEmpty {
-                    Label(type, systemImage: "doc.text")
-                        .font(AppUI.metaFont)
-                        .foregroundStyle(.tertiary)
-                }
+                .menuStyle(.borderlessButton)
                 folderMenu
-                Spacer(minLength: 0)
             }
-
-            // Locally-owned editable controls: usage status, tag input, AI
-            // action buttons.
-            HStack(spacing: AppUI.spacingS) {
-                if let usageOption {
-                    statusLabel(usageOption)
-                }
-
-                Button {
-                    showStatusPicker.toggle()
-                } label: {
-                    Image(systemName: "checklist")
-                        .font(.system(size: 13, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .help("Set usage status")
-                .popover(isPresented: $showStatusPicker, arrowEdge: .bottom) {
-                    statusPicker
-                }
-
-                HStack(spacing: 2) {
-                    TextField("tag", text: $newTag)
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("태그").font(.headline)
+                ForEach(tags) { tag in tagChip(tag) }
+                HStack {
+                    TextField("태그 추가", text: $newTag)
                         .textFieldStyle(.roundedBorder)
-                        .font(AppUI.metaFont)
-                        .frame(width: 116)
                         .onSubmit { addTag() }
-                    // Autocomplete: a menu of matching existing tags. Non-
-                    // intrusive (doesn't steal focus while typing); appears
-                    // only when the input matches known tags.
-                    if !tagSuggestions.isEmpty {
-                        Menu {
-                            ForEach(tagSuggestions, id: \.self) { suggestion in
-                                Button("#\(suggestion)") {
-                                    newTag = ""
-                                    Task { await store.addTag(suggestion, to: file.id) }
-                                }
+                    Button { addTag() } label: { Image(systemName: "plus.circle.fill") }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("태그 추가")
+                        .disabled(newTag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+                if !tagSuggestions.isEmpty {
+                    Menu("기존 태그 선택") {
+                        ForEach(tagSuggestions, id: \.self) { suggestion in
+                            Button("#\(suggestion)") {
+                                newTag = ""
+                                Task { await store.addTag(suggestion, to: file.id) }
                             }
-                        } label: {
-                            Image(systemName: "chevron.down.circle")
-                                .font(.system(size: 11))
                         }
-                        .menuStyle(.borderlessButton)
-                        .menuIndicator(.hidden)
-                        .frame(width: 16)
-                        .help("Matching tags")
                     }
+                    .menuStyle(.borderlessButton)
                 }
-
-                Button { addTag() } label: {
-                    Image(systemName: "plus.circle.fill")
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("녹음 정보").font(.headline)
+                infoRow("녹음 일시", formatRecordingStartLong(file.createdAt) ?? "—")
+                infoRow("길이", formatRecordingDurationFull(file.durationMs))
+                infoRow("처리 단계", store.selectedStage.title)
+                if let type = metadata?.noteType { infoRow("유형", type) }
+                if let description = metadata?.description, !description.isEmpty {
+                    Text(description).font(AppUI.metaFont).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                .buttonStyle(.plain)
-                .disabled(newTag.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                .help("Add local tag")
-
-                Button {
-                    // No explicit model: the CLI resolves the configured
-                    // classify model (Settings > Auto-classify).
-                    Task { await store.generateMetadata(file.id) }
-                } label: {
-                    if isGenerating {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "sparkles")
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(isGenerating)
-                .help("Generate metadata and auto tags")
-
-                Button {
-                    let choice = aiModelChoice
-                    Task {
-                        await store.writeMeetingNote(
-                            file.id, model: choice.provider, modelID: choice.modelID
-                        )
-                    }
-                } label: {
-                    if isWritingMeeting {
-                        ProgressView().controlSize(.small)
-                    } else {
-                        Image(systemName: "doc.badge.plus")
-                    }
-                }
-                .buttonStyle(.plain)
-                .disabled(isWritingMeeting)
-                .help("Write CMDS meeting note in Obsidian")
-
                 if let path = metadata?.finalNotePath, !path.isEmpty {
-                    Button {
-                        store.openPath(path)
-                    } label: {
-                        Image(systemName: "arrow.up.forward.app")
+                    Button("생성한 볼트 노트 열기") { store.openPath(path) }
+                }
+            }
+            Divider()
+            VStack(alignment: .leading, spacing: 8) {
+                Text("듀얼 전사·재사용").font(.headline)
+                dualReuseRow
+            }
+            Divider()
+            DisclosureGroup("상세 정보") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(file.id).font(.caption).textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let keywords = store.content?.keywords {
+                        ForEach(keywords, id: \.self) { keyword in
+                            Button(keyword) { store.search = keyword }
+                                .buttonStyle(.link)
+                        }
                     }
-                    .buttonStyle(.plain)
-                    .help("Open generated Obsidian note")
+                    Button("Plaud 원본 열기") { store.openInPlaudWeb(file.id) }
+                    Button("전사·요약 새로 받기") {
+                        Task { await store.refetchDetail(file.id) }
+                    }
                 }
-
-                Spacer(minLength: 0)
-            }
-
-            dualReuseRow
-
-            if let description = metadata?.description, !description.isEmpty {
-                Text(description)
-                    .font(AppUI.metaFont)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(2)
+                .padding(.top, 8)
             }
         }
-        .sheet(isPresented: $showSpeakerSheet) {
-            if let dual = dualForFile {
-                DualSpeakerSheet(store: store, fileID: file.id, proposal: dual.proposal) {
-                    showSpeakerSheet = false
-                }
-            }
-        }
+        .font(AppUI.controlFont)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .onChange(of: file.id) { _, _ in newTag = "" }
-        .onChange(of: store.dualState?.status) { _, status in
-            // Auto-open the confirmation sheet the moment names are ready.
-            if status == "relabel-pending", store.selectedID == file.id {
-                showSpeakerSheet = true
-            }
+    }
+
+    private func infoRow(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(AppUI.metaFont).foregroundStyle(.secondary)
+            Text(value).textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -3847,9 +3686,10 @@ private struct MetadataBar: View {
         } label: {
             Label(currentFolderName, systemImage: "folder")
                 .font(AppUI.metaFont)
+                .lineLimit(2)
         }
         .menuStyle(.borderlessButton)
-        .fixedSize()
+        .fixedSize(horizontal: false, vertical: true)
         .foregroundStyle(.secondary)
         .help("Assign Plaud folder (one folder per file)")
     }
@@ -3877,51 +3717,6 @@ private struct MetadataBar: View {
         Task { await store.addTag(tag, to: file.id) }
     }
 
-    private func statusLabel(_ option: UsageStatusOption) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: option.symbolName)
-                .font(.system(size: 11, weight: .semibold))
-                .symbolRenderingMode(.hierarchical)
-            Text(option.title)
-                .font(AppUI.metaFont)
-        }
-        .foregroundStyle(option.color)
-    }
-
-    private var statusPicker: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            ForEach(UsageStatusOption.all) { option in
-                Button {
-                    showStatusPicker = false
-                    Task { await store.setUsageStatus(file.id, status: option.dbValue) }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: option.symbolName)
-                            .font(.system(size: 13, weight: .semibold))
-                            .symbolRenderingMode(.hierarchical)
-                            .foregroundStyle(option.color)
-                            .frame(width: 18)
-                        Text(option.title)
-                            .font(AppUI.controlFont)
-                            .foregroundStyle(.primary)
-                        Spacer(minLength: 8)
-                        if option.dbValue == metadata?.usageStatus {
-                            Image(systemName: "checkmark")
-                                .font(.system(size: 11, weight: .bold))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .contentShape(RoundedRectangle(cornerRadius: AppUI.tightRadius))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(6)
-        .frame(width: 190)
-    }
-
     // MARK: Dual pipeline + reuse marks row
 
     private var dualForFile: DualStateVM? {
@@ -3936,16 +3731,17 @@ private struct MetadataBar: View {
     ]
 
     private var dualReuseRow: some View {
-        HStack(spacing: AppUI.spacingS) {
+        VStack(alignment: .leading, spacing: 10) {
             dualControl
-            Divider().frame(height: 14)
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 5) {
-                    ForEach(Self.reuseChannels, id: \.self) { channel in
-                        reuseChip(channel)
-                    }
-                }
-                .padding(.vertical, 1)
+            if let dual = dualForFile, !dual.proposal.isEmpty,
+               dual.status != "relabel-pending", !isDualRunning {
+                Button("화자 이름 확인·수정", action: showSpeakers)
+                    .buttonStyle(.link)
+                    .font(AppUI.metaFont)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), alignment: .leading)],
+                      alignment: .leading, spacing: 6) {
+                ForEach(Self.reuseChannels, id: \.self) { channel in reuseChip(channel) }
             }
         }
     }
@@ -3960,11 +3756,11 @@ private struct MetadataBar: View {
                     .foregroundStyle(.secondary)
             }
         } else if let dual = dualForFile {
-            HStack(spacing: 5) {
+            VStack(alignment: .leading, spacing: 5) {
                 dualBadge(dual)
                 switch dual.status {
                 case "relabel-pending":
-                    Button("Confirm Speakers…") { showSpeakerSheet = true }
+                    Button("Confirm Speakers…", action: showSpeakers)
                         .font(AppUI.metaFont)
                         .buttonStyle(.link)
                 case "vault-ready":
@@ -4009,7 +3805,7 @@ private struct MetadataBar: View {
                 HStack(spacing: 4) {
                     Image(systemName: "bolt.badge.waveform")
                         .font(.system(size: 10, weight: .semibold))
-                    Text("Dual Transcribe")
+                    Text("듀얼 전사 → 통합본")
                         .font(.system(size: 10.5, weight: .semibold))
                 }
                 .padding(.horizontal, 8)
@@ -4018,7 +3814,7 @@ private struct MetadataBar: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(AppUI.accentPink)
-            .help("아직 실행 전 — ElevenLabs 전사 → 실명 매핑 → Plaud×CMDS 교차분석 → 볼트")
+            .help("ElevenLabs 전사 후 통합 전사본·요약까지 자동 생성합니다. 화자 이름은 나중에 확인할 수 있습니다.")
         }
     }
 
@@ -4089,6 +3885,7 @@ private struct MetadataBar: View {
     private func tagChip(_ tag: NoteTagVM) -> some View {
         HStack(spacing: 4) {
             Text("#\(tag.tag)")
+                .fixedSize(horizontal: false, vertical: true)
                 .font(AppUI.metaFont)
                 .foregroundStyle(.primary)
             Button {
@@ -4235,7 +4032,10 @@ private struct FinalPanel: View {
     private var emptyState: some View {
         VStack(spacing: AppUI.spacingM) {
             CenteredStateView(
-                message: "아직 듀얼 최종본이 없습니다.\n메타데이터 줄의 ⚡ Dual Transcribe로 생성하세요\n(ElevenLabs 전사 → 실명 확인 → Plaud×CMDS 교차분석).",
+                message: store.dualRunningIDs.contains(store.selectedID ?? "")
+                    ? "듀얼 전사·통합을 처리하고 있습니다. 완료되면 최종본이 표시됩니다."
+                    : "아직 듀얼 최종본이 없습니다.\n우측 정보·정리 탭의 Dual Transcribe로 생성하세요\n(ElevenLabs 전사 → 실명 확인 → Plaud×CMDS 교차분석).",
+                loading: store.dualRunningIDs.contains(store.selectedID ?? ""),
                 systemImage: "bolt.badge.waveform"
             )
             if let id = store.selectedID {
@@ -4570,7 +4370,7 @@ private struct PlaudSpeakerRenameSheet: View {
                         Image(systemName: "arrow.right")
                             .font(.caption)
                             .foregroundStyle(.tertiary)
-                        TextField("New name", text: binding(for: raw))
+                        IMETextField("New name", text: binding(for: raw))
                             .textFieldStyle(.roundedBorder)
                             .disabled(isRunning)
                     }
@@ -4609,6 +4409,7 @@ private struct PlaudSpeakerRenameSheet: View {
     }
 
     private func apply() {
+        IMETextField.finishEditing()
         let mapping = changedMapping
         guard !mapping.isEmpty else { return }
         Task {
@@ -5032,7 +4833,9 @@ private struct AIInspectorPanel: View {
     @AppStorage("rawWrapLines") private var wrapLines: Bool = true
 
     @ObservedObject var store: FileStore
+    let showSpeakers: () -> Void
     let collapse: () -> Void
+    @AppStorage("workInspectorTab") private var inspectorTab = "info"
 
     @State private var slots: [Database.Slot] = []
     @State private var templates: [String] = []
@@ -5091,25 +4894,42 @@ private struct AIInspectorPanel: View {
         VStack(alignment: .leading, spacing: 0) {
             header
             Divider()
-            ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    quickActions
-                    if slots.isEmpty {
-                        if loadingSlots {
-                            CenteredStateView(message: "Loading summary slots…", loading: true)
-                        } else {
-                            Text("No summary slots configured.")
-                                .foregroundStyle(.secondary)
-                                .padding(12)
-                        }
-                    } else {
-                        ForEach(slots) { slot in
-                            slotCard(slot)
-                        }
+            ZStack {
+                ScrollView {
+                    if let file = store.selectedFile {
+                        RecordingInfoPanel(store: store, file: file, showSpeakers: showSpeakers)
+                            .padding(12)
                     }
                 }
-                .padding(12)
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .opacity(inspectorTab == "info" ? 1 : 0)
+                .disabled(inspectorTab != "info")
+                .allowsHitTesting(inspectorTab == "info")
+                .accessibilityHidden(inspectorTab != "info")
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        outputControls
+                        quickActions
+                        if slots.isEmpty {
+                            if loadingSlots {
+                                CenteredStateView(message: "Loading summary slots…", loading: true)
+                            } else {
+                                Text("No summary slots configured.")
+                                    .foregroundStyle(.secondary)
+                                    .padding(12)
+                            }
+                        } else {
+                            ForEach(slots) { slot in
+                                slotCard(slot)
+                            }
+                        }
+                    }
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .opacity(inspectorTab == "ai" ? 1 : 0)
+                .disabled(inspectorTab != "ai")
+                .allowsHitTesting(inspectorTab == "ai")
+                .accessibilityHidden(inspectorTab != "ai")
             }
         }
         .frame(maxHeight: .infinity, alignment: .topLeading)
@@ -5180,42 +5000,46 @@ private struct AIInspectorPanel: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Label("Work Sidebar", systemImage: "sparkles")
-                    .font(AppUI.sectionFont)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("정보·작업").font(.headline)
                 Spacer()
-                SidebarTogglePill(
-                    title: "Hide Sidebar",
-                    systemName: "sidebar.trailing",
-                    active: true
-                ) {
-                    collapse()
-                }
-                .help("Collapse sidebar")
+                Button(action: collapse) { Image(systemName: "sidebar.trailing") }
+                    .buttonStyle(.plain)
+                    .help("사이드바 숨기기")
+                    .accessibilityLabel("정보·작업 사이드바 숨기기")
             }
-            HStack(spacing: 6) {
-                ViewModeSegment(rawValue: $viewModeRaw, width: 120)
-                Spacer()
-                Button {
-                    store.openPath((Database.shared.outputBaseDir(kind: "integrated") as NSString).appendingPathComponent(store.selectedID ?? ""))
-                } label: {
-                    ToolbarIconLabel(systemName: "folder")
-                }
-                .help("Reveal integrated outputs folder")
-                .buttonStyle(.borderless)
-                Button {
-                    store.openProjectFolder("templates")
-                } label: {
-                    ToolbarIconLabel(systemName: "doc.text")
-                }
-                .help("Open templates folder")
-                .buttonStyle(.borderless)
+            Picker("사이드바 보기", selection: $inspectorTab) {
+                Text("정보·정리").tag("info")
+                Text("AI 작업").tag("ai")
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(12)
     }
+
+    private var outputControls: some View {
+        HStack(spacing: 6) {
+            ViewModeSegment(rawValue: $viewModeRaw, width: 120)
+            Spacer()
+            Button {
+                store.openPath((Database.shared.outputBaseDir(kind: "integrated") as NSString).appendingPathComponent(store.selectedID ?? ""))
+            } label: {
+                ToolbarIconLabel(systemName: "folder")
+            }
+            .help("Reveal integrated outputs folder")
+            .buttonStyle(.borderless)
+            Button {
+                store.openProjectFolder("templates")
+            } label: {
+                ToolbarIconLabel(systemName: "doc.text")
+            }
+            .help("Open templates folder")
+            .buttonStyle(.borderless)
+        }
+    }
+
 
     private var quickActions: some View {
         let fid = store.selectedID ?? ""
@@ -5839,12 +5663,15 @@ private struct SpeakersManagerSheet: View {
 
             Divider()
             HStack {
-                TextField("New speaker name", text: $newName)
+                IMETextField("New speaker name", text: $newName)
                     .textFieldStyle(.roundedBorder)
                 Toggle("Self", isOn: $newIsSelf)
                 Button("Add") {
+                    IMETextField.finishEditing()
+                    let name = newName
+                    let isSelf = newIsSelf
                     Task {
-                        await store.addSpeaker(name: newName, isSelf: newIsSelf)
+                        await store.addSpeaker(name: name, isSelf: isSelf)
                         newName = ""
                         newIsSelf = false
                         speakers = Database.shared.savedSpeakers()

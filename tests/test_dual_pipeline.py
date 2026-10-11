@@ -155,3 +155,83 @@ def test_auto_approve_uses_confident_proposals(
     speakers = {s["speaker"] for s in segs}
     assert "구요한" in speakers  # 0.9 applied
     assert "speaker_1" in speakers  # 0.4 below threshold, untouched
+
+
+def test_continue_unmapped_produces_final_pair_without_guessing_names(
+    storage: Storage, pipeline_stubs, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(dp, "_proposal", lambda *_: pytest.fail("must not propose names"))
+    report = dp.advance(storage, "f1", model="codex", continue_unmapped=True)
+    assert report.status == "vault-ready"
+    assert report.error == ""
+    assert pipeline_stubs["transcribe"] == pipeline_stubs["integrate"] == 1
+    assert not storage.list_speakers()
+    assert {s["speaker"] for s in json.loads(storage.get_cmds_transcript("f1")["segments"])} == {
+        "speaker_0", "speaker_1"
+    }
+    assert len(json.loads(storage.get_dual("f1")["speaker_proposal"])) == 2
+    again = dp.advance(storage, "f1", model="codex", continue_unmapped=True)
+    assert again.status == "vault-ready"
+    assert pipeline_stubs["integrate"] == 1
+
+
+def test_later_names_regenerate_existing_final_without_retranscribing(storage, pipeline_stubs):
+    dp.advance(storage, "f1", model="codex", continue_unmapped=True)
+    report = dp.advance(storage, "f1", model="codex", continue_unmapped=True,
+                        speaker_map={"speaker_0": "구요한"})
+    assert report.status == "vault-ready"
+    assert pipeline_stubs["transcribe"] == 1
+    assert pipeline_stubs["integrate"] == 2
+
+
+def test_continue_unmapped_resumes_existing_checkpoint(storage, pipeline_stubs):
+    assert dp.advance(storage, "f1", model="codex").status == "relabel-pending"
+    report = dp.advance(storage, "f1", model="codex", continue_unmapped=True)
+    assert report.status == "vault-ready"
+    assert pipeline_stubs["transcribe"] == 1
+
+
+def test_missing_final_output_does_not_report_success(storage, pipeline_stubs, monkeypatch):
+    monkeypatch.setattr(dp, "_run_integrate", lambda *args, **kwargs: None)
+    report = dp.advance(storage, "f1", model="codex", continue_unmapped=True)
+    assert report.status == "integrating"
+    assert "both transcript and summary" in report.error
+
+
+def test_failed_name_regeneration_retries_even_with_old_artifacts(
+    storage, pipeline_stubs, monkeypatch
+):
+    dp.advance(storage, "f1", model="codex", continue_unmapped=True)
+    original = dp._run_integrate
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("regeneration failed")
+
+    monkeypatch.setattr(dp, "_run_integrate", fail)
+    failed = dp.advance(storage, "f1", model="codex", continue_unmapped=True,
+                        speaker_map={"speaker_0": "구요한"})
+    assert failed.error == "regeneration failed"
+    monkeypatch.setattr(dp, "_run_integrate", original)
+    retried = dp.advance(storage, "f1", model="codex", continue_unmapped=True)
+    assert retried.status == "vault-ready"
+    assert pipeline_stubs["integrate"] == 2
+    assert pipeline_stubs["transcribe"] == 1
+
+
+def test_cli_continue_unmapped_flag_is_forwarded(storage, monkeypatch):
+    from typer.testing import CliRunner
+    import cli.main as cli_main
+
+    received = {}
+
+    def fake_advance(store, file_id, **kwargs):
+        received.update(kwargs)
+        return dp.DualReport(file_id=file_id, status="vault-ready")
+
+    monkeypatch.setattr(cli_main, "Storage", lambda: storage)
+    monkeypatch.setattr(dp, "advance", fake_advance)
+    result = CliRunner().invoke(cli_main.app, ["dual", "f1", "--continue-unmapped"])
+    assert result.exit_code == 0, result.output
+    assert received["continue_unmapped"] is True
+    assert received["auto_approve"] is False
+    assert received["to_vault"] is False

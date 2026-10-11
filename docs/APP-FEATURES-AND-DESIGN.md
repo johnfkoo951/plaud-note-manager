@@ -148,7 +148,7 @@ SQLite를 직접 조회·검색하고 seen/star 같은 로컬 상태는 직접 �
 비용이 크거나 의미가 바뀌는 작업은 중간 상태를 저장하고 사람이 확인할 수 있게 한다.
 
 - 화자 실명: 모델 제안 → confidence/evidence 확인 → 사용자 수정·확정
-- Dual pipeline: 전사 → 화자 확인 대기 → 통합 → 볼트 송출 대기
+- 앱 Dual pipeline: 전사 → 통합 전사본·요약 자동 생성 → 볼트 송출 대기 (화자 이름은 선택 확인)
 - 자동 분류: preview → 선택 → apply
 - Obsidian: 일반 송출은 기본 Inbox 또는 사용자가 고른 목적지로 보내고, Dual은 전용
   Plaud Inbox lane에 착륙시킨다. 영구노트 승격·최종 분류는 자동 수행하지 않는다.
@@ -326,13 +326,11 @@ ElevenLabs 잔액은 최대 30분 동안 cache하며 전사 완료 뒤에는 강
 
 **상태: 구현됨**
 
-- 제목 inline 편집: Enter 저장, Esc 또는 focus out 취소
-- 상세 content 강제 재조회
-- Plaud Web 열기
-- 녹음 시각, 길이, 폴더, 진행 상태, 사용 상태
-- `file_id` 표시
-- Plaud keyword 표시와 keyword 기반 목록 검색
-- `New → Cached → Transcribed → Integrated` 진행률
+- 중앙에는 최대 두 줄 제목(inline 편집: Enter 저장, Esc/focus out 취소), 녹음 일시·길이만 표시
+- 사이드바 전환 버튼은 중앙 상단에 항상 제공
+- 오디오·Source·본문 보기 컨트롤은 중앙 유지, 나머지 높이는 본문에 할당
+- 폴더·사용 단계·처리 단계·유형·설명·태그는 우측 정보·정리 탭으로 이동
+- file_id, Plaud keyword 검색, 원본 웹 열기, 상세 재조회는 우측 상세 정보 펼치기에 제공
 
 ### 5.6 오디오 재생과 내보내기
 
@@ -406,20 +404,26 @@ signed URL이나 원본 audio 자체를 영구 자격증명으로 취급하지 �
 - note type, description, folder, usage status, tag 표시
 - `final_note_path`가 있으면 생성된 Obsidian note 열기
 
-core/DB에는 metadata title, category, vault path, references도 저장되지만 현재 MetadataBar가
+core/DB에는 metadata title, category, vault path, references도 저장되지만 현재 RecordingInfoPanel이
 이 필드들을 모두 직접 표시하는 것은 아니다.
 
-사용 상태는 다음 다섯 가지다.
+저장 상태는 다섯 가지를 유지하며, 화면은 미사용 + 세 가지 지식 활용 단계로 묶는다.
 
 | 내부 값 | 화면 의미 | 용도 |
 |---|---|---|
 | `unused` | Not Used | 아직 후속 활용하지 않음 |
-| `metadata-ready` | Metadata Ready | 정리용 metadata가 준비됨 |
-| `vault-linked` | Vault Linked | Obsidian note와 연결됨 |
-| `used-elsewhere` | Used Elsewhere | 앱 밖 다른 맥락에서 활용함 |
-| `archived` | Archived | 로컬 lifecycle 표식; All 목록에서 자동으로 숨기지는 않음 |
+| `metadata-ready` | 메타데이터 준비 | 정리용 metadata가 준비됨 |
+| `vault-linked` | 집중 사용중 | Obsidian note와 연결됨 |
+| `used-elsewhere` | 집중 사용중 | 앱 밖 다른 맥락에서 활용함 |
+| `archived` | 사용 완료 | 로컬 lifecycle 표식; All 목록에서 자동으로 숨기지는 않음 |
 
 `archived`는 Plaud Trash 이동이 아니다.
+
+- 카드 우클릭의 **사용 단계** 메뉴에서도 상태를 변경한다. Inspector와 동일한 체크 표시·저장 규칙을 사용한다.
+- 카드에서는 단계별 색상 레일과 독립된 아이콘·텍스트 배지로 구분한다. Not Used는 기존처럼 조용히 유지한다.
+- 검색창 아래 **사용 단계** 메뉴는 다중 선택(OR), 선택 없음은 전체다. 폴더·태그·파일명·전체 내용 검색과 함께 적용된다. 필터는 현재 앱 세션에만 유지한다.
+- 상태 변경 메뉴도 같은 네 가지 표시를 사용한다. 집중 사용중을 새로 지정하면 `vault-linked`로 저장하며, 기존 `used-elsewhere`를 같은 단계로 재선택하면 원래 값을 보존한다.
+- Tags는 기본적으로 날짜·숫자만으로 된 태그를 접고 키워드를 우선한다. **날짜·숫자 태그 포함** 설정으로 펼칠 수 있고, 검색과 고정 태그는 접기에서 제외한다. `GPT-5`, `1on1`, `교육/2026` 같은 의미 있는 태그는 숨기지 않는다. 태그 데이터 자체는 변경하지 않는다.
 
 자동 metadata는 기본적으로 최근 7일의 cached item을 대상으로 하고, Plaud transcript,
 primary summary, extra summaries의 source hash로 같은 입력을 중복 처리하지 않는다.
@@ -457,29 +461,32 @@ taxonomy는 `data/classification.json`의 개인 설정이 있으면 이를 우�
 
 ### 5.12 Dual Transcribe pipeline
 
-**상태: 구현됨. 외부 서비스와 사람 확인 필요**
+**상태: 구현됨. 외부 서비스 필요, 앱의 화자 이름 확인은 선택 사항**
 
 ```text
-marked
-  → transcribing
-  → relabel-pending
-  → integrating
-  → vault-ready
-  → vault-sent
+앱: marked → transcribing → integrating → vault-ready → (사용자 전송) vault-sent
+CLI 기본: transcribing → relabel-pending → integrating
 ```
+
+앱은 `dual --continue-unmapped`를 사용한다. 이름이 미확정이어도 기존 화자 레이블로
+통합 전사본·요약까지 생성하며, 화자 이름을 자동 승인하지 않는다. 이름은 정보·정리 탭에서
+나중에 수정할 수 있고, 수정 시 음성을 재전사하지 않고 통합본을 다시 생성한다.
+선택 중인 녹음의 통합이 끝나면 Final 탭으로 전환한다. 볼트 전송은 여전히 별도 선택이다.
 
 기능:
 
 - 한 녹음을 Dual 작업 대상으로 mark
 - 기존 CMDS 전사가 없으면 ElevenLabs 실행
-- Plaud, ElevenLabs, vault 문맥으로 화자 실명 후보 제안
-- 이름, confidence, evidence를 보여주고 사용자가 수정·확정
+- CLI 확인 흐름에서는 Plaud, ElevenLabs, vault 문맥으로 화자 실명 후보 제안
+- 앱은 화자 목록과 발화 샘플로 선택적인 이름 수정·확정을 지원
 - 확정 이름을 transcript 전체와 saved speaker roster에 반영
 - Plaud×CMDS 통합 transcript와 종합 summary 생성
 - `vault-ready`에서 멈춘 뒤 사용자가 별도로 send
 - 실패 당시 stage와 error를 저장하고, 재실행 시 기존 artifact를 검사해 누락 단계를 재시도
 - 이미 있는 content, transcript, speaker map, integrated artifact 재사용
+- 통합 전사본·요약 두 파일이 실제로 생성되었는지 확인 후 완료 처리
 - pipeline mark 제거; 생성 artifact 자체는 보존
+- 카드에 앱에서 실행 중인 작업의 스피너·작업명 표시. 병렬 슬롯은 개수 표시, 여러 종류의 작업은 +N과 전체 작업 툴팁/접근성 이름 제공. 저장된 과거 진행 상태만으로 회전 표시하지 않음
 
 비용이 큰 전사·통합을 중복 실행하지 않고, 실명과 외부 파일 쓰기는 자동 추론만으로
 통과시키지 않는 것이 목적이다. `toVault` 자동 착륙 경로는 core에 있으나 현재 UI는 이를
@@ -514,7 +521,16 @@ reuse smart sidebar, quote 후보, note 편집 UI가 없다.
 
 **상태: 환경 조건부**
 
-Work Sidebar:
+Work Sidebar는 **정보·정리 / AI 작업** 두 탭으로 나뉜다. 기본은 정보·정리이며 마지막 탭을 기억한다. 두 탭은 독립 스크롤을 유지한다.
+
+정보·정리:
+- 사용 단계 및 폴더 선택
+- 세로 태그 목록·추가·자동완성·삭제
+- 녹음 일시·길이·진행 단계·유형·설명
+- 듀얼 전사·화자 확인·재사용 채널(적응형 그리드)
+- 접힌 상세 정보: ID·키워드·Plaud 링크·새로 받기
+
+AI 작업:
 
 - 접기/복원과 폭 기억
 - integrated output folder 열기

@@ -94,6 +94,13 @@ final class FileStore: ObservableObject {
     /// `files` list is derived from this synchronously, so folder-clicks and
     /// search keystrokes never hit the DB or take an async hop.
     private var masterFiles: [Database.MasterFile] = []
+    var recordingActivities: [String: [String]] {
+        RecordingActivity.snapshot(dual: dualRunningIDs, metadata: metadataGeneratingIDs,
+                                   meeting: meetingNoteGeneratingIDs, vault: vaultSendingIDs,
+                                   transcribing: transcribingIDs, relabeling: plaudRelabelingIDs,
+                                   fetching: pendingDetailFetch, summaryKeys: summarizingKeys)
+    }
+
     @Published var files: [PlaudFileVM] = []
     @Published var folders: [FolderVM] = []
     /// Distinct tags with file counts, refreshed in `reload()`. Drives the
@@ -105,6 +112,9 @@ final class FileStore: ObservableObject {
     @Published var cacheStatus: (total: Int, cached: Int) = (0, 0)
     @Published var sidebar: SidebarItem = .allFiles
     @Published var search: String = ""
+    @Published var usageStages: Set<UsageStage> = [] {
+        didSet { applyFilter(sidebar: sidebar, search: search) }
+    }
     /// Search scope: filename substring (fast, local) vs. full content
     /// (FTS5 via `plaud search`). Persisted by the UI in
     /// @AppStorage("searchScope") and mirrored here on change.
@@ -552,6 +562,7 @@ final class FileStore: ObservableObject {
     /// content-search filter paths.
     private func matchesSidebar(_ file: PlaudFileVM, folderIDs: Set<String>,
                                 sidebar: SidebarItem) -> Bool {
+        guard UsageStage.matches(file.usageStatus, selection: usageStages) else { return false }
         switch sidebar {
         case .allFiles:
             return !file.isTrash
@@ -1115,8 +1126,11 @@ final class FileStore: ObservableObject {
     }
 
     func setUsageStatus(_ fileID: String, status: String) async {
-        await runPlaud(args: ["usage-status", fileID, status])
-        noteMetadata = Database.shared.noteMetadata(for: fileID)
+        guard await runPlaud(args: ["usage-status", fileID, status]) else { return }
+        if selectedID == fileID {
+            noteMetadata = Database.shared.noteMetadata(for: fileID)
+        }
+        reload()
     }
 
     // MARK: - Dual-transcribe pipeline
@@ -1130,7 +1144,7 @@ final class FileStore: ObservableObject {
         guard !dualRunningIDs.contains(fileID) else { return }
         dualRunningIDs.insert(fileID)
         defer { dualRunningIDs.remove(fileID) }
-        var args = ["dual", fileID]
+        var args = ["dual", fileID, "--continue-unmapped"]
         for (speaker, name) in speakerMap.sorted(by: { $0.key < $1.key })
         where !name.trimmingCharacters(in: .whitespaces).isEmpty {
             args += ["--map", "\(speaker)=\(name)"]

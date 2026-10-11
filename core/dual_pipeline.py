@@ -11,7 +11,9 @@ supplied or approved. Errors park the row at the last stable status with the
 error recorded, so a re-run retries just the failed stage.
 
 Human checkpoints:
-- relabel-pending: the ONLY required one — confirm speaker real names.
+- relabel-pending: confirm speaker real names in the default CLI flow.
+  The app uses continue_unmapped=True to retain original labels and produce
+  the final artifacts without a naming checkpoint.
 - vault-ready:     optional — `to_vault=True` (or `plaud dual-send`) lands the
                    note in the vault's transcript inbox lane.
 """
@@ -133,7 +135,8 @@ def _has_integrated(file_id: str, *, model: str) -> bool:
     from .paths import integrated_paths
 
     paths = integrated_paths(file_id, model=model, template=DUAL_TEMPLATE)
-    return paths["summary"].exists() and paths["transcript"].exists()
+    return all(paths[k].is_file() and paths[k].stat().st_size > 0
+               for k in ("summary", "transcript"))
 
 
 def _run_integrate(storage: Storage, file_id: str, *, model: str, model_id: str) -> None:
@@ -182,6 +185,7 @@ def advance(
     *,
     speaker_map: dict[str, str] | None = None,
     auto_approve: bool = False,
+    continue_unmapped: bool = False,
     to_vault: bool = False,
     model: str = "",
     model_id: str = "",
@@ -210,7 +214,17 @@ def advance(
         if speaker_map:
             stored_map = {**stored_map, **speaker_map}
 
-        if not stored_map:
+        if continue_unmapped and not stored_map:
+            # Naming is optional in the app. Keep a manual-editable skeleton,
+            # but do not spend an LLM call or silently accept guessed names.
+            from .dual_speakers import speaker_skeleton
+
+            storage.upsert_dual(
+                file_id,
+                speaker_proposal=json.dumps(speaker_skeleton(storage, file_id), ensure_ascii=False),
+                now=int(time.time()),
+            )
+        elif not stored_map and not _has_integrated(file_id, model=model_id or model):
             proposal = json.loads(row["speaker_proposal"] or "[]") if row else []
             if not proposal:
                 progress("proposing speaker names…")
@@ -241,7 +255,14 @@ def advance(
         # -- apply real names ---------------------------------------------
         touched = apply_speaker_map(storage, file_id, stored_map)
         if touched:
+            from .dual_speakers import speaker_skeleton
+
             report.steps.append(f"relabeled-{touched}")
+            storage.upsert_dual(
+                file_id,
+                speaker_proposal=json.dumps(speaker_skeleton(storage, file_id), ensure_ascii=False),
+                now=int(time.time()),
+            )
         _remember_speakers(storage, stored_map)
         _set(
             storage,
@@ -251,9 +272,13 @@ def advance(
         )
 
         # -- cross-analysis final transcript ------------------------------
-        if not _has_integrated(file_id, model=model_id or model):
+        if touched or (row and row["status"] == "integrating") or not _has_integrated(
+            file_id, model=model_id or model
+        ):
             progress(f"integrating Plaud × ElevenLabs with {model}…")
             _run_integrate(storage, file_id, model=model, model_id=model_id)
+            if not _has_integrated(file_id, model=model_id or model):
+                raise RuntimeError("integration did not produce both transcript and summary")
             report.steps.append("integrated")
 
         # -- metadata (best effort — never blocks the pipeline) -----------

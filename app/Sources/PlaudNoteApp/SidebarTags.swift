@@ -15,6 +15,7 @@ struct SidebarTags {
         let nested: Bool
         let expanded: Set<String>
         let query: String
+        var showDateTags: Bool = false
     }
 
     struct Row: Identifiable, Equatable {
@@ -30,6 +31,14 @@ struct SidebarTags {
         }
     }
 
+    /// Whole numeric/date paths only: keep semantic tags such as 1on1 and GPT-5.
+    static func isDateOrNumeric(_ tag: String) -> Bool {
+        let value = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
+        return value.range(of: #"^[0-9]+([./_-][0-9]+)*$"#,
+                           options: .regularExpression) != nil
+    }
+
     static func rows(for request: Request) -> [Row] {
         let query = request.query.trimmingCharacters(in: .whitespacesAndNewlines)
         let counts = Dictionary(request.entries.map { ($0.tag, $0.count) },
@@ -42,9 +51,15 @@ struct SidebarTags {
             return Row(tag: tag, count: counts[tag] ?? 0, pinned: true,
                        isParent: false, expanded: false, indent: false)
         }
-        var rest = request.entries.filter { !pinned.contains($0.tag) }
-        if request.alphabetical {
-            rest.sort { $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending }
+        var rest = request.entries.filter {
+            !pinned.contains($0.tag)
+                && (request.showDateTags || !query.isEmpty || !isDateOrNumeric($0.tag))
+        }
+        rest.sort {
+            let lhsDate = isDateOrNumeric($0.tag), rhsDate = isDateOrNumeric($1.tag)
+            if lhsDate != rhsDate { return !lhsDate }
+            if !request.alphabetical, $0.count != $1.count { return $0.count > $1.count }
+            return $0.tag.localizedCaseInsensitiveCompare($1.tag) == .orderedAscending
         }
 
         if !request.nested {

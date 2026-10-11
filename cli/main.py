@@ -1518,6 +1518,10 @@ def dual_cmd(
     auto_approve: bool = typer.Option(
         False, "--auto-approve", help="Accept proposed names with confidence ≥ 0.7 without asking."
     ),
+    continue_unmapped: bool = typer.Option(
+        False, "--continue-unmapped",
+        help="Continue to final transcript/summary with existing speaker labels; names can be edited later.",
+    ),
     to_vault: bool = typer.Option(
         False, "--to-vault", help="After vault-ready, land the transcript note in the vault inbox."
     ),
@@ -1528,7 +1532,7 @@ def dual_cmd(
 
     Idempotent & resumable — re-run to continue from where it paused.
     Pauses at `relabel-pending` until speaker names are confirmed
-    (--map / --auto-approve / app sheet).
+    (--map / --auto-approve), unless --continue-unmapped is selected.
     """
     from dataclasses import asdict as _asdict
 
@@ -1546,6 +1550,7 @@ def dual_cmd(
         file_id,
         speaker_map=speaker_map or None,
         auto_approve=auto_approve,
+        continue_unmapped=continue_unmapped,
         to_vault=to_vault,
         model=model,
         progress=lambda msg: None if json_out else console.print(f"  [dim]{msg}[/dim]"),

@@ -50,3 +50,42 @@ final class SidebarTagsTests: XCTestCase {
         XCTAssertEqual(Set(rows.map(\.id)).count, rows.count)
     }
 }
+
+extension SidebarTagsTests {
+    func testDateDetectorPreservesSemanticNumberTags() {
+        for tag in ["09-18", "2026-09-18", "2026/09/18", "2026.09.18", "0918", "#09-18"] {
+            XCTAssertTrue(SidebarTags.isDateOrNumeric(tag), tag)
+        }
+        for tag in ["AI", "GPT-5", "1on1", "3D", "교육/2026", "2026/교육", "", "---"] {
+            XCTAssertFalse(SidebarTags.isDateOrNumeric(tag), tag)
+        }
+    }
+
+    func testKeywordsFirstAndDatesHiddenUnlessIncludedSearchedOrPinned() {
+        let mixed = [SidebarTags.Entry(tag: "09-18", count: 100),
+                     .init(tag: "2026", count: 50), .init(tag: "연구", count: 3),
+                     .init(tag: "AI", count: 10)]
+        var request = SidebarTags.Request(entries: mixed, pinned: [], alphabetical: false,
+                                          nested: false, expanded: [], query: "")
+        XCTAssertEqual(SidebarTags.rows(for: request).map(\.tag), ["AI", "연구"])
+        request.showDateTags = true
+        XCTAssertEqual(SidebarTags.rows(for: request).map(\.tag), ["AI", "연구", "09-18", "2026"])
+        let searched = SidebarTags.Request(entries: mixed, pinned: [], alphabetical: false,
+                                            nested: false, expanded: [], query: "09")
+        XCTAssertEqual(SidebarTags.rows(for: searched).map(\.tag), ["09-18"])
+        let pinned = SidebarTags.Request(entries: mixed, pinned: ["09-18"], alphabetical: true,
+                                         nested: false, expanded: [], query: "")
+        XCTAssertEqual(SidebarTags.rows(for: pinned).map(\.tag), ["09-18", "AI", "연구"])
+    }
+
+    func testNestedDateSearchRevealsHiddenPath() {
+        let mixed = [SidebarTags.Entry(tag: "2026/09/18", count: 100),
+                     .init(tag: "연구/AI", count: 3)]
+        let normal = SidebarTags.Request(entries: mixed, pinned: [], alphabetical: false,
+                                         nested: true, expanded: [], query: "")
+        XCTAssertEqual(SidebarTags.rows(for: normal).map(\.tag), ["연구"])
+        let searched = SidebarTags.Request(entries: mixed, pinned: [], alphabetical: false,
+                                            nested: true, expanded: [], query: "09")
+        XCTAssertEqual(SidebarTags.rows(for: searched).map(\.tag), ["2026", "2026/09/18"])
+    }
+}
