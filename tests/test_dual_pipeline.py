@@ -167,7 +167,8 @@ def test_continue_unmapped_produces_final_pair_without_guessing_names(
     assert pipeline_stubs["transcribe"] == pipeline_stubs["integrate"] == 1
     assert not storage.list_speakers()
     assert {s["speaker"] for s in json.loads(storage.get_cmds_transcript("f1")["segments"])} == {
-        "speaker_0", "speaker_1"
+        "speaker_0",
+        "speaker_1",
     }
     assert len(json.loads(storage.get_dual("f1")["speaker_proposal"])) == 2
     again = dp.advance(storage, "f1", model="codex", continue_unmapped=True)
@@ -177,8 +178,9 @@ def test_continue_unmapped_produces_final_pair_without_guessing_names(
 
 def test_later_names_regenerate_existing_final_without_retranscribing(storage, pipeline_stubs):
     dp.advance(storage, "f1", model="codex", continue_unmapped=True)
-    report = dp.advance(storage, "f1", model="codex", continue_unmapped=True,
-                        speaker_map={"speaker_0": "구요한"})
+    report = dp.advance(
+        storage, "f1", model="codex", continue_unmapped=True, speaker_map={"speaker_0": "구요한"}
+    )
     assert report.status == "vault-ready"
     assert pipeline_stubs["transcribe"] == 1
     assert pipeline_stubs["integrate"] == 2
@@ -208,8 +210,9 @@ def test_failed_name_regeneration_retries_even_with_old_artifacts(
         raise RuntimeError("regeneration failed")
 
     monkeypatch.setattr(dp, "_run_integrate", fail)
-    failed = dp.advance(storage, "f1", model="codex", continue_unmapped=True,
-                        speaker_map={"speaker_0": "구요한"})
+    failed = dp.advance(
+        storage, "f1", model="codex", continue_unmapped=True, speaker_map={"speaker_0": "구요한"}
+    )
     assert failed.error == "regeneration failed"
     monkeypatch.setattr(dp, "_run_integrate", original)
     retried = dp.advance(storage, "f1", model="codex", continue_unmapped=True)

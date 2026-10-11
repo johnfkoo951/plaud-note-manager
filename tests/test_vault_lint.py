@@ -76,3 +76,20 @@ def test_lint_lane_skips_non_plaud_notes_and_writes_fixes(tmp_path) -> None:
         encoding="utf-8"
     )
     assert lint_lane(tmp_path)[0].ok
+
+
+def test_lint_lane_reads_source_plaud_only_from_frontmatter(tmp_path) -> None:
+    lane = tmp_path / "00. Inbox/08. Transcripts/08-1. Plaud"
+    lane.mkdir(parents=True)
+    # No frontmatter at all, so a body line must not make it a Plaud note.
+    (lane / "a.no-frontmatter.md").write_text("# 메모\n\nsource: plaud\n", encoding="utf-8")
+    # Frontmatter without `source: plaud`; the same line in the body does not count.
+    (lane / "b.body-only.md").write_text(
+        "---\ntype: note\n---\n\nsource: plaud\n", encoding="utf-8"
+    )
+    (lane / "c.transcript.md").write_text(LEGACY, encoding="utf-8")
+
+    results = lint_lane(tmp_path)
+
+    assert [r.path.name for r in results] == ["c.transcript.md"]
+    assert not results[0].ok

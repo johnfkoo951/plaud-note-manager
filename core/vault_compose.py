@@ -65,46 +65,6 @@ def wiki_raw_dest(category: str) -> str:
     return f"{WIKI_RAW_ROOT}/{sub}" if sub else WIKI_RAW_ROOT
 
 
-_PLACEHOLDER_PREFIXES = ("speaker_", "speaker ", "spk_", "spk ", "화자")
-
-
-def is_placeholder_speaker(name: str) -> bool:
-    """`speaker_0`, `Speaker 3`, `화자 2` — a diarizer label, not a person.
-
-    Recording one in `author:` would assert that a numbered placeholder wrote
-    the note, and would leave a dangling wikilink in the vault.
-    """
-    lowered = name.strip().lower()
-    if not lowered:
-        return True
-    # Bare fragments left by a whitespace split, e.g. "Speaker" + "3".
-    if lowered in {"speaker", "spk", "화자"} or lowered.isdigit():
-        return True
-    for prefix in _PLACEHOLDER_PREFIXES:
-        if lowered.startswith(prefix):
-            rest = lowered[len(prefix):].strip()
-            if not rest or rest.isdigit():
-                return True
-    return False
-
-
-def human_speakers(raw: list[str] | str) -> list[str]:
-    """Real names from a speaker list, order preserved, duplicates dropped.
-
-    Accepts the raw comma-separated snapshot string as well as a list, because
-    `note_context` also splits on whitespace — which turns "Speaker 3" into the
-    fragments "Speaker" and "3" and smuggles both past a placeholder check.
-    """
-    items = raw.split(",") if isinstance(raw, str) else raw
-    out: list[str] = []
-    for name in items:
-        clean = str(name).strip()
-        if not clean or is_placeholder_speaker(clean) or clean in out:
-            continue
-        out.append(clean)
-    return out
-
-
 def wiki_slug(title: str, *, max_len: int = 80) -> str:
     """`some-title-words` — the vault's existing raw-source filename style.
 
@@ -114,7 +74,7 @@ def wiki_slug(title: str, *, max_len: int = 80) -> str:
     """
     body = re.sub(r"^\d{2}-\d{2}\s+", "", title.strip())
     cleaned = re.sub(r"[^0-9A-Za-z가-힣ぁ-んァ-ヶ一-龥]+", "-", body).strip("-")
-    return (cleaned[:max_len].rstrip("-") or "plaud-transcript")
+    return cleaned[:max_len].rstrip("-") or "plaud-transcript"
 
 
 @dataclass
@@ -254,7 +214,7 @@ def compose_to_wiki(
         source=f"https://web.plaud.ai/file/{file_id}",
         aliases=ctx["aliases"],
         tags=["raw-source", *note_tags(snapshot, "transcript")],
-        authors=human_speakers(snapshot.get("speakers") or ctx["speakers"]),
+        authors=ctx["speakers"],
         agent=agent_label(model),
         model=fm_model,
         effort=fm_effort,

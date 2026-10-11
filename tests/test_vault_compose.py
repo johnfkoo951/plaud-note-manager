@@ -30,7 +30,9 @@ def storage(tmp_path: Path) -> Storage:
             file_id="f1",
             title="09-14 세미나",
             transcript=[
-                TranscriptSegment(start_time=0, end_time=900, speaker="구요한", content="안녕하세요")
+                TranscriptSegment(
+                    start_time=0, end_time=900, speaker="구요한", content="안녕하세요"
+                )
             ],
             keywords=["옵시디언"],
         ),
@@ -45,11 +47,13 @@ def vaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     wiki = tmp_path / "CMDS_LLM_Wiki"
     for v in (main, wiki):
         v.mkdir()
-    from core import app_config
+    from core import app_config, vault_index
     from core import vault_send as vs
 
     monkeypatch.setattr(app_config, "obsidian_vault", lambda: main)
     monkeypatch.setattr(vs, "wiki_vault", lambda: wiki)
+    # note_context looks up related notes, which opens the real data/plaud.db.
+    monkeypatch.setattr(vault_index, "related_notes", lambda *a, **k: [])
     return {"main": main, "wiki": wiki}
 
 
@@ -91,9 +95,11 @@ def test_wiki_refuses_without_a_collection_purpose(storage, vaults, stub_model) 
     )
     assert result.status == "needs_purpose"
     # Nothing may be written while a required field is missing.
-    assert not list((vaults["wiki"] / vc.WIKI_RAW_DEST).glob("*.md")) if (
-        vaults["wiki"] / vc.WIKI_RAW_DEST
-    ).exists() else True
+    assert (
+        not list((vaults["wiki"] / vc.WIKI_RAW_DEST).glob("*.md"))
+        if (vaults["wiki"] / vc.WIKI_RAW_DEST).exists()
+        else True
+    )
 
 
 def test_wiki_writes_into_the_category_subfolder_the_vault_already_uses(
@@ -123,9 +129,7 @@ def test_every_category_maps_to_an_existing_subfolder() -> None:
         assert vc.wiki_raw_dest(category).startswith("10. Raw Sources/")
 
 
-def test_filename_follows_the_vaults_date_slug_convention(
-    storage, vaults, stub_model
-) -> None:
+def test_filename_follows_the_vaults_date_slug_convention(storage, vaults, stub_model) -> None:
     result = vc.compose(
         "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage
     )
@@ -148,21 +152,8 @@ def test_slug_drops_the_plaud_title_date_the_filename_already_carries() -> None:
 
 
 # ----- speaker labels are not people ------------------------------------
-
-
-@pytest.mark.parametrize("label", ["speaker_0", "Speaker 3", "화자 2", "SPK_1", " "])
-def test_diarizer_placeholders_are_not_people(label: str) -> None:
-    assert vc.is_placeholder_speaker(label)
-
-
-@pytest.mark.parametrize("name", ["구요한", "안창현", "@seulkiji1151"])
-def test_real_names_survive(name: str) -> None:
-    assert not vc.is_placeholder_speaker(name)
-
-
-def test_human_speakers_filters_and_dedupes() -> None:
-    raw = ["Speaker 3", "Speaker 4", "speaker_0", "speaker_1", "구요한", "안창현", "구요한"]
-    assert vc.human_speakers(raw) == ["구요한", "안창현"]
+# The parser itself (is_placeholder_speaker / human_speakers) lives in
+# core.metadata and is tested in test_metadata_helpers.py.
 
 
 def test_author_block_holds_no_placeholder_wikilinks(storage, vaults, stub_model) -> None:
@@ -233,9 +224,7 @@ def test_wiki_note_satisfies_the_raw_source_contract(storage, vaults, stub_model
     assert "\nindex:" not in text
 
 
-def test_wiki_note_names_the_agent_rather_than_the_vault_owner(
-    storage, vaults, stub_model
-) -> None:
+def test_wiki_note_names_the_agent_rather_than_the_vault_owner(storage, vaults, stub_model) -> None:
     result = vc.compose(
         "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage
     )
@@ -292,7 +281,11 @@ def test_vault_choices_lists_only_existing_vaults(vaults) -> None:
 
 def test_compose_result_is_json_serializable(storage, vaults, stub_model) -> None:
     result = vc.compose(
-        "f1", template="note-lecture", to="wiki", collection_purpose="p", dry_run=True,
+        "f1",
+        template="note-lecture",
+        to="wiki",
+        collection_purpose="p",
+        dry_run=True,
         storage=storage,
     )
     assert json.loads(json.dumps(result.as_dict()))["status"] == "ok"

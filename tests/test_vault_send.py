@@ -3,16 +3,21 @@ direct / headless-AI vault delivery paths."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 import core.paths as paths_mod
 import core.summarize as summarize_mod
+import core.vault_index as vault_index_mod
+from core.metadata import build_recording_snapshot
+from core.models import FileContent, PlaudFile, TranscriptSegment
 from core.storage import Storage
 from core.vault_send import (
     ResolvedContent,
     build_note_markdown,
+    note_context,
     resolve_vault,
     unique_note_path,
     vault_send,
@@ -28,6 +33,8 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(paths_mod, "INTEGRATED_DIR", tmp_path / "integrated")
     monkeypatch.setattr(paths_mod, "SUMMARIES_DIR", tmp_path / "summaries")
     monkeypatch.setattr(paths_mod, "_override", lambda kind: None)
+    # note_context looks up related notes, which opens the real data/plaud.db.
+    monkeypatch.setattr(vault_index_mod, "related_notes", lambda *a, **k: [])
     vault = tmp_path / "vault"
     vault.mkdir()
     monkeypatch.setenv("PLAUD_OBSIDIAN_VAULT", str(vault))
@@ -56,6 +63,32 @@ def _write_summary(tmp: Path, *, model="codex", template="default", body="슬롯
     d = tmp / "summaries" / FILE_ID
     d.mkdir(parents=True, exist_ok=True)
     (d / f"{model}__{template}.md").write_text(body, encoding="utf-8")
+
+
+def _seed_speakers(storage: Storage) -> None:
+    """Plaud's transcript carries two real names and a placeholder; the
+    diarizer adds its own numbered label on top."""
+    storage.upsert_file(PlaudFile(id=FILE_ID, filename="회의"), now=1)
+    storage.save_content(
+        FileContent(
+            file_id=FILE_ID,
+            title="회의",
+            transcript=[
+                TranscriptSegment(start_time=0, end_time=1, speaker="Speaker 3", content="a"),
+                TranscriptSegment(start_time=1, end_time=2, speaker="구요한", content="b"),
+                TranscriptSegment(start_time=2, end_time=3, speaker="John Smith", content="c"),
+            ],
+        ),
+        now=1,
+    )
+    storage.save_cmds_transcript(
+        file_id=FILE_ID,
+        model="scribe",
+        language="ko",
+        text="a",
+        segments_json=json.dumps([{"speaker": "speaker_0", "content": "a"}]),
+        now=1,
+    )
 
 
 # ------------------------------------------------------------ vault targets
@@ -167,6 +200,25 @@ def test_build_note_without_summary_uses_transcript() -> None:
         with_transcript=False,
     )
     assert "전사만" in text  # transcript-only notes still carry the body
+
+
+def test_note_context_keeps_full_names_and_drops_placeholders(sandbox) -> None:
+    storage = sandbox["storage"]
+    _seed_speakers(storage)
+    ctx = note_context(storage, FILE_ID, build_recording_snapshot(storage, FILE_ID))
+    assert ctx["speakers"] == ["John Smith", "구요한"]
+
+
+def test_sent_note_has_no_fragment_speaker_links(sandbox) -> None:
+    _seed_speakers(sandbox["storage"])
+    _write_integrated(sandbox["tmp"])
+    result = vault_send(FILE_ID, storage=sandbox["storage"])
+    assert result.status == "ok"
+    text = Path(result.path).read_text(encoding="utf-8")
+    assert '"[[구요한]]"' in text
+    assert "> 참석자: [[John Smith]] [[구요한]]" in text
+    for fragment in ("[[Speaker]]", "[[3]]", "[[Speaker 3]]", "[[speaker_0]]", "[[John]]"):
+        assert fragment not in text
 
 
 # -------------------------------------------------------------- claude via

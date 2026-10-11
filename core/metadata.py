@@ -6,6 +6,7 @@ import json
 import re
 import subprocess
 import time
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -99,7 +100,7 @@ def generate_note_metadata(
         *snapshot["keywords"],
         *as_list(merged.get("key_topics")),
         *assisted.llm_keywords,
-        *[s for s in str(snapshot.get("speakers") or "").replace(",", " ").split() if s],
+        *human_speakers(snapshot.get("speakers") or ""),
     ]
     merged["link_candidates"] = list(dict.fromkeys(str(t).strip() for t in link_terms if t))[:24]
     try:
@@ -531,6 +532,49 @@ def speaker_list(content_row: Any, cmds_row: Any) -> str:
         except Exception:
             pass
     return ", ".join(sorted(speakers))
+
+
+_PLACEHOLDER_PREFIXES = ("speaker_", "speaker ", "spk_", "spk ", "화자")
+
+
+def is_placeholder_speaker(name: str) -> bool:
+    """`speaker_0`, `Speaker 3`, `화자 2` — a diarizer label, not a person.
+
+    Recording one in `author:` would assert that a numbered placeholder wrote
+    the note, and would leave a dangling wikilink in the vault.
+    """
+    lowered = name.strip().lower()
+    if not lowered:
+        return True
+    # Bare fragments left by a whitespace split, e.g. "Speaker" + "3".
+    if lowered in {"speaker", "spk", "화자"} or lowered.isdigit():
+        return True
+    for prefix in _PLACEHOLDER_PREFIXES:
+        if lowered.startswith(prefix):
+            rest = lowered[len(prefix) :].strip()
+            if not rest or rest.isdigit():
+                return True
+    return False
+
+
+def human_speakers(raw: list[str] | str) -> list[str]:
+    """Real names from a speaker list, order preserved, duplicates dropped.
+
+    Parses the `speaker_list()` format (comma-joined) or a list, and never
+    splits on whitespace: that turns "Speaker 3" into "Speaker" + "3" and
+    "John Smith" into two people. Diarizer placeholders are dropped. Names are
+    returned NFC — stored names are often decomposed while typed ones are
+    composed — and normalised before the placeholder test and the dedupe, so
+    one person spelled both ways is listed once.
+    """
+    items = raw.split(",") if isinstance(raw, str) else raw
+    out: list[str] = []
+    for name in items:
+        clean = unicodedata.normalize("NFC", str(name).strip())
+        if not clean or is_placeholder_speaker(clean) or clean in out:
+            continue
+        out.append(clean)
+    return out
 
 
 def recorded_date(snapshot: dict[str, Any]) -> str:

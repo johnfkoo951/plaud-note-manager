@@ -20,7 +20,13 @@ from datetime import datetime
 from pathlib import Path
 
 from . import app_config
-from .metadata import build_recording_snapshot, recorded_date, safe_filename, strip_frontmatter
+from .metadata import (
+    build_recording_snapshot,
+    human_speakers,
+    recorded_date,
+    safe_filename,
+    strip_frontmatter,
+)
 from .paths import integrated_paths
 from .storage import Storage
 from .vault_send import VaultSendResult, obsidian_open_url
@@ -35,19 +41,21 @@ def _read_artifact(path: Path) -> str:
         return ""
 
 
-def _speaker_names(storage: Storage, file_id: str) -> list[str]:
+def _speaker_names(storage: Storage, file_id: str, snapshot: dict) -> list[str]:
+    """The confirmed names when a speaker map exists; otherwise the names the
+    snapshot already carries (Plaud's own transcript often has them). An
+    unmapped run leaves only diarizer labels in the CMDS transcript, and those
+    must not become `[[speaker_0]]` links."""
     row = storage.get_dual(file_id)
     if row and row["speaker_map"]:
         try:
             mapping = json.loads(row["speaker_map"])
             names = [v for v in mapping.values() if v]
             if names:
-                return sorted(set(names))
+                return human_speakers(sorted(set(names)))
         except json.JSONDecodeError:
             pass
-    from .dual_pipeline import cmds_speakers
-
-    return cmds_speakers(storage, file_id)
+    return human_speakers(snapshot.get("speakers") or "")
 
 
 def build_transcript_note(
@@ -68,7 +76,7 @@ def build_transcript_note(
     snapshot = build_recording_snapshot(storage, file_id)
     title = snapshot["title"] or file_id
     date = recorded_date(snapshot)
-    speakers = _speaker_names(storage, file_id)
+    speakers = _speaker_names(storage, file_id, snapshot)
     now = now or datetime.now()
     author = app_config.author()
 

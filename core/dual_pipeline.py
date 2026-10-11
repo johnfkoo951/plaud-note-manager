@@ -135,8 +135,9 @@ def _has_integrated(file_id: str, *, model: str) -> bool:
     from .paths import integrated_paths
 
     paths = integrated_paths(file_id, model=model, template=DUAL_TEMPLATE)
-    return all(paths[k].is_file() and paths[k].stat().st_size > 0
-               for k in ("summary", "transcript"))
+    return all(
+        paths[k].is_file() and paths[k].stat().st_size > 0 for k in ("summary", "transcript")
+    )
 
 
 def _run_integrate(storage: Storage, file_id: str, *, model: str, model_id: str) -> None:
@@ -272,8 +273,10 @@ def advance(
         )
 
         # -- cross-analysis final transcript ------------------------------
-        if touched or (row and row["status"] == "integrating") or not _has_integrated(
-            file_id, model=model_id or model
+        if (
+            touched
+            or (row and row["status"] == "integrating")
+            or not _has_integrated(file_id, model=model_id or model)
         ):
             progress(f"integrating Plaud × ElevenLabs with {model}…")
             _run_integrate(storage, file_id, model=model, model_id=model_id)
