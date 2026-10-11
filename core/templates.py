@@ -111,20 +111,26 @@ def parse_frontmatter(raw: str) -> tuple[list[str], dict[str, str], str]:
     return [], {}, raw
 
 
-def _canonical_kind(raw: str | None) -> str | None:
-    value = _trim(raw or "").lower()
+def _canonical_kind(value: str) -> str | None:
+    value = value.lower()
     value = KIND_ALIASES.get(value, value)
     return value if value in KINDS else None
 
 
 def normalize_kind(raw: str | None) -> str:
-    """The kind a template is read as: missing or unknown → summary."""
-    return _canonical_kind(raw) or KIND_SUMMARY
+    """The kind a template is read as: missing or unknown → summary.
+
+    `raw` is the already-cleaned front matter value and is matched as it is,
+    with no second trim — the app does the same, so `" integrated "` (quoted
+    padding) is unknown on both sides rather than integrated on one.
+    """
+    return _canonical_kind(raw or "") or KIND_SUMMARY
 
 
 def validate_kind(raw: str) -> str:
-    """Strict form for writes: an unknown kind is an error, not a summary."""
-    kind = _canonical_kind(raw)
+    """Strict form for writes: an unknown kind is an error, not a summary.
+    Typed input is trimmed first; the canonical value is what gets written."""
+    kind = _canonical_kind(_trim(raw))
     if kind is None:
         raise ValueError(
             f"unknown template kind {raw!r} — use one of: {', '.join(KINDS)} "

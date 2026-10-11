@@ -212,6 +212,23 @@ def test_app_reader_cases(tdir: Path, front: str, expected: dict) -> None:
     assert got["body"] == "\nBody\n"
 
 
+@pytest.mark.parametrize(
+    "front",
+    [
+        'kind: " integrated "',
+        "kind: ' internal '",
+        'kind: " integrate "',
+        "kind: ' Integrated'",
+        'kind: "internal "',
+    ],
+)
+def test_padded_quoted_kind_is_not_trimmed_again(tdir: Path, front: str) -> None:
+    # The app switches on the cleaned value as it is (TemplateMeta.kind(from:)),
+    # so quoted padding is an unknown kind there. Trimming it again here would
+    # make the backend refuse what the app offers as a summary template.
+    assert _read(tdir, f"---\n{front}\n---\n\nBody\n")["kind"] == KIND_SUMMARY
+
+
 def test_app_reader_every_key_and_file_name_identity(tdir: Path) -> None:
     front = (
         "name: something-else\n"
@@ -260,10 +277,14 @@ def test_normalize_kind_never_raises() -> None:
     assert normalize_kind(None) == KIND_SUMMARY
     assert normalize_kind("") == KIND_SUMMARY
     assert normalize_kind("banana") == KIND_SUMMARY
+    # The read path does not trim: an already-cleaned value is matched as is.
+    assert normalize_kind(" integrated ") == KIND_SUMMARY
 
 
 def test_validate_kind_is_strict() -> None:
     assert validate_kind("Integrate") == KIND_INTEGRATED
+    # Write-time input (e.g. `--kind " integrated "`) is trimmed before matching.
+    assert validate_kind(" Integrated ") == KIND_INTEGRATED
     with pytest.raises(ValueError, match="summary, integrated, internal"):
         validate_kind("banana")
 
