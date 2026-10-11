@@ -435,6 +435,17 @@ sync 뒤의 auto metadata는 folder를 **추천만** 한다. 반면 사용자가
 수동 tag는 AI/auto 재생성보다 우선하며 자동 작업이 같은 tag를 덮어 소유권을 바꾸지
 않는다.
 
+**자동 metadata 실패 이유 — 부분 구현.**
+- **앱이 하는 일:** 정보·정리 탭의 녹음 정보 영역이 note metadata의 `auto_meta`에 기록된
+  마지막 실패를 읽어 다음 한 줄로 보여 준다.
+  - 형식은 `자동 메타데이터 실패 (N회): <이유>`이다.
+  - 옆의 **다시 시도**는 `metadata-generate`를 실행한다. 설정된 모델을 쓰므로 비용이 든다.
+  - 생성이 성공하면 기록이 사라지고, 줄도 함께 없어진다.
+- **이유 표시 방식:** 공급자 문구를 그대로 쓰되 한 줄, 최대 400자로 줄인다. 전체 문장은
+  tooltip에 있다.
+- **아직 없는 쪽:** 실패 이유를 저장하는 core 변경은 이 문서 시점에 반영되지 않았다. 기록이
+  없거나 형식이 다르면 아무것도 표시하지 않는다.
+
 ### 5.11 자동 폴더 분류
 
 **상태: 구현됨. 적용은 Cloud side effect**
@@ -446,6 +457,7 @@ sync 뒤의 auto metadata는 folder를 **추천만** 한다. 반면 사용자가
 - 항목별 선택 해제·재선택
 - 차점 후보로 override
 - 이유, confidence, LLM 중재 badge
+- LLM 보조 실패 안내와 `LLM✕` badge (부분 구현, 아래)
 - CMDS category / index mapping 표시
 - 선택 항목만 apply
 
@@ -458,6 +470,16 @@ taxonomy는 `data/classification.json`의 개인 설정이 있으면 이를 우�
 보존해 재시도할 수 있게 한다. 앱의 여러 폴더 override 적용은 하나의 Undo 그룹에
 연결된다. **이전 버전 manifest에는 원래 snapshot이 없으므로 폴더를 Unfiled로 되돌리는
 제한된 호환 복구만 가능하다.** 새 Undo의 실제 Cloud 변경 성공은 별도 라이브 확인 대상이다.
+
+**LLM 보조 실패 표시 — 부분 구현.**
+- **앱이 하는 일:** dry run의 각 행이 `llm_status`와 `llm_error`를 주면 실패를 화면에 표시한다.
+  실패로 치는 값은 `failed`, `unavailable`, 그리고 앞선 실패 때문에 건너뛴 `skipped`이다.
+  - preview 상단에 `LLM 보조 실패 N건 — <첫 이유>` 한 줄이 뜬다.
+  - 해당 행에는 이유를 tooltip으로 단 `LLM✕` badge가 붙는다.
+- **세는 범위:** 건수는 폴더가 정해지지 않아 preview에서 빠지는 행까지 모두 센다. 이동할
+  항목이 하나도 없으면 같은 안내가 결과 알림에 붙는다.
+- **아직 없는 쪽:** 이 값을 내보내는 CLI 변경은 아직 반영되지 않았다. 값이 없으면 안내도
+  badge도 나오지 않는다.
 
 ### 5.12 Dual Transcribe pipeline
 
@@ -539,7 +561,7 @@ AI 작업:
 - Metadata 생성
 - Meeting note 생성
 - Summary slot 추가
-- 모든 slot을 Integrated mode로 생성
+- Generate All: 모든 slot을 각 template의 종류대로 생성
 - Claude Code bridge
 
 Summary slot:
@@ -553,6 +575,31 @@ Summary slot:
 - 결과 inline show/hide, 확대 sheet, copy
 - 한 slot 결과만 Vault로 send
 - Integrated 결과의 All / Transcript / Summary 분리 보기
+
+**template 종류(`kind`)가 slot 동작을 정한다.**
+- **읽는 방식:** 앱은 `templates/*.md`의 front matter를 직접 읽는다. 읽는 값은 `kind`
+  (`summary` / `integrated` / `internal`), `deprecated`, `replaced_by`, `description`이고,
+  subprocess는 쓰지 않는다.
+- **열리는 mode:** slot은 template이 선언한 mode로 열린다. 사용자가 이번 화면에서 mode를
+  고르면 그 선택이 우선한다.
+  - `integrated` template은 결과가 없어도 Integrated로 열린다.
+  - `summary` template은 예전 통합본이 남아 있어도 Summary로 열린다.
+  - template 파일이 없어진 slot만 예전처럼 "통합본이 있으면 Integrated" 규칙을 따른다.
+- **Generate 버튼:** template이 실행할 수 없는 mode에서는 꺼진다. tooltip이 맞는 mode를
+  알려 준다. `internal` template(classify, metadata 등)은 slot에서 실행하지 않는다.
+- **Generate All:** slot마다 종류대로 실행한다. `integrated`는 integrate, `summary`는
+  summarize로 실행하고, `internal`은 건너뛴다. 실행할 slot이 하나도 없으면 꺼진다.
+- **새 slot picker:** `internal` template과 deprecated template을 숨기고 `note-general`
+  (없으면 첫 항목)에서 시작한다.
+- **기존 slot:** deprecated template을 그대로 쓰며, template chip에
+  `cmds-meeting (deprecated → note-meeting)`처럼 표시한다. 자동 이전은 없다.
+- **기본 slot:** `data/slots.json`이 없거나 읽을 수 없을 때 쓰는 slot은
+  `Default (Claude)` / `note-general`로, Python 기본값과 같다.
+- **통합 실패 표시 (부분 구현):** Integrated mode에서 실행 중이 아닐 때, 해당 slot의 마지막
+  통합 실패를 `마지막 통합 실패: <이유>` 한 줄로 보여 주고 전체 이유는 tooltip에 둔다.
+  - 이유는 통합 결과와 같은 이름의 `<model>__<template>.error.json`에서 읽는다.
+  - 이 파일을 남기는 core 변경은 아직 반영되지 않았으므로, 파일이 없으면 아무것도 표시하지
+    않는다.
 
 slot의 name, provider/model, model ID, template은 Python과 공유하는 `data/slots.json`에
 저장한다. Summary / Integrated mode 선택은 현재 Swift 화면의 일시적 상태이며 앱을 다시
@@ -584,6 +631,7 @@ API backend는 사용자가 명시적으로 선택할 수 있으며 별도 과�
 - Main Vault Inbox에 integrated-first direct send
 - transcript 포함 옵션
 - `60. Collections/63. Meetings` 목적지
+- 템플릿으로 작성해서 보내기 (`vault-compose`, Main 또는 Wiki)
 - Wiki Vault Raw Source (`vault-compose --to wiki`, 수집 목적 필수)
 - Claude headless 정형화 후 저장
 - Claude Terminal interactive filing
@@ -591,8 +639,57 @@ API backend는 사용자가 명시적으로 선택할 수 있으며 별도 과�
 - Dual transcript 전용 Plaud Inbox lane
 
 content 선택 우선순위는 통합본, slot summary, Plaud summary 순이다. direct도 preview가
-아니라 실제 vault 파일을 쓴다. 같은 파일명이 있으면 `(2)`, `(3)` suffix로 기존 파일을
-보존하고, 만들어진 note path를 로컬 DB reference에 기록한다.
+아니라 실제 vault 파일을 쓴다. 같은 녹음의 노트가 이미 그 vault에 있으면 쓰기 전에 묻는다
+(아래 중복 확인). 새로 만들기를 고르거나, 같은 파일명이 다른 녹음의 노트라면 `(2)`,
+`(3)` suffix로 기존 파일을 보존한다. 만들어진 note path는 로컬 DB reference에 기록한다.
+
+앱의 `vault-send`는 항상 `--to main`으로 실행되며, 앱에서 Wiki로 `vault-send`를 보내는 경로는
+없다. 송출·작성 결과(파일 이름과 Open)는 그 결과를 만든 녹음을 선택했을 때만 Actions 줄에
+보인다. 그래서 몇 분 걸리는 작성이 다른 녹음을 보는 중에 끝나도 그 녹음 아래에 뜨지 않는다.
+
+**템플릿으로 작성 (compose sheet)**
+- **여는 곳:**
+  - Send to Vault 메뉴의 **템플릿으로 작성해서 보내기…**
+  - Command Palette의 **Compose with Template…**
+  - Wiki 메뉴의 **Raw Source로 넣기… (수집 목적 입력)**와 Palette의
+    **Compose to Wiki (raw source)…**는 Wiki를 미리 골라 둔 채 같은 sheet를 연다.
+- **template:** deprecated가 아닌 `summary` 종류의 `note-*` template만 고를 수 있다. 출시
+  template 기준 10개이며 `note-general`에서 시작한다. 고른 template의 설명이 함께 보인다.
+- **vault:** `plaud vaults --json`이 알려 주는, 실제 존재하는 vault 중에서 key로 고른다.
+  - 목록 조회가 실패하면 그 이유를 보여 준다. 이는 "vault 미설정"과 구분된다.
+  - Wiki로 열었는데 Wiki가 없으면 아무 vault도 선택되지 않는다. 이때 보내기는 꺼지고
+    `uv run plaud config-wiki-vault` 안내가 나온다. Main으로 슬쩍 바꾸지 않는다.
+- **목적지와 수집 목적:**
+  - Main의 목적지는 CLI 기본값인 `00. Inbox`이며 폴더를 고르는 UI는 없다.
+  - Wiki는 `10. Raw Sources/` 아래 raw source로 저장되고, 수집 목적
+    (`collectionPurpose`)을 반드시 적어야 한다. 비어 있으면 보낼 수 없다.
+- **실행:** 작성은 고른 template을 설정된 모델로 실행하므로 사용량과 몇 분의 시간이 든다.
+  같은 template의 요약이 이미 있으면 그것을 재사용한다. sheet는 보내는 즉시 닫힌다.
+  - 진행은 Send to Vault spinner로, 결과는 Actions 줄로 보인다.
+  - 실패는 상태별 한국어 알림으로 보인다: 수집 목적 없음, vault 없음, 전사본 없음, 모델 실패,
+    스키마 검사 실패, 내용 없음, 쓰기 실패, 쓸 수 없는 template.
+
+**중복 확인 (같은 녹음의 노트가 이미 있을 때)**
+- **첫 시도:** 앱의 송출과 작성은 항상 "묻기"로 시작한다. 같은 vault에 그 녹음의 노트가
+  이미 있으면 아무것도 쓰지 않는다. 작성이라면 모델도 실행하지 않는다.
+- **dialog:** 가장 최근 노트 이름을 보여 주고 다음 중에서 고르게 한다.
+
+  | 선택 | 동작 |
+  |---|---|
+  | 기존 노트 열기 | 가장 최근 노트를 Obsidian에서 연다. 아무것도 쓰지 않는다. |
+  | 덮어쓰기 | 가장 최근 노트를 그 자리에서 다시 쓴다. |
+  | 새로 만들기 | 번호가 붙은 새 노트를 만든다. |
+  | 취소 | 아무것도 쓰지 않는다. |
+
+  덮어쓰기와 새로 만들기는 처음 요청을 그대로, 고른 선택만 바꿔 다시 실행한다.
+- **덮어쓰기가 없는 경우:**
+  - **Wiki raw source:** 불변이므로 덮어쓰기를 제공하지 않는다. 새로 만들기는 "새 버전
+    만들기 (기존 버전은 그대로 둠)"으로 표시된다.
+  - **Claude Terminal filing:** Claude가 파일을 직접 쓰므로 덮어쓰기를 제공하지 않는다.
+- **보낸 뒤 수정된 노트:** 가장 최근 노트가 보낸 뒤 vault에서 수정됐다면, 덮어쓰기 버튼이
+  "볼트에서 수정된 노트를 덮어씀"으로 바뀌고 안내 문구도 수정 내용이 사라진다고 경고한다.
+- **알림:** 중복은 일반 "Plaud command failed" 알림을 띄우지 않는다. Actions 줄은 덮어쓴
+  결과에 `덮어씀`을 붙인다.
 
 direct, Dual, deterministic fallback 경로는 공통 frontmatter builder를 사용해 다음
 규칙을 적용한다.
@@ -636,7 +733,9 @@ Sidebar와 Command Palette의 `vault-send`가 현재 통합본 우선 송출 경
 - Move to Folder / Unfile
 - Generate Metadata
 - Transcribe with CMDS
-- Main Vault / Claude Vault send, Wiki raw source compose
+- Main Vault / Claude Vault send
+- Compose with Template… / Compose to Wiki (raw source)… — 둘 다 compose sheet를 열며,
+  Wiki action은 Wiki를 미리 골라 둔다. Wiki는 이 경로로만 raw source를 받는다.
 - Plaud Web 열기 / URL 복사
 - Rename
 - Re-fetch Detail
@@ -656,7 +755,16 @@ Sidebar와 Command Palette의 `vault-send`가 현재 통합본 우선 송출 경
 - metadata model
 - auto metadata on/off
 - transcript / summaries / integrated output path
+- Templates: 읽기 전용 prompt template 보기
 - version / build / source SHA
+
+**Templates 보기:**
+- **목록:** 왼쪽에 `templates/*.md` 전체를 이름과 설명으로 보여 준다. `note-*`가 먼저 오고,
+  deprecated template에는 대체 template이 함께 표시된다.
+- **본문:** 오른쪽에는 고른 template의 본문을 선택 가능한 고정폭 글꼴로 보여 준다. 앞쪽 빈
+  줄만 생략하고 나머지는 그대로 둔다. 편집은 하지 않는다.
+- **버튼:** **Open templates folder**가 폴더를 열고, **Reload**가 다시 읽는다.
+- **읽기 실패:** 폴더가 없거나 UTF-8로 읽을 수 없는 파일이 있으면 그 사실을 표시한다.
 
 LLM 로그인은 앱이 password를 받거나 대신 입력하지 않는다. Settings에서는 상태를 확인하고
 필요한 terminal login command를 안내한다. Vault root 설정도 현재 앱 form에는 없으므로
@@ -978,6 +1086,11 @@ Markdown 파일이 정본이며 별도 summary DB row를 만들지 않는다. �
 | AI summary/integrate | 쓰기 가능 | **쓰기** | 읽기 | **모델 전송** | 아니오 |
 | Direct vault send | reference 쓰기 | 아니오 | 읽기 | 아니오 | **파일 쓰기** |
 | AI vault send | reference 쓰기 | 아니오 | 읽기 | **모델 전송** | **파일 쓰기** |
+| Template compose (`vault-compose`) | reference 쓰기 | 캐시 없을 때 summary 쓰기 | 아니오 | 캐시 없을 때 **모델 전송** | **파일 쓰기** (Main Inbox 또는 Wiki raw source) |
+| 중복 확인 (첫 송출·작성) | 읽기 | 아니오 | 아니오 | 아니오 | 읽기만, 쓰지 않음 |
+| 중복: 덮어쓰기 | reference 갱신 | 작성이면 캐시 없을 때 summary 쓰기 | 원래 송출·작성 행과 같음 | 원래 송출·작성 행과 같음 | **기존 노트 덮어쓰기** |
+| 중복: 새로 만들기 | reference 쓰기 | 작성이면 캐시 없을 때 summary 쓰기 | 원래 송출·작성 행과 같음 | 원래 송출·작성 행과 같음 | **번호 붙은 새 파일 쓰기** |
+| 중복: 기존 노트 열기 / 취소 | 아니오 | 아니오 | 아니오 | 아니오 | 열기만 / 아니오 |
 | Dual send | state/reference 쓰기 | 아니오 | 아니오 | 아니오 | **파일 쓰기** |
 | Dual unmark | **state 삭제** | artifact 보존 | 아니오 | 아니오 | 아니오 |
 | Vault lint `--fix` | 아니오 | 아니오 | 아니오 | 아니오 | **파일 수정** |
@@ -1031,6 +1144,16 @@ purge하는 full reconciliation은 없다.
 source fingerprint도 기록한다. 이는 개인용 설치 절차이며 notarized 또는 tagged release를
 의미하지 않는다.
 
+**앱과 CLI는 함께 바꿔야 한다.** 설치한 앱은 자기 안의 CLI가 아니라 이 checkout의 CLI를
+실행한다. 그래서 한쪽만 새 버전이면 아래처럼 어긋난다.
+
+| 조합 | 결과 |
+|---|---|
+| 이번 변경 이전에 만든 앱 + 새 CLI | Wiki 메뉴의 `vault-send --to wiki`는 `wiki_unsupported`로 거절된다. 다시 보낸 송출은 `duplicate`로 멈추고 일반 실패 알림만 띄운다. Generate All이 `summary` 종류 slot까지 integrate로 실행해 template 종류 검사에 거절된다. 셋 다 아무것도 쓰지 않는다. 앱을 다시 빌드할 때까지 고장처럼 보인다. |
+| 새 앱 + 이전 CLI | `--on-duplicate`를 모르는 CLI가 option 오류로 끝나 모든 송출·작성이 실패한다. |
+
+따라서 core와 앱은 함께 또는 core를 먼저 반영한다.
+
 ### 11.2 Plaud private API
 
 Cloud 연동은 Plaud의 공식 안정 공개 API 계약이 아니라 private API를 사용한다. Plaud가
@@ -1058,6 +1181,15 @@ endpoint, header, auth 또는 response shape를 바꾸면 수정이 필요할 �
 - server voiceprint roster response의 계정별 live 검증
 - vault index의 delete/move reconciliation과 nested YAML 전체 지원
 - legacy `plaud obsidian`와 현재 `vault-send`의 UI 병존
+- 중복 확인(§5.16)은 `vault-send`와 `vault-compose`에만 적용된다. 다음 경로는 같은 녹음의
+  노트가 있어도 묻지 않는다.
+  - **Dual send:** 같은 파일명이면 `(2)` 번호를 붙여 새로 쓴다.
+  - **legacy `plaud obsidian`:** Claude가 직접 쓰며 reference와 확인이 없다.
+  - **meeting note:** 기존 노트를 조용히 그 자리에서 덮어쓴다.
+- 중복 확인은 이 앱이 기록한 note path와 목적지의 같은 이름 노트만 본다. vault 쪽에서 옮기거나
+  이름을 바꾼 노트는 찾지 못하므로, 그때는 새 노트가 만들어진다.
+- 실패 이유 표시(§5.10, §5.11, §5.14)는 앱 쪽만 구현됐다. 이유를 기록하는 core 변경이
+  반영되기 전에는 표시되지 않는다.
 
 ### 11.5 외부 전송과 비용
 
@@ -1137,6 +1269,8 @@ WebKit, folder/icon, Command Palette의 automated E2E를 의미하지 않는다.
 | 태그 행·검색·중첩 표시 계산 | `app/Sources/PlaudNoteApp/SidebarTags.swift` |
 | Markdown parse·slot output snapshot | `app/Sources/PlaudNoteApp/MarkdownDocument.swift`, `app/Sources/PlaudNoteApp/SlotOutputSnapshot.swift` |
 | Vault bridge | `app/Sources/PlaudNoteApp/FileStore+Vault.swift` |
+| template front matter·Templates 보기·slot 종류 정책 | `app/Sources/PlaudNoteApp/TemplateMeta.swift`, `app/Sources/PlaudNoteApp/SlotModeDefaults.swift` |
+| template 작성(compose)·중복 확인 dialog | `app/Sources/PlaudNoteApp/VaultCompose.swift`, `app/Sources/PlaudNoteApp/VaultComposeSheet.swift`, `app/Sources/PlaudNoteApp/VaultDuplicatePrompt.swift` |
 | 인증 recovery ladder | `app/Sources/PlaudNoteApp/FileStore+Auth.swift` |
 | Swift DB query | `app/Sources/PlaudNoteApp/Database.swift` |
 | Auth sheet/WebKit | `PlaudAuthSheet.swift`, `PlaudLoginWindow.swift`, `PlaudWebLoginView.swift` |
