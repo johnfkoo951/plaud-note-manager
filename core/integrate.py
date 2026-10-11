@@ -16,7 +16,7 @@ from typing import Any
 
 from .paths import integrated_paths
 from .summarize import run_model
-from .templates import load_template
+from .templates import KIND_INTEGRATED, load_template, require_kind
 
 _FT_RE = re.compile(
     r"===FINAL_TRANSCRIPT_BEGIN===\s*(.*?)\s*===FINAL_TRANSCRIPT_END===",
@@ -121,6 +121,7 @@ def integrate(
 ) -> dict[str, Path]:
     """Run the integrated prompt and persist all/transcript/summary outputs."""
     template = load_template(template_name)
+    require_kind(template, KIND_INTEGRATED)  # before the model call and any write
     prompt = template.render(
         title=title,
         keywords=keywords,

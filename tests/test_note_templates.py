@@ -10,10 +10,19 @@ with two stacked frontmatter blocks.
 from __future__ import annotations
 
 import re
+from collections import Counter
 
 import pytest
 
-from core.templates import list_templates, load_template
+from core.paths import TEMPLATES_DIR
+from core.templates import (
+    KIND_INTEGRATED,
+    KIND_INTERNAL,
+    KIND_SUMMARY,
+    list_templates,
+    load_template,
+    parse_frontmatter,
+)
 
 NOTE_TEMPLATES = sorted(t.name for t in list_templates() if t.name.startswith("note-"))
 
@@ -34,8 +43,64 @@ EXPECTED = {
 }
 
 
+# What integrate() passes on top of title/keywords/speakers.
+INTEGRATE_VARS = {"cmds_transcript", "plaud_transcript", "plaud_summaries", "transcription_context"}
+
+SHIPPED_KINDS = {
+    "default": KIND_INTEGRATED,
+    "integrated": KIND_INTEGRATED,
+    "classify": KIND_INTERNAL,
+    "metadata": KIND_INTERNAL,
+    "speaker-names": KIND_INTERNAL,
+    "vault-meeting-note": KIND_INTERNAL,
+    **dict.fromkeys(EXPECTED, KIND_SUMMARY),
+    "cmds-meeting": KIND_SUMMARY,
+    "cmds-lecture": KIND_SUMMARY,
+    "cmds-coaching": KIND_SUMMARY,
+    "meeting": KIND_SUMMARY,
+    "lecture": KIND_SUMMARY,
+}
+
+
+def _placeholders(body: str) -> set[str]:
+    return set(re.findall(r"\{([a-z_]+)\}", body))
+
+
 def test_every_expected_template_is_present() -> None:
     assert set(NOTE_TEMPLATES) == EXPECTED
+
+
+def test_every_shipped_template_loads() -> None:
+    names = sorted(p.stem for p in TEMPLATES_DIR.glob("*.md"))
+    assert len(names) == 21
+    for name in names:
+        load_template(name)  # list_templates() would swallow a failure
+
+
+def test_every_shipped_template_declares_its_kind() -> None:
+    for path in sorted(TEMPLATES_DIR.glob("*.md")):
+        _lines, meta, _body = parse_frontmatter(path.read_bytes().decode("utf-8"))
+        # Declared, not defaulted: a missing line would also load as summary.
+        assert meta.get("kind") in (KIND_SUMMARY, KIND_INTEGRATED, KIND_INTERNAL), path.name
+    kinds = {t.name: t.kind for t in list_templates()}
+    assert kinds == SHIPPED_KINDS
+    assert Counter(kinds.values()) == {KIND_INTEGRATED: 2, KIND_INTERNAL: 4, KIND_SUMMARY: 15}
+
+
+@pytest.mark.parametrize("name", sorted(n for n, k in SHIPPED_KINDS.items() if k == KIND_SUMMARY))
+def test_summary_templates_take_the_transcript_and_no_integrate_inputs(name: str) -> None:
+    used = _placeholders(load_template(name).body)
+    assert "transcript" in used
+    assert not used & INTEGRATE_VARS, f"{name} uses {used & INTEGRATE_VARS}"
+
+
+@pytest.mark.parametrize(
+    "name", sorted(n for n, k in SHIPPED_KINDS.items() if k == KIND_INTEGRATED)
+)
+def test_integrated_templates_take_the_integrate_inputs_and_no_transcript(name: str) -> None:
+    used = _placeholders(load_template(name).body)
+    assert used & INTEGRATE_VARS
+    assert "transcript" not in used
 
 
 @pytest.mark.parametrize("name", sorted(EXPECTED))

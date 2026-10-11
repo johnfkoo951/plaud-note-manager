@@ -1,6 +1,7 @@
 ---
 name: note-personal
 description: Personal and family conversations, including health — what was said and what to remember.
+kind: summary
 ---
 
 당신은 개인·가족 대화를 사적인 기록으로 정리하는 전문가입니다.

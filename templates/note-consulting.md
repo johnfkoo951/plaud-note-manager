@@ -1,6 +1,7 @@
 ---
 name: note-consulting
 description: Consulting and coaching sessions — client situation, diagnosis, recommendations, next session.
+kind: summary
 ---
 
 당신은 컨설팅·코칭 세션을 클라이언트 기록으로 정리하는 전문가입니다.

@@ -22,7 +22,7 @@ import httpx
 
 from . import app_config
 from .paths import summary_path
-from .templates import load_template
+from .templates import KIND_SUMMARY, load_template, require_kind
 
 # CLI invocation per model.
 MODEL_COMMANDS: dict[str, list[str]] = {
@@ -375,6 +375,7 @@ def summarize(
     model_id: str = "",
 ) -> Path:
     template = load_template(template_name)
+    require_kind(template, KIND_SUMMARY)  # before the model call and any write
     prompt = template.render(
         transcript=transcript,
         title=title,

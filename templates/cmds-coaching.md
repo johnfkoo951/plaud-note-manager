@@ -1,6 +1,7 @@
 ---
 name: cmds-coaching
 description: CMDS vault-ready 1:1 코칭/컨설팅 세션 노트 — 세션 흐름 + 인사이트 + 후속 액션, ~함체.
+kind: summary
 ---
 
 다음 1:1 코칭/컨설팅 세션 전사본을 CMDSPACE 볼트에 바로 저장할 수 있는 세션 노트(.md)로 작성해주세요.
