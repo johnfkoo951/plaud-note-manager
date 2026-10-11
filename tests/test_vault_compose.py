@@ -30,7 +30,9 @@ def storage(tmp_path: Path) -> Storage:
             file_id="f1",
             title="09-14 세미나",
             transcript=[
-                TranscriptSegment(start_time=0, end_time=900, speaker="구요한", content="안녕하세요")
+                TranscriptSegment(
+                    start_time=0, end_time=900, speaker="구요한", content="안녕하세요"
+                )
             ],
             keywords=["옵시디언"],
         ),
@@ -45,11 +47,13 @@ def vaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     wiki = tmp_path / "CMDS_LLM_Wiki"
     for v in (main, wiki):
         v.mkdir()
-    from core import app_config
+    from core import app_config, vault_index
     from core import vault_send as vs
 
     monkeypatch.setattr(app_config, "obsidian_vault", lambda: main)
     monkeypatch.setattr(vs, "wiki_vault", lambda: wiki)
+    # note_context looks up related notes, which opens the real data/plaud.db.
+    monkeypatch.setattr(vault_index, "related_notes", lambda *a, **k: [])
     return {"main": main, "wiki": wiki}
 
 
@@ -91,9 +95,11 @@ def test_wiki_refuses_without_a_collection_purpose(storage, vaults, stub_model) 
     )
     assert result.status == "needs_purpose"
     # Nothing may be written while a required field is missing.
-    assert not list((vaults["wiki"] / vc.WIKI_RAW_DEST).glob("*.md")) if (
-        vaults["wiki"] / vc.WIKI_RAW_DEST
-    ).exists() else True
+    assert (
+        not list((vaults["wiki"] / vc.WIKI_RAW_DEST).glob("*.md"))
+        if (vaults["wiki"] / vc.WIKI_RAW_DEST).exists()
+        else True
+    )
 
 
 def test_wiki_writes_into_the_category_subfolder_the_vault_already_uses(
@@ -123,9 +129,7 @@ def test_every_category_maps_to_an_existing_subfolder() -> None:
         assert vc.wiki_raw_dest(category).startswith("10. Raw Sources/")
 
 
-def test_filename_follows_the_vaults_date_slug_convention(
-    storage, vaults, stub_model
-) -> None:
+def test_filename_follows_the_vaults_date_slug_convention(storage, vaults, stub_model) -> None:
     result = vc.compose(
         "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage
     )
@@ -148,21 +152,8 @@ def test_slug_drops_the_plaud_title_date_the_filename_already_carries() -> None:
 
 
 # ----- speaker labels are not people ------------------------------------
-
-
-@pytest.mark.parametrize("label", ["speaker_0", "Speaker 3", "화자 2", "SPK_1", " "])
-def test_diarizer_placeholders_are_not_people(label: str) -> None:
-    assert vc.is_placeholder_speaker(label)
-
-
-@pytest.mark.parametrize("name", ["구요한", "안창현", "@seulkiji1151"])
-def test_real_names_survive(name: str) -> None:
-    assert not vc.is_placeholder_speaker(name)
-
-
-def test_human_speakers_filters_and_dedupes() -> None:
-    raw = ["Speaker 3", "Speaker 4", "speaker_0", "speaker_1", "구요한", "안창현", "구요한"]
-    assert vc.human_speakers(raw) == ["구요한", "안창현"]
+# The parser itself (is_placeholder_speaker / human_speakers) lives in
+# core.metadata and is tested in test_metadata_helpers.py.
 
 
 def test_author_block_holds_no_placeholder_wikilinks(storage, vaults, stub_model) -> None:
@@ -233,9 +224,7 @@ def test_wiki_note_satisfies_the_raw_source_contract(storage, vaults, stub_model
     assert "\nindex:" not in text
 
 
-def test_wiki_note_names_the_agent_rather_than_the_vault_owner(
-    storage, vaults, stub_model
-) -> None:
+def test_wiki_note_names_the_agent_rather_than_the_vault_owner(storage, vaults, stub_model) -> None:
     result = vc.compose(
         "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage
     )
@@ -247,6 +236,170 @@ def test_wiki_note_names_the_agent_rather_than_the_vault_owner(
 
 
 # ----- guards -----------------------------------------------------------
+
+
+def test_compose_refuses_a_non_summary_template(storage, vaults, monkeypatch) -> None:
+    from core import app_config
+    from core import paths as paths_mod
+    from core import summarize as sm
+
+    calls: list = []
+    monkeypatch.setattr(sm, "model_available", lambda m: True)
+    monkeypatch.setattr(sm, "run_model", lambda *a, **k: calls.append(a) or "x")
+    monkeypatch.setattr(app_config, "model_id_for", lambda m: "")
+    # A cached run of the integrate prompt is read without calling summarize(),
+    # so the check in summarize() alone would never see it.
+    cached = paths_mod.summary_path("f1", model="claude", template="default")
+    cached.write_text("---\ntemplate: default\n---\n\n## 요약\n캐시", encoding="utf-8")
+
+    for to in ("main", "wiki"):
+        result = vc.compose(
+            "f1",
+            template="default",
+            to=to,
+            collection_purpose="p",
+            model="claude",
+            storage=storage,
+        )
+        assert result.status == "bad_template"
+        assert "cmds-integrate" in result.detail
+        assert result.template == "default"
+    assert calls == []
+    assert not [p for v in vaults.values() for p in v.rglob("*") if p.is_file()]
+
+
+def test_compose_refuses_a_deprecated_template(storage, vaults, monkeypatch) -> None:
+    # cmds-* ask the model for its own YAML block; filed into a vault it would
+    # sit in the note body as a second front matter block.
+    from core import app_config
+    from core import summarize as sm
+
+    calls: list = []
+    monkeypatch.setattr(sm, "model_available", lambda m: True)
+    monkeypatch.setattr(sm, "run_model", lambda *a, **k: calls.append(a) or "x")
+    monkeypatch.setattr(app_config, "model_id_for", lambda m: "")
+    for to in ("main", "wiki"):
+        result = vc.compose(
+            "f1",
+            template="cmds-meeting",
+            to=to,
+            collection_purpose="p",
+            model="claude",
+            storage=storage,
+        )
+        assert result.status == "bad_template"
+        assert result.detail == "template 'cmds-meeting' is deprecated — use 'note-meeting'"
+    assert calls == []
+    assert not [p for v in vaults.values() for p in v.rglob("*") if p.is_file()]
+
+
+@pytest.fixture()
+def recording_model(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Stub model that records calls, so a test can show none happened."""
+    from core import app_config
+    from core import summarize as sm
+
+    calls: list = []
+    monkeypatch.setattr(sm, "model_available", lambda m: True)
+    monkeypatch.setattr(
+        sm, "run_model", lambda *a, **k: calls.append(a) or "## 핵심 요약\n\n시연함."
+    )
+    monkeypatch.setattr(app_config, "model_id_for", lambda m: "")
+    return calls
+
+
+@pytest.mark.parametrize("inside", ["", "10. Raw Sources"])
+def test_a_path_into_the_wiki_takes_the_raw_source_route(
+    storage, vaults, recording_model, inside
+) -> None:
+    target = vaults["wiki"] / inside if inside else vaults["wiki"]
+    target.mkdir(parents=True, exist_ok=True)
+    result = vc.compose(
+        "f1", template="note-lecture", to=str(target), collection_purpose="", storage=storage
+    )
+    assert result.status == "needs_purpose"
+    assert recording_model == []
+
+
+def test_compose_to_the_wiki_path_lands_in_raw_sources(storage, vaults, recording_model) -> None:
+    result = vc.compose(
+        "f1",
+        template="note-lecture",
+        to=str(vaults["wiki"]),
+        collection_purpose="p",
+        storage=storage,
+    )
+    assert result.status == "ok"
+    assert result.dest.startswith("10. Raw Sources/")
+    assert not (vaults["wiki"] / "00. Inbox").exists()
+
+
+@pytest.mark.parametrize("form", ["absolute", "parent"])
+def test_a_main_compose_whose_dest_is_in_the_wiki_stops_before_the_model(
+    storage, vaults, recording_model, form
+) -> None:
+    dest = (
+        str(vaults["wiki"] / "00. Inbox")
+        if form == "absolute"
+        else f"../{vaults['wiki'].name}/00. Inbox"
+    )
+    result = vc.compose("f1", template="note-meeting", to="main", dest=dest, storage=storage)
+    assert result.status == "wiki_unsupported"
+    assert recording_model == []
+    assert not [p for p in vaults["wiki"].rglob("*") if p.is_file()]
+
+
+def test_compose_to_the_main_vault_path_stays_main(storage, vaults, recording_model) -> None:
+    result = vc.compose("f1", template="note-meeting", to=str(vaults["main"]), storage=storage)
+    assert result.status == "ok"
+    assert Path(result.path).parent == vaults["main"] / "00. Inbox"
+    assert not [p for p in vaults["wiki"].rglob("*") if p.is_file()]
+
+
+def test_compose_to_a_missing_vault_is_no_vault_before_the_model(
+    storage, vaults, recording_model, monkeypatch, tmp_path
+) -> None:
+    from core import vault_send as vs
+
+    monkeypatch.setattr(vs, "wiki_vault", lambda: None)  # a fresh clone: no wiki anywhere
+    for to, purpose in ((str(tmp_path / "missing"), ""), ("wiki", "p")):
+        result = vc.compose(
+            "f1", template="note-lecture", to=to, collection_purpose=purpose, storage=storage
+        )
+        assert result.status == "no_vault", to
+    assert recording_model == []
+
+
+def test_main_compose_note_records_the_generating_model(storage, vaults, recording_model) -> None:
+    # The vault requires model: and effort: on agent-written notes.
+    result = vc.compose("f1", template="note-meeting", to="main", model="claude", storage=storage)
+    assert result.status == "ok"
+    front = Path(result.path).read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    assert 'model: "claude"' in front
+    assert "\neffort: " in front
+
+
+def test_a_multi_line_purpose_becomes_one_line(storage, vaults, recording_model) -> None:
+    result = vc.compose(
+        "f1",
+        template="note-lecture",
+        to="wiki",
+        collection_purpose="강의 설계\n재사용\r\n  목적",
+        storage=storage,
+    )
+    assert result.status == "ok"
+    text = Path(result.path).read_text(encoding="utf-8")
+    assert 'collectionPurpose: "강의 설계 재사용 목적"' in text
+
+
+def test_compose_reports_a_missing_template_before_opening_storage(vaults, monkeypatch) -> None:
+    def no_storage():
+        raise AssertionError("Storage() opened before the template was checked")
+
+    monkeypatch.setattr(vc, "Storage", no_storage)
+    result = vc.compose("f1", template="no-such-template", to="main")
+    assert result.status == "bad_template"
+    assert "template not found: no-such-template" in result.detail
 
 
 def test_a_recording_with_no_transcript_cannot_become_a_raw_source(
@@ -292,7 +445,143 @@ def test_vault_choices_lists_only_existing_vaults(vaults) -> None:
 
 def test_compose_result_is_json_serializable(storage, vaults, stub_model) -> None:
     result = vc.compose(
-        "f1", template="note-lecture", to="wiki", collection_purpose="p", dry_run=True,
+        "f1",
+        template="note-lecture",
+        to="wiki",
+        collection_purpose="p",
+        dry_run=True,
         storage=storage,
     )
-    assert json.loads(json.dumps(result.as_dict()))["status"] == "ok"
+    data = json.loads(json.dumps(result.as_dict()))
+    assert data["status"] == "ok"
+    assert (data["action"], data["existing"]) == ("", [])
+
+
+# ----- a second compose for the same recording --------------------------
+
+
+@pytest.fixture()
+def no_generation(monkeypatch: pytest.MonkeyPatch):
+    """Call after the first compose: any later generation is a failure."""
+
+    def arm() -> None:
+        def boom(*_a, **_k):
+            raise AssertionError("generated before the duplicate check")
+
+        monkeypatch.setattr(vc, "_summarize_with", boom)
+
+    return arm
+
+
+def _raw_sources(vaults) -> list[Path]:
+    return sorted((vaults["wiki"] / "10. Raw Sources").rglob("*.md"))
+
+
+def _wiki(storage, **kw):
+    return vc.compose(
+        "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage, **kw
+    )
+
+
+def test_wiki_resend_reports_duplicate_before_generation(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = _wiki(storage)
+    assert (first.status, first.action) == ("ok", "created")
+    no_generation()
+    again = _wiki(storage)
+    assert again.status == "duplicate"
+    assert again.existing[0]["path"] == first.path
+    assert _raw_sources(vaults) == [Path(first.path)]
+
+
+def test_wiki_skip_returns_the_existing_raw_source(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = _wiki(storage)
+    no_generation()
+    skipped = _wiki(storage, on_duplicate="skip")
+    assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
+
+
+def test_wiki_overwrite_is_refused(storage, vaults, recording_model) -> None:
+    refused = _wiki(storage, on_duplicate="overwrite")
+    assert refused.status == "invalid_option"
+    assert "immutable" in refused.detail
+    assert recording_model == [] and _raw_sources(vaults) == []
+    first = _wiki(storage)
+    assert _wiki(storage, on_duplicate="overwrite").status == "invalid_option"
+    assert _raw_sources(vaults) == [Path(first.path)]
+
+
+def test_wiki_new_writes_a_new_version_and_keeps_the_old(storage, vaults, recording_model) -> None:
+    first = _wiki(storage)
+    second = _wiki(storage, on_duplicate="new")
+    assert (second.status, second.action) == ("ok", "created")
+    assert "new version" in second.detail and "kept" in second.detail
+    assert _raw_sources(vaults) == sorted([Path(first.path), Path(second.path)])
+
+
+def test_main_compose_ask_returns_duplicate_before_generation(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    assert (first.status, first.action) == ("ok", "created")
+    no_generation()
+    again = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    assert again.status == "duplicate"
+    assert again.existing[0]["path"] == first.path
+
+
+def test_main_compose_skip_returns_existing_without_generating(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    no_generation()
+    skipped = vc.compose(
+        "f1", template="note-meeting", to="main", storage=storage, on_duplicate="skip"
+    )
+    assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
+
+
+def test_main_compose_never_overwrites_a_wiki_nested_in_the_main_vault(
+    storage, vaults, recording_model, monkeypatch
+) -> None:
+    from core import vault_send as vs
+
+    nested = vaults["main"] / "nested-wiki"
+    nested.mkdir()
+    monkeypatch.setattr(vs, "wiki_vault", lambda: nested)
+    note = nested / "immutable-source.md"
+    note.write_text("---\nsource: https://web.plaud.ai/file/f1\n---\nORIGINAL\n", encoding="utf-8")
+    before = note.read_bytes()
+    storage.upsert_note_reference(file_id="f1", path=note, kind="vault-send", now=1)
+    result = vc.compose(
+        "f1", template="note-meeting", to="main", storage=storage, on_duplicate="overwrite"
+    )
+    assert (result.status, result.action) == ("ok", "created")
+    assert Path(result.path).parent == vaults["main"] / "00. Inbox"
+    assert note.read_bytes() == before
+
+
+def test_main_compose_overwrite_passes_through(storage, vaults, recording_model) -> None:
+    first = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    again = vc.compose(
+        "f1", template="note-meeting", to="main", storage=storage, on_duplicate="overwrite"
+    )
+    assert (again.status, again.action, again.path) == ("ok", "overwritten", first.path)
+
+
+def test_cli_vault_compose_rejects_overwrite_for_the_wiki(vaults, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import cli.main as cli
+
+    def never(*_a, **_k):
+        raise AssertionError("compose ran")
+
+    monkeypatch.setattr(vc, "compose", never)
+    argv = ["vault-compose", "f1", "--template", "note-lecture", "--to", "wiki"]
+    result = CliRunner().invoke(cli.app, [*argv, "--on-duplicate", "overwrite"])
+    assert result.exit_code != 0
+    assert "immutable" in result.output

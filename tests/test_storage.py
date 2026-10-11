@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 
 from core.models import FileContent, Folder, PlaudFile, SummaryBlock, TranscriptSegment
 from core.metadata import write_meeting_note
@@ -147,6 +148,44 @@ def test_regenerating_metadata_keeps_completed_lifecycle(tmp_path, monkeypatch) 
     assert result["status"] == "done" and result["usage_status"] == "archived"
     row = storage.get_note_metadata("f")
     assert row["status"] == "done" and row["usage_status"] == "archived"
+
+
+def test_list_note_references_filters_by_kind(tmp_path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_note_reference(file_id="f", path=tmp_path / "a.md", kind="vault-send", now=1)
+    storage.upsert_note_reference(file_id="f", path=tmp_path / "b.md", kind="meeting-note", now=2)
+    storage.upsert_note_reference(file_id="f", path=tmp_path / "c.md", kind="vault-send", now=3)
+    sent = storage.list_note_references("f", kind="vault-send")
+    assert [Path(r["path"]).name for r in sent] == ["c.md", "a.md"]  # newest first
+    assert [Path(r["path"]).name for r in storage.list_note_references("f")] == [
+        "c.md",
+        "b.md",
+        "a.md",
+    ]
+
+
+def test_link_candidates_keep_whole_speaker_names(tmp_path, monkeypatch) -> None:
+    from core import metadata, vault_index
+
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_file(PlaudFile(id="f", filename="회의 녹음"), now=1)
+    storage.save_content(
+        FileContent(
+            file_id="f",
+            transcript=[
+                TranscriptSegment(start_time=0, end_time=1, speaker="John Smith", content="a"),
+                TranscriptSegment(start_time=1, end_time=2, speaker="Speaker 3", content="b"),
+            ],
+        ),
+        now=1,
+    )
+    monkeypatch.setattr(metadata, "integrated_dir", lambda _: tmp_path)
+    monkeypatch.setattr(vault_index, "related_wikilinks", lambda _: [])
+    result = metadata.generate_note_metadata(storage, "f", vault_path=tmp_path, use_ai=False)
+    candidates = result["link_candidates"]
+    assert "John Smith" in candidates
+    for fragment in ("Speaker", "Speaker 3", "3", "John", "Smith"):
+        assert fragment not in candidates
 
 
 def test_write_meeting_note_fallback_records_reference(tmp_path) -> None:

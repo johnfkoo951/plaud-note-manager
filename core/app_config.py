@@ -46,8 +46,8 @@ DEFAULT_CONFIG: dict = {
     # Personal / environment-specific locations. Empty = unset; a fresh clone
     # gets safe empty defaults and the user opts in via env or `plaud config-*`.
     "obsidian_vault": "",
-    # Wiki (LLM satellite) vault for `vault-send --to wiki`. Empty = derive the
-    # sibling CMDS_LLM_Wiki directory next to the main vault.
+    # Wiki (LLM satellite) vault for `vault-compose --to wiki`. Empty = derive
+    # the sibling CMDS_LLM_Wiki directory next to the main vault.
     "wiki_vault": "",
     "author": "",
     "api_info_dir": "",

@@ -1,6 +1,7 @@
 ---
 name: metadata
 description: Generate local metadata and Obsidian-style tags for a Plaud note.
+kind: internal
 ---
 
 You are creating stable local metadata for a Plaud recording.

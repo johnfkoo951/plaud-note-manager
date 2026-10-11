@@ -1,6 +1,7 @@
 ---
 name: vault-meeting-note
 description: Write a CMDS main-vault meeting note from Plaud/CMDS transcripts and optional user draft notes.
+kind: internal
 ---
 
 You are writing a finished Korean meeting note for the user's main Obsidian CMDS vault.

@@ -16,8 +16,10 @@ class Slot:
     model_id: str = ""
 
 
+# Must match the app's Database.fallbackSlots. Used until slots.json exists;
+# an existing slots.json is never rewritten to follow this.
 DEFAULT_SLOTS: list[Slot] = [
-    Slot(name="Default (Claude)", model="claude", template="default", model_id=""),
+    Slot(name="Default (Claude)", model="claude", template="note-general", model_id=""),
 ]
 
 

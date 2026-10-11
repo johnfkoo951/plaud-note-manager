@@ -74,6 +74,36 @@ def _emit_json(obj: Any) -> None:
     sys.stdout.write("\n")
 
 
+def _require_template(name: str, *kinds: str) -> Any:
+    """Load template `name`, one of `kinds` when given; otherwise say why on
+    stderr and exit 1 — before a command touches the model, the DB or a file."""
+    from core.templates import TemplateKindError, load_template, require_kind
+
+    try:
+        template = load_template(name)
+        if kinds and template.kind not in kinds:
+            require_kind(template, kinds[0])  # raises, naming what to run instead
+        return template
+    except FileNotFoundError:
+        message = f"template not found: {name}"
+    except (OSError, UnicodeDecodeError) as exc:
+        message = f"template unreadable: {name} ({exc})"
+    except TemplateKindError as exc:
+        message = str(exc)
+    typer.echo(message, err=True)
+    raise typer.Exit(1)
+
+
+def _warn_if_deprecated(template: Any) -> None:
+    """Name a deprecated template's replacement and carry on — slots keep running it."""
+    from rich.markup import escape
+
+    from core.templates import deprecation_notice
+
+    if notice := deprecation_notice(template):
+        console.print(f"[yellow]{escape(notice)}[/yellow]", soft_wrap=True)
+
+
 def _peek_date(start_time_ms: int | None, edit_time_s: int | None) -> str | None:
     """Format a recording date (start_time is epoch-ms, edit_time epoch-s)."""
     for ts, divisor in ((start_time_ms, 1000), (edit_time_s, 1)):
@@ -1519,7 +1549,8 @@ def dual_cmd(
         False, "--auto-approve", help="Accept proposed names with confidence ≥ 0.7 without asking."
     ),
     continue_unmapped: bool = typer.Option(
-        False, "--continue-unmapped",
+        False,
+        "--continue-unmapped",
         help="Continue to final transcript/summary with existing speaker labels; names can be edited later.",
     ),
     to_vault: bool = typer.Option(
@@ -2299,6 +2330,12 @@ def vault_compose_cmd(
     model: str = typer.Option("", help=MODEL_HELP + " Empty = configured model."),
     model_id: str = typer.Option("", "--id", help="Pin the API model id."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Generate but do not write the note."),
+    on_duplicate: str = typer.Option(
+        "ask",
+        "--on-duplicate",
+        help="when this recording already has a note there: ask (report it, write nothing) | "
+        "skip | overwrite (main vault only) | new",
+    ),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """Run a template over a recording and file the result in a vault.
@@ -2307,7 +2344,13 @@ def vault_compose_cmd(
     raw source: the verbatim transcript under `## Original Content` with the
     summary above it, landed in `10. Raw Sources/`.
     """
-    from core.vault_compose import compose
+    from core.vault_compose import WIKI_OVERWRITE_REFUSAL, compose
+    from core.vault_send import ON_DUPLICATE, is_wiki_target, resolve_vault
+
+    if on_duplicate not in ON_DUPLICATE:
+        raise typer.BadParameter(f"--on-duplicate must be one of: {', '.join(ON_DUPLICATE)}")
+    if on_duplicate == "overwrite" and is_wiki_target(to, resolve_vault(to)):
+        raise typer.BadParameter(WIKI_OVERWRITE_REFUSAL)
 
     result = compose(
         file_id,
@@ -2318,13 +2361,23 @@ def vault_compose_cmd(
         model=model,
         model_id=model_id,
         dry_run=dry_run,
+        on_duplicate=on_duplicate,
     )
     if json_out:
         _emit_json(result.as_dict())
         return
+    if result.status == "duplicate":
+        console.print(
+            f"[yellow]already in the vault[/yellow]: {result.path} — "
+            "re-run with --on-duplicate skip|overwrite|new"
+        )
+        raise typer.Exit(1)
     if result.status != "ok":
         console.print(f"[red]{result.status}[/red] — {result.detail}")
         raise typer.Exit(1)
+    if result.action == "skipped":
+        console.print(f"[yellow]skipped[/yellow] — already in the vault → {result.path}")
+        return
     console.print(f"[green]ok[/green] {result.detail}")
     if result.path:
         console.print(f"  {result.path}")
@@ -2333,7 +2386,11 @@ def vault_compose_cmd(
 @safe_command(name="vault-send")
 def vault_send_cmd(
     file_id: str,
-    to: str = typer.Option("main", "--to", help="main | wiki | <absolute vault path>"),
+    to: str = typer.Option(
+        "main",
+        "--to",
+        help="main | <absolute vault path>. The wiki takes raw sources: use vault-compose --to wiki.",
+    ),
     dest: str = typer.Option(
         "",
         "--dest",
@@ -2360,6 +2417,12 @@ def vault_send_cmd(
         False, "--with-transcript", help="append the full transcript to the note"
     ),
     open_note: bool = typer.Option(False, "--open", help="open the note in Obsidian after writing"),
+    on_duplicate: str = typer.Option(
+        "ask",
+        "--on-duplicate",
+        help="when this recording already has a note in the vault: ask (report it, write "
+        "nothing) | skip | overwrite | new",
+    ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit JSON and always exit 0; callers check the status field."
     ),
@@ -2369,29 +2432,79 @@ def vault_send_cmd(
     Examples:
       plaud vault-send <id>                          # integrated → main vault 00. Inbox
       plaud vault-send <id> --dest meetings          # → 60. Collections/63. Meetings
-      plaud vault-send <id> --to wiki                # → CMDS_LLM_Wiki/00. Inbox
       plaud vault-send <id> --via claude             # claude -p가 CMDS 컨벤션으로 정형화
       plaud vault-send <id> --via claude-window      # Terminal의 Claude Code가 직접 파일링
+
+    The wiki is not a target: it takes raw sources, written by
+    `plaud vault-compose <id> --to wiki --template <note-...> --collection-purpose "..."`.
     """
     from dataclasses import asdict as _asdict
 
+    from rich.markup import escape
+
     from core.vault_send import (
         MEETINGS_DEST,
+        ON_DUPLICATE,
+        WIKI_SEND_REFUSAL,
+        VaultSendResult,
         build_filing_prompt,
+        early_duplicate_result,
         resolve_content,
         resolve_vault,
+        send_destination,
+        send_duplicates,
+        sends_into_wiki,
+        unique_note_path,
         vault_send,
     )
 
+    if on_duplicate not in ON_DUPLICATE:
+        raise typer.BadParameter(f"--on-duplicate must be one of: {', '.join(ON_DUPLICATE)}")
     if dest.strip().lower() in ("meetings", "meeting"):
         dest = MEETINGS_DEST
+
+    def report(result: VaultSendResult) -> None:
+        if result.status == "ok" and open_note and result.obsidian_url:
+            subprocess.run(["open", result.obsidian_url], check=False)
+        if json_out:
+            _emit_json(_asdict(result))
+            return
+        if result.status == "ok":
+            if result.action == "skipped":
+                console.print(f"[yellow]skipped[/yellow] — already in the vault → {result.path}")
+            elif result.action == "overwritten":
+                console.print(f"[green]overwrote[/green] → {result.path}")
+            else:
+                console.print(
+                    f"[green]sent[/green] ({result.content}, via {result.via}) → {result.path}"
+                )
+            return
+        if result.status == "duplicate":
+            console.print(
+                f"[yellow]already in the vault[/yellow]: {result.path} — "
+                "re-run with --on-duplicate skip|overwrite|new"
+            )
+            raise typer.Exit(1)
+        console.print(f"[red]vault-send failed[/red] ({result.status}) — {result.detail}")
+        raise typer.Exit(1)
 
     if via == "claude-window":
         # Interactive filing: Claude Code in a Terminal window writes the note
         # itself, so there is no deterministic output path to report.
-        from core.metadata import build_recording_snapshot
+        from core.metadata import build_recording_snapshot, recorded_date
 
+        if on_duplicate == "overwrite":
+            raise typer.BadParameter("overwrite is not supported with --via claude-window")
         vault_path = resolve_vault(to)
+        # Same refusal as vault_send — target and effective --dest folder —
+        # before the database or a Terminal opens.
+        if sends_into_wiki(to, vault_path, dest):
+            if json_out:
+                refused = VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, via=via)
+                _emit_json(_asdict(refused))
+                return
+            console.print(f"[red]wiki_unsupported[/red] — {escape(WIKI_SEND_REFUSAL)}")
+            raise typer.Exit(1)
         if vault_path is None:
             console.print("[red]vault not configured[/red] — run: uv run plaud config-vault <path>")
             raise typer.Exit(1)
@@ -2403,6 +2516,25 @@ def vault_send_cmd(
         if resolved is None:
             console.print(f"[red]no '{content}' output found[/red] — generate one first")
             raise typer.Exit(1)
+        date = recorded_date(snapshot)
+        existing = send_duplicates(
+            storage,
+            file_id,
+            vault=vault_path,
+            dest=dest,
+            title=snapshot["title"],
+            date=date,
+        )
+        early = early_duplicate_result(
+            existing, on_duplicate, vault=vault_path, content=resolved.kind, via=via
+        )
+        if early is not None:
+            report(early)
+            return
+        # Claude writes the file itself, so it gets the exact unused name the
+        # direct sender would pick, and — for `new` — the notes to leave alone.
+        folder = send_destination(vault_path, dest)
+        filename = unique_note_path(folder, date.replace("-", ""), snapshot["title"]).name
         prompt = build_filing_prompt(
             vault=vault_path,
             dest=dest.strip() or "00. Inbox",
@@ -2410,6 +2542,10 @@ def vault_send_cmd(
             file_id=file_id,
             resolved=resolved,
             with_transcript=with_transcript,
+            filename=filename,
+            keep=[
+                str(Path(e["path"]).resolve().relative_to(vault_path.resolve())) for e in existing
+            ],
         )
         launch_claude(prompt, cwd=vault_path)
         if json_out:
@@ -2429,17 +2565,9 @@ def vault_send_cmd(
         with_transcript=with_transcript,
         ai_model=ai_model,
         ai_model_id=ai_model_id,
+        on_duplicate=on_duplicate,
     )
-    if result.status == "ok" and open_note and result.obsidian_url:
-        subprocess.run(["open", result.obsidian_url], check=False)
-    if json_out:
-        _emit_json(_asdict(result))
-        return
-    if result.status == "ok":
-        console.print(f"[green]sent[/green] ({result.content}, via {result.via}) → {result.path}")
-        return
-    console.print(f"[red]vault-send failed[/red] ({result.status}) — {result.detail}")
-    raise typer.Exit(1)
+    report(result)
 
 
 @safe_command(name="audio-url")
@@ -2725,7 +2853,10 @@ def cmds_summarize(
     file_id: str,
     model: str = typer.Option("claude", help=MODEL_HELP),
     model_id: str = typer.Option("", help="Optional provider API model id override."),
-    template: str = typer.Option("default", help="template name"),
+    template: str = typer.Option(
+        "note-general",
+        help="Summary template. Integrate templates (default, integrated) run via cmds-integrate.",
+    ),
     use_cmds_transcript: bool = typer.Option(
         True,
         help="Use CMDS (ElevenLabs) transcript when available; falls back to Plaud transcript.",
@@ -2735,7 +2866,9 @@ def cmds_summarize(
     import json as _json
     from core.summarize import model_available, model_unavailable_message, summarize
     from core.paths import transcripts_dir
+    from core.templates import KIND_SUMMARY
 
+    _warn_if_deprecated(_require_template(template, KIND_SUMMARY))
     if not model_available(model):
         console.print(f"[red]{model} unavailable[/red] — {model_unavailable_message(model)}")
         raise typer.Exit(1)
@@ -2828,7 +2961,9 @@ def cmds_integrate(
     import json as _json
     from core.integrate import integrate
     from core.summarize import model_available, model_unavailable_message
+    from core.templates import KIND_INTEGRATED
 
+    _require_template(template, KIND_INTEGRATED)
     if not model_available(model):
         console.print(f"[red]{model} unavailable[/red] — {model_unavailable_message(model)}")
         raise typer.Exit(1)
@@ -2902,12 +3037,28 @@ def cmds_integrate(
 
 
 @safe_command(name="templates")
-def templates_list() -> None:
-    """List available prompt templates."""
+def templates_list(
+    json_out: bool = typer.Option(False, "--json", help="Print the templates as JSON."),
+) -> None:
+    """List prompt templates: name, kind, deprecation, description."""
+    from rich.markup import escape
+
     from core.templates import list_templates
 
-    for t in list_templates():
-        console.print(f"  [bold]{t.name}[/bold]  [dim]{t.description}[/dim]")
+    items = sorted(list_templates(), key=lambda t: t.name)
+    if json_out:
+        _emit_json([t.as_dict() for t in items])
+        return
+    for t in items:
+        marker = ""
+        if t.deprecated:
+            target = f" -> {escape(t.replaced_by)}" if t.replaced_by else ""
+            marker = f"[yellow]DEPRECATED{target}[/yellow]  "
+        console.print(
+            f"  [bold]{escape(t.name)}[/bold]  {escape(t.kind)}  "
+            f"{marker}[dim]{escape(t.description)}[/dim]",
+            soft_wrap=True,
+        )
 
 
 @safe_command(name="models")
@@ -2935,21 +3086,37 @@ def models_list(
 
 
 @safe_command(name="template-show")
-def template_show(name: str) -> None:
-    from core.templates import load_template
-
-    t = load_template(name)
-    console.print(t.body)
+def template_show(
+    name: str,
+    json_out: bool = typer.Option(False, "--json", help="Print metadata and body as JSON."),
+) -> None:
+    """Print a template's body exactly as stored."""
+    t = _require_template(name)
+    if json_out:
+        _emit_json({**t.as_dict(), "body": t.body})
+        return
+    sys.stdout.write(t.body)
 
 
 @safe_command(name="template-save")
 def template_save(
     name: str,
-    description: str = typer.Option("", help="Short description"),
+    description: str | None = typer.Option(None, help="Short description (kept when omitted)"),
+    kind: str | None = typer.Option(
+        None, help="summary | integrated | internal (kept when omitted)"
+    ),
     body_file: Path = typer.Option(None, help="Read body from file (else stdin)"),
 ) -> None:
-    from core.templates import save_template
+    from rich.markup import escape
 
+    from core.templates import save_template, validate_kind
+
+    if kind is not None:
+        try:
+            validate_kind(kind)
+        except ValueError as exc:
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            raise typer.Exit(1) from None
     if body_file:
         body = body_file.read_text(encoding="utf-8")
     else:
@@ -2959,7 +3126,11 @@ def template_save(
     if not body.strip():
         console.print("[red]empty body[/red]")
         raise typer.Exit(1)
-    path = save_template(name, body, description=description)
+    try:
+        path = save_template(name, body, description=description, kind=kind)
+    except ValueError as exc:  # a value the front matter cannot hold; nothing written
+        console.print(f"[red]{escape(str(exc))}[/red]", soft_wrap=True)
+        raise typer.Exit(1) from None
     console.print(f"[green]saved[/green] {path}")
 
 
@@ -2989,7 +3160,9 @@ def slot_add(
     model_id: str = typer.Option("", help="Optional provider API model id override."),
 ) -> None:
     from core.slots import load_slots, save_slots, Slot
+    from core.templates import KIND_INTEGRATED, KIND_SUMMARY
 
+    _warn_if_deprecated(_require_template(template, KIND_SUMMARY, KIND_INTEGRATED))
     slots = load_slots()
     slots = [s for s in slots if s.name != name]
     slots.append(Slot(name=name, model=model, template=template, model_id=model_id))
@@ -3266,7 +3439,7 @@ def config_vault(path: str = "") -> None:
 
 @safe_command(name="config-wiki-vault")
 def config_wiki_vault(path: str = "") -> None:
-    """Set the wiki (LLM satellite) vault path for `vault-send --to wiki`.
+    """Set the wiki (LLM satellite) vault path for `vault-compose --to wiki`.
 
     Empty clears the override; the sibling `CMDS_LLM_Wiki` directory next to
     the main vault is then used when it exists.

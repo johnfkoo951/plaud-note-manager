@@ -1,6 +1,7 @@
 ---
 name: lecture
 description: Lecture summary — concepts, examples, takeaways for revision.
+kind: summary
 ---
 
 다음 강의 전사본을 학습 노트 형식으로 정리해주세요.

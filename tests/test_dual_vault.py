@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from core import dual_vault as dv
-from core.models import FileContent, PlaudFile, SummaryBlock
+from core.models import FileContent, PlaudFile, SummaryBlock, TranscriptSegment
 from core.storage import Storage
 
 NOW = int(time.time())
@@ -15,7 +15,7 @@ NOW = int(time.time())
 
 @pytest.fixture()
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    from core import app_config
+    from core import app_config, vault_index
     import core.paths as paths_mod
 
     vault = tmp_path / "vault"
@@ -23,6 +23,8 @@ def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(app_config, "obsidian_vault", lambda: vault)
     monkeypatch.setattr(app_config, "author", lambda: "구요한")
     monkeypatch.setattr(paths_mod, "INTEGRATED_DIR", tmp_path / "integrated")
+    # note_context looks up related notes, which opens the real data/plaud.db.
+    monkeypatch.setattr(vault_index, "related_notes", lambda *a, **k: [])
 
     storage = Storage(tmp_path / "plaud.db")
     storage.upsert_file(
@@ -73,6 +75,54 @@ def test_lands_in_plaud_lane_with_conventions(env) -> None:
     # note_references links the vault file back to the recording.
     refs = storage.list_note_references("f1")
     assert any(r["kind"] == "dual-transcript" for r in refs)
+
+
+def _unmapped(storage: Storage, plaud_speakers: list[str]) -> None:
+    """State after `dual --continue-unmapped`: no confirmed map, so the CMDS
+    transcript still carries the diarizer's own labels."""
+    storage.save_content(
+        FileContent(
+            file_id="f1",
+            title="결혼식 계획 논의",
+            transcript=[
+                TranscriptSegment(start_time=i, end_time=i + 1, speaker=s, content="…")
+                for i, s in enumerate(plaud_speakers)
+            ],
+        ),
+        now=NOW,
+    )
+    storage.save_cmds_transcript(
+        file_id="f1",
+        model="scribe",
+        language="ko",
+        text="…",
+        segments_json=json.dumps([{"speaker": "speaker_0"}, {"speaker": "speaker_1"}]),
+        now=NOW,
+    )
+    storage.upsert_dual("f1", status="vault-ready", speaker_map=json.dumps({}), now=NOW)
+
+
+def test_unmapped_dual_note_keeps_snapshot_names_and_drops_placeholders(env) -> None:
+    storage, _ = env
+    _unmapped(storage, ["홍길동", "Speaker 2"])
+    result = dv.send_dual_to_vault(storage, "f1", model="gpt-5.5")
+    assert result.status == "ok"
+    text = Path(result.path).read_text(encoding="utf-8")
+    # Plaud already knew this name; the author (구요한) is not a speaker here.
+    assert '"[[홍길동]]"' in text
+    assert "> 참석자: [[홍길동]]\n" in text
+    for label in ("[[speaker_0]]", "[[speaker_1]]", "[[Speaker 2]]"):
+        assert label not in text
+
+
+def test_unmapped_dual_note_with_only_placeholders_lists_no_speakers(env) -> None:
+    storage, _ = env
+    _unmapped(storage, ["Speaker 1"])
+    result = dv.send_dual_to_vault(storage, "f1", model="gpt-5.5")
+    assert result.status == "ok"
+    text = Path(result.path).read_text(encoding="utf-8")
+    assert "\nspeakers:" not in text
+    assert "참석자" not in text
 
 
 def test_duplicate_send_gets_numbered_filename(env) -> None:

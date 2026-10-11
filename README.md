@@ -153,14 +153,17 @@ CMDS frontmatter 노트를 만들어 메인 볼트 `00. Inbox`에 넣습니다 (
 ```bash
 uv run plaud vault-send <id>                    # 통합본 → 메인 볼트 00. Inbox (즉시)
 uv run plaud vault-send <id> --dest meetings    # → 60. Collections/63. Meetings
-uv run plaud vault-send <id> --to wiki          # → CMDS_LLM_Wiki 위성 볼트
 uv run plaud vault-send <id> --via claude       # claude -p 가 CMDS 컨벤션으로 정형화 후 저장
 uv run plaud vault-send <id> --via claude-window  # Terminal의 Claude Code가 스킬로 직접 파일링
+uv run plaud vault-compose <id> --to wiki --template note-lecture \
+  --collection-purpose "강의 설계 재사용"        # → CMDS_LLM_Wiki 10. Raw Sources (원문 보존)
 ```
 
 `--via direct`(기본)는 AI 없이 즉시 조립, `--via claude`는 headless 정형화
 (`--ai-model codex|gemini|grok` 선택 가능), `--with-transcript`로 전사본 포함,
-`--open`으로 저장 즉시 Obsidian에서 열기. wiki 볼트 경로는 메인 볼트 옆
+`--open`으로 저장 즉시 Obsidian에서 열기. wiki 볼트는 raw source만 받으므로
+`vault-send`가 아니라 `vault-compose --to wiki`로 보내며, 수집 목적
+(`--collection-purpose`)이 필요합니다. wiki 볼트 경로는 메인 볼트 옆
 `CMDS_LLM_Wiki`를 자동 인식하며 `plaud config-wiki-vault`로 바꿀 수 있습니다.
 앱에서는 Work Sidebar의 **Send to Vault** 메뉴(모드/목적지 선택), 각 슬롯
 카드의 ✈ 버튼(그 결과물만 전송), ⌘K 커맨드 팔레트에서 사용합니다.
