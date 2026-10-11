@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,46 @@ def test_integrate_accepts_the_dual_template(calls, tmp_path: Path) -> None:
     paths = integrate(file_id="f1", model="claude", template_name=DUAL_TEMPLATE, **INPUTS)
     assert len(calls) == 1
     assert paths["summary"].read_text(encoding="utf-8").endswith("s")
+
+
+def test_failure_writes_error_sidecar_and_reraises(
+    calls, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from core.summarize import ModelFailed
+
+    def quota(*_a, **_k):
+        raise ModelFailed("claude CLI failed (exit 1): ERROR: usage limit\nreset at 5pm")
+
+    monkeypatch.setattr(integrate_mod, "run_model", quota)
+    with pytest.raises(ModelFailed, match="usage limit"):
+        integrate(
+            file_id="f1",
+            model="claude",
+            template_name=DUAL_TEMPLATE,
+            model_id="claude-x",
+            **INPUTS,
+        )
+    sidecar = paths_mod.integrated_error_path("f1", model="claude-x", template=DUAL_TEMPLATE)
+    outputs = paths_mod.integrated_paths("f1", model="claude-x", template=DUAL_TEMPLATE)
+    # Same stem as the slot's outputs, so the app finds it beside them.
+    assert sidecar.name == outputs["all"].name.removesuffix(".md") + ".error.json"
+    data = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert data["reason"] == "claude CLI failed (exit 1): ERROR: usage limit reset at 5pm"
+    assert (data["provider"], data["model"], data["template"]) == (
+        "claude",
+        "claude-x",
+        DUAL_TEMPLATE,
+    )
+    assert isinstance(data["at"], int)
+    assert list(sidecar.parent.glob("*.md")) == []
+
+
+def test_success_removes_a_stale_error_sidecar(calls, tmp_path: Path) -> None:
+    sidecar = paths_mod.integrated_error_path("f1", model="claude", template=DUAL_TEMPLATE)
+    sidecar.write_text('{"reason": "old"}', encoding="utf-8")
+    paths = integrate(file_id="f1", model="claude", template_name=DUAL_TEMPLATE, **INPUTS)
+    assert not sidecar.exists()
+    assert paths["summary"].is_file()
 
 
 def test_split_integrated_explicit_markers() -> None:

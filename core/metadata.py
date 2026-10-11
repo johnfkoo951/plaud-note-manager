@@ -15,6 +15,7 @@ from . import app_config
 from .paths import integrated_dir
 from .storage import Storage
 from .classification import classify_snapshot
+from .summarize import ModelCallError
 from .tags import normalize_tags
 from .templates import load_template
 
@@ -30,6 +31,10 @@ CLAUDE_SKILL_CONTEXT_FILES = [
     Path.home() / ".claude/skills/cmds-doc-formatter/SKILL.md",
     Path.home() / ".claude/skills/obsidian-yaml-frontmatter/SKILL.md",
 ]
+
+
+class MetadataUnavailable(ModelCallError):
+    """The model answered, but with no metadata JSON object in the reply."""
 
 
 def generate_note_metadata(
@@ -63,6 +68,10 @@ def generate_note_metadata(
         )
         response = run_model(model, prompt, model_id=model_id or None)
         metadata = _extract_json_object(response)
+        if not metadata:
+            # Stored as source 'ai' and stamped with the source hash, an empty
+            # answer was never retried; fail before anything is written.
+            raise MetadataUnavailable("model reply contained no usable metadata JSON")
         metadata["model"] = model
         metadata["model_id"] = model_id or ""
         source = "ai"
@@ -81,6 +90,8 @@ def generate_note_metadata(
     merged["classification_reason"] = classification.reason
     merged["classification_source"] = classification.source
     merged["classification_alternatives"] = list(classification.alternatives)
+    merged["classification_llm_status"] = assisted.llm_status
+    merged["classification_llm_error"] = assisted.llm_error
     merged["cmds"] = classification.cmds
     merged["index"] = classification.index
     merged["vault_dest"] = classification.vault_dest

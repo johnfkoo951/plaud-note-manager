@@ -11,7 +11,9 @@ through it). Policy, per PLAN-v0.6:
 - Idempotent: a sha256 over the source text is stored in
   metadata_json["auto_meta"]; unchanged sources are skipped.
 - Failures back off exponentially (1h · 2^(attempts-1), capped at 24h) so a
-  broken provider can't stall every sync.
+  broken provider can't stall every sync. A provider failure (quota, login,
+  timeout) also stops the batch, and every failure's one-line reason is kept
+  in auto_meta["last_error"] for the app.
 """
 
 from __future__ import annotations
@@ -37,8 +39,9 @@ class AutoMetadataReport:
     unchanged: list[str] = field(default_factory=list)
     backed_off: list[str] = field(default_factory=list)
     failed: dict[str, str] = field(default_factory=dict)
-    remaining: int = 0  # eligible but over the batch limit
+    remaining: int = 0  # eligible but over the batch limit, or left by `stopped`
     aborted: str = ""  # non-empty = nothing ran (e.g. model CLI missing)
+    stopped: str = ""  # non-empty = cut short after a provider failure (its reason)
 
     def summary(self) -> str:
         if self.aborted:
@@ -52,6 +55,8 @@ class AutoMetadataReport:
             parts.append(f"failed {len(self.failed)}")
         if self.remaining:
             parts.append(f"remaining {self.remaining}")
+        if self.stopped:
+            parts.append(f"stopped: {self.stopped}")
         return f"auto-metadata ({self.model}): " + ", ".join(parts)
 
 
@@ -93,7 +98,7 @@ def run_auto_metadata(
     dry_run: bool = False,
 ) -> AutoMetadataReport:
     from .metadata import generate_note_metadata
-    from .summarize import model_available
+    from .summarize import failure_reason, is_provider_failure, model_available
 
     model = model or app_config.metadata_model()
     limit = limit if limit is not None else app_config.auto_metadata_limit()
@@ -130,7 +135,8 @@ def run_auto_metadata(
         todo.append(row)
 
     report.remaining = max(0, len(todo) - limit)
-    for row in todo[:limit]:
+    batch = todo[:limit]
+    for index, row in enumerate(batch):
         file_id = row["file_id"]
         if dry_run:
             report.generated.append(file_id)
@@ -138,8 +144,15 @@ def run_auto_metadata(
         try:
             merged = generate_note_metadata(storage, file_id, model=model)
         except Exception as exc:  # provider timeout, JSON parse, etc.
-            report.failed[file_id] = str(exc)
-            _record_attempt(storage, row, now=int(time.time()))
+            reason = failure_reason(exc)
+            report.failed[file_id] = reason
+            _record_attempt(storage, row, now=int(time.time()), reason=reason)
+            if is_provider_failure(exc):
+                # Quota, login or timeout: the next file would fail the same
+                # way, so leave the rest of the batch for a later sync.
+                report.stopped = reason
+                report.remaining += len(batch) - index - 1
+                break
             continue
         merged["auto_meta"] = {
             "source_hash": source_hash(row),
@@ -151,8 +164,12 @@ def run_auto_metadata(
     return report
 
 
-def _record_attempt(storage: Storage, row: Any, *, now: int) -> None:
-    """Persist a failed attempt without clobbering any existing metadata."""
+def _record_attempt(storage: Storage, row: Any, *, now: int, reason: str) -> None:
+    """Persist a failed attempt and its reason without clobbering metadata.
+
+    The app reads `last_error` / `last_error_at`; a later success rewrites
+    auto_meta without them.
+    """
     existing: dict[str, Any] = {}
     if row["metadata_json"]:
         try:
@@ -165,5 +182,7 @@ def _record_attempt(storage: Storage, row: Any, *, now: int) -> None:
     info = dict(info) if isinstance(info, dict) else {}
     info["attempts"] = int(info.get("attempts") or 0) + 1
     info["last_attempt"] = now
+    info["last_error"] = reason
+    info["last_error_at"] = now
     existing["auto_meta"] = info
     storage.upsert_note_metadata(file_id=row["file_id"], metadata=existing, now=now)

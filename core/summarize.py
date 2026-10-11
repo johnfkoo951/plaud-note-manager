@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -61,12 +62,71 @@ CLI_STRIP_ENV: dict[str, tuple[str, ...]] = {
 }
 
 
-class ModelNotInstalled(RuntimeError):
+class ModelCallError(RuntimeError):
+    """A model call gave no usable reply. Its text is safe to show and store."""
+
+
+class ModelNotInstalled(ModelCallError):
     pass
 
 
-class ModelFailed(RuntimeError):
+class ModelFailed(ModelCallError):
     pass
+
+
+class PromptTooLarge(ModelFailed):
+    """This file's prompt can't be passed to the CLI — not a provider failure."""
+
+
+def failure_reason(exc: BaseException, *, limit: int = 400) -> str:
+    """Why a call failed, as one stable line of at most `limit` characters.
+
+    The same text goes to the CLI's error line, the DB and the integrate
+    sidecar. A transport or subprocess error is named by class only: its text
+    quotes the request URL (the Gemini key rides in it) or the argv (the whole
+    prompt, for the PROMPT_AS_ARG CLIs).
+    """
+    name = type(exc).__name__
+    if isinstance(exc, ModelCallError):
+        text = str(exc)
+    elif isinstance(exc, httpx.HTTPError):
+        text = f"network error: {name}"
+    elif isinstance(exc, subprocess.SubprocessError):
+        text = name
+    else:
+        text = f"{name}: {exc}" if str(exc) else name
+    text = " ".join(text.split()) or name
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def is_provider_failure(exc: BaseException) -> bool:
+    """True when the provider itself failed, so the next call would fail too.
+
+    Quota, login, timeout, an empty reply or a missing CLI all qualify; a
+    prompt too large for one file's argv is that file's problem.
+    """
+    return isinstance(exc, (ModelFailed, ModelNotInstalled)) and not isinstance(exc, PromptTooLarge)
+
+
+@dataclass
+class ProviderBreaker:
+    """Stops further model calls within one run once the provider has failed.
+
+    It lives for a single command; nothing is remembered across runs. The
+    first reason wins, because it is the one that says what went wrong.
+    """
+
+    reason: str = ""
+
+    @property
+    def tripped(self) -> bool:
+        return bool(self.reason)
+
+    def trip(self, reason: str) -> None:
+        if not self.reason:
+            self.reason = reason or "provider call failed"
 
 
 # -------- public entry --------
@@ -111,6 +171,11 @@ def _resolve_binary(model: str, name: str) -> str | None:
 
 
 def model_available(model: str) -> bool:
+    """Whether the CLI or the API key exists — not whether it works.
+
+    Existence-only by design: auth, quota and tier failures surface from the
+    call itself as a ModelCallError with the provider's reason.
+    """
     backend = app_config.backend_for(model)
     if backend == "cli":
         cmd = MODEL_COMMANDS.get(model)
@@ -149,26 +214,37 @@ def run_model(
     if backend == "cli":
         return _run_cli(model, prompt, timeout=timeout)
     if backend == "api":
-        return _run_api(model, prompt, model_id=model_id, timeout=timeout)
+        try:
+            reply = _run_api(model, prompt, model_id=model_id, timeout=timeout)
+        except httpx.HTTPError as exc:
+            # The request URL can carry the key (Gemini); name the error only.
+            raise ModelFailed(f"{model} API request failed: {type(exc).__name__}") from None
+        if not reply.strip():
+            raise ModelFailed(f"{model} API returned an empty reply")
+        return reply
     raise ModelNotInstalled(f"unknown backend: {backend}")
 
 
 # -------- CLI mode --------
 
 
-def _cli_reason(proc: subprocess.CompletedProcess[str]) -> str:
+def _cli_reason(proc: subprocess.CompletedProcess[str], *, prompt: str = "") -> str:
     """The part of a failed CLI's output that says why it failed.
 
     Vendor CLIs print a banner (version, workdir, model, sandbox) and echo the
     prompt before they fail, and the real cause — an exhausted quota, a revoked
     token — is the LAST thing they write. Taking the head of stderr therefore
     captured the banner and truncated the reason away, so read from the tail and
-    prefer lines that look like an error.
+    prefer lines that look like an error. Lines of the echoed `prompt` are
+    dropped first: the reason is stored, and the transcript must not be.
     """
     text = (proc.stderr or "").strip() or (proc.stdout or "").strip()
     if not text:
         return "(no output)"
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    echoed = {ln.strip() for ln in prompt.splitlines()}
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and ln.strip() not in echoed]
+    if not lines:
+        return "(no reason given)"
     flagged = [
         ln
         for ln in lines
@@ -201,7 +277,7 @@ def _run_cli(model: str, prompt: str, *, timeout: int) -> str:
     env = None
     if model in PROMPT_AS_ARG:
         if len(prompt.encode("utf-8")) > PROMPT_ARG_LIMIT:
-            raise ModelFailed(
+            raise PromptTooLarge(
                 f"prompt too large for the {model} CLI ({len(prompt.encode('utf-8'))} bytes "
                 f"> {PROMPT_ARG_LIMIT}); switch this slot to another backend for this file."
             )
@@ -210,17 +286,27 @@ def _run_cli(model: str, prompt: str, *, timeout: int) -> str:
     strip = CLI_STRIP_ENV.get(model)
     if strip:
         env = {k: v for k, v in os.environ.items() if k not in strip}
-    proc = subprocess.run(
-        argv,
-        input=stdin_input,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        env=env,
-    )
+    try:
+        proc = subprocess.run(
+            argv,
+            input=stdin_input,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        # Its text quotes argv, which is the whole prompt for PROMPT_AS_ARG.
+        raise ModelFailed(f"{model} CLI timed out after {timeout}s") from None
     if proc.returncode != 0:
-        raise ModelFailed(f"{model} CLI failed (exit {proc.returncode}): {_cli_reason(proc)}")
-    return proc.stdout.strip()
+        reason = _cli_reason(proc, prompt=prompt)
+        raise ModelFailed(f"{model} CLI failed (exit {proc.returncode}): {reason}")
+    reply = proc.stdout.strip()
+    if not reply:
+        # Exit 0 with nothing on stdout (a quota notice on stderr, typically)
+        # is not an answer; caching it would stop the file being retried.
+        raise ModelFailed(f"{model} CLI returned no output: {_cli_reason(proc, prompt=prompt)}")
+    return reply
 
 
 # -------- API mode --------

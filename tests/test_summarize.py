@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -203,3 +204,111 @@ def test_cli_reason_handles_a_silent_failure() -> None:
 
 def test_cli_reason_is_bounded() -> None:
     assert len(summarize._cli_reason(_Proc(stderr="error: " + "x" * 5000))) <= 400
+
+
+# -------- why a call failed: runner rules and the shared reason --------
+
+
+@pytest.fixture()
+def fake_cli(monkeypatch: pytest.MonkeyPatch):
+    """`_run_cli` against a fake subprocess; `result` sets what it returns."""
+    state: dict = {"result": None, "raise": None}
+
+    def run(argv, *_a, **_k):
+        if state["raise"] is not None:
+            raise state["raise"]
+        return state["result"]
+
+    monkeypatch.setattr(summarize.subprocess, "run", run)
+    monkeypatch.setattr(summarize, "_resolve_binary", lambda model, name: f"/fake/{name}")
+    monkeypatch.setattr(summarize.app_config, "backend_for", lambda m: "cli")
+    return state
+
+
+class _Completed:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def test_run_cli_empty_stdout_is_a_failure_with_the_stderr_reason(fake_cli) -> None:
+    fake_cli["result"] = _Completed(0, "", "ERROR: You've hit your usage limit.")
+    with pytest.raises(summarize.ModelFailed, match="returned no output.*usage limit"):
+        summarize.run_model("codex", "prompt")
+
+
+def test_run_cli_timeout_is_reported_without_the_prompt(fake_cli) -> None:
+    fake_cli["raise"] = subprocess.TimeoutExpired(
+        cmd=["/fake/grok", "-p", "SECRET TRANSCRIPT"], timeout=10
+    )
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model("grok", "SECRET TRANSCRIPT", timeout=10)
+    assert "timed out after 10s" in str(exc.value)
+    assert "SECRET TRANSCRIPT" not in summarize.failure_reason(exc.value)
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__
+
+
+def test_an_echoed_prompt_never_becomes_the_reason(fake_cli) -> None:
+    # Codex echoes the prompt into stderr; with no error-looking line the tail
+    # of stderr used to be the prompt itself.
+    prompt = "당신은 녹음 전사의 화자 식별 전문가입니다.\n비밀 전사 내용 한 줄"
+    banner = "OpenAI Codex v0.153.4\n--------\nuser\n"
+    fake_cli["result"] = _Completed(1, "", banner + prompt)
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model("codex", prompt)
+    reason = summarize.failure_reason(exc.value)
+    assert "비밀 전사" not in reason and "화자 식별" not in reason
+
+
+def test_api_empty_reply_and_transport_errors_are_failures(monkeypatch) -> None:
+    import httpx
+
+    monkeypatch.setattr(summarize.app_config, "backend_for", lambda m: "api")
+    monkeypatch.setattr(summarize, "_run_api", lambda *a, **k: "  ")
+    with pytest.raises(summarize.ModelFailed, match="empty reply"):
+        summarize.run_model("claude", "p")
+
+    def unreachable(*_a, **_k):
+        raise httpx.ConnectError("https://x.test/v1?key=SECRET-KEY")
+
+    monkeypatch.setattr(summarize, "_run_api", unreachable)
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model("gemini", "p")
+    assert "ConnectError" in str(exc.value)
+    assert "SECRET-KEY" not in summarize.failure_reason(exc.value)
+
+
+def test_failure_reason_is_one_bounded_stable_line() -> None:
+    long = summarize.ModelFailed("first line\n" + "x " * 600 + "\nlast")
+    reason = summarize.failure_reason(long)
+    assert "\n" not in reason and len(reason) <= 400
+    assert reason == summarize.failure_reason(long)
+    assert summarize.failure_reason(RuntimeError("boom")) == "RuntimeError: boom"
+
+
+def test_failure_reason_never_quotes_a_transport_error() -> None:
+    import httpx
+
+    reason = summarize.failure_reason(httpx.ConnectError("https://x.test/?key=SECRET-KEY"))
+    assert reason == "network error: ConnectError"
+    # A subprocess error that reaches a call site without the runner quotes argv.
+    leaked = subprocess.TimeoutExpired(cmd=["grok", "-p", "SECRET TRANSCRIPT"], timeout=1)
+    assert summarize.failure_reason(leaked) == "TimeoutExpired"
+
+
+def test_provider_failures_and_the_hierarchy() -> None:
+    too_large = summarize.PromptTooLarge("prompt too large")
+    assert isinstance(too_large, summarize.ModelFailed)
+    assert isinstance(summarize.ModelFailed("x"), summarize.ModelCallError)
+    assert isinstance(summarize.ModelNotInstalled("x"), summarize.ModelCallError)
+    assert summarize.is_provider_failure(summarize.ModelFailed("quota"))
+    assert summarize.is_provider_failure(summarize.ModelNotInstalled("gone"))
+    assert not summarize.is_provider_failure(too_large)
+    assert not summarize.is_provider_failure(RuntimeError("other"))
+
+
+def test_breaker_keeps_the_first_reason() -> None:
+    breaker = summarize.ProviderBreaker()
+    assert not breaker.tripped
+    breaker.trip("usage limit")
+    breaker.trip("later")
+    assert (breaker.tripped, breaker.reason) == (True, "usage limit")

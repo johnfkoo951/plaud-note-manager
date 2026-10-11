@@ -144,6 +144,67 @@ def test_folder_name_matching_tolerates_missing_numeric_prefix() -> None:
     assert out.classification.folder_name == "30. Jazz & Music"
 
 
+def _assist(run_model, *, available=True, breaker=None, title="2026-05-29 14:30:00"):
+    return auto_folder.classify_with_assist(
+        snap(title),
+        threshold=0.6,
+        use_llm=True,
+        run_model=run_model,
+        model_available=lambda m: available,
+        breaker=breaker,
+    )
+
+
+def test_empty_reply_is_a_failure_not_a_verdict() -> None:
+    out = _assist(lambda *a, **k: "")
+    assert out.used_llm is False
+    assert out.llm_status == "failed"
+    assert "no usable" in out.llm_error
+    assert out.classification == classify_snapshot(snap("2026-05-29 14:30:00"))
+
+
+def test_breaker_skips_llm_after_a_provider_failure() -> None:
+    from core import summarize
+
+    calls: list[str] = []
+
+    def quota(*_a, **_k):
+        calls.append("call")
+        raise summarize.ModelFailed("codex CLI failed (exit 1): ERROR: usage limit")
+
+    breaker = summarize.ProviderBreaker()
+    first = _assist(quota, breaker=breaker)
+    assert first.llm_status == "failed" and "usage limit" in first.llm_error
+    assert breaker.tripped
+    second = _assist(quota, breaker=breaker)
+    assert second.llm_status == "skipped"
+    assert "usage limit" in second.llm_error and "not attempted" in second.llm_error
+    assert calls == ["call"]
+
+
+def test_a_per_file_failure_does_not_trip_the_breaker() -> None:
+    from core import summarize
+
+    def too_large(*_a, **_k):
+        raise summarize.PromptTooLarge("prompt too large for the grok CLI")
+
+    breaker = summarize.ProviderBreaker()
+    assert _assist(too_large, breaker=breaker).llm_status == "failed"
+    assert _assist(lambda *a, **k: "garbled, no json", breaker=breaker).llm_status == "failed"
+    assert not breaker.tripped
+
+
+def test_llm_status_reports_each_outcome() -> None:
+    ok = _assist(lambda *a, **k: '{"folder_name": "10. Meetings"}')
+    rejected = _assist(lambda *a, **k: '{"folder_name": "99. Invented"}')
+    unavailable = _assist(lambda *a, **k: "{}", available=False)
+    off = _assist(lambda *a, **k: "{}", title="재즈 보컬 합창 연주 음악 작업")
+    assert ok.llm_status == "ok" and ok.llm_error == ""
+    assert rejected.llm_status == "rejected" and rejected.used_llm
+    assert unavailable.llm_status == "unavailable" and "unavailable" in unavailable.llm_error
+    assert off.llm_status == "off"
+
+
 @pytest.mark.parametrize("raw", ["not json", '```json\n{"folder_name": "10. Meetings"}\n```'])
 def test_json_extraction_handles_fences_and_garbage(raw: str) -> None:
     data = auto_folder._extract_json(raw)

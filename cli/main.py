@@ -16,6 +16,7 @@ from typing import Any, Callable, TypeVar
 import typer
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.table import Table
 
 from core import PlaudClient, app_config, load_config
@@ -24,6 +25,7 @@ from core.client import PlaudAPIError
 from core.config import ConfigError
 from core.model_registry import PROVIDER_LABELS
 from core.storage import DEFAULT_DB, Storage
+from core.summarize import ModelCallError, ProviderBreaker, failure_reason
 from core.tags import normalize_tags
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)
@@ -56,6 +58,12 @@ def _handle_cli_errors(fn: F) -> F:
             raise typer.Exit(1) from None
         except PlaudAPIError as exc:
             console.print(f"[red]Plaud command failed[/red]: {exc}")
+            raise typer.Exit(1) from None
+        except ModelCallError as exc:
+            # One line with the provider's reason instead of a traceback.
+            Console(stderr=True, soft_wrap=True).print(
+                f"[red]model call failed[/red]: {escape(failure_reason(exc))}"
+            )
             raise typer.Exit(1) from None
 
     return wrapper  # type: ignore[return-value]
@@ -554,9 +562,9 @@ def _maybe_auto_metadata(storage: Storage) -> None:
         console.print(f"[yellow]auto-metadata skipped[/yellow] {exc}")
         return
     if report.aborted:
-        console.print(f"[yellow]{report.summary()}[/yellow]")
-    elif report.generated or report.failed or report.remaining:
-        console.print(report.summary())
+        console.print(f"[yellow]{escape(report.summary())}[/yellow]")
+    elif report.generated or report.failed or report.remaining or report.stopped:
+        console.print(escape(report.summary()))
 
 
 @safe_command()
@@ -1869,9 +1877,14 @@ def metadata_auto(
     if json_output:
         console.print_json(json=_json.dumps(asdict(report), ensure_ascii=False))
         return
-    console.print(report.summary())
+    console.print(escape(report.summary()))
     for file_id, err in report.failed.items():
-        console.print(f"  [red]failed[/red] {file_id}: {err[:120]}")
+        console.print(f"  [red]failed[/red] {file_id}: {escape(err[:120])}")
+    if report.stopped:
+        console.print(
+            "  [yellow]stopped after a provider failure[/yellow] — "
+            "the rest waits for the next sync or run"
+        )
     if report.remaining:
         console.print(
             f"  [yellow]{report.remaining} more eligible[/yellow] — "
@@ -1924,6 +1937,9 @@ def classify_recordings(
     if apply and append_undo and manifest_path.exists():
         moved_manifest = _json.loads(manifest_path.read_text(encoding="utf-8")).get("moved", [])
     manifest = {"version": 2, "at": int(time.time()), "moved": moved_manifest}
+    # After one provider failure the remaining weak rows keep their rule verdict
+    # instead of calling the same dead provider again.
+    breaker = ProviderBreaker()
     for row in rows:
         snapshot = build_recording_snapshot(storage, row["id"])
         if folder:
@@ -1944,7 +1960,7 @@ def classify_recordings(
                 )
             )
         else:
-            assisted = classify_with_assist(snapshot, use_llm=llm)
+            assisted = classify_with_assist(snapshot, use_llm=llm, breaker=breaker)
         classification = assisted.classification
         moved_to = ""
         error = assisted.llm_error if assisted.llm_error and not assisted.used_llm else ""
@@ -1999,6 +2015,8 @@ def classify_recordings(
                         "classification_reason": classification.reason,
                         "classification_source": classification.source,
                         "classification_alternatives": list(classification.alternatives),
+                        "classification_llm_status": assisted.llm_status,
+                        "classification_llm_error": assisted.llm_error,
                     },
                     now=now,
                 )
@@ -2032,6 +2050,8 @@ def classify_recordings(
             "alternatives": list(classification.alternatives),
             "moved_to": moved_to,
             "error": error,
+            "llm_status": assisted.llm_status,
+            "llm_error": assisted.llm_error,
         }
         results.append(payload)
 
@@ -2039,13 +2059,23 @@ def classify_recordings(
         console.print_json(json=_json.dumps(results, ensure_ascii=False))
         return
 
+    not_assisted = ("failed", "unavailable", "skipped")
+    llm_failed = [i for i in results if i["llm_status"] in not_assisted]
     for item in results:
         action = f" -> {item['moved_to']}" if item["moved_to"] else ""
-        error = f" [red]{item['error']}[/red]" if item["error"] else ""
+        error = f" [red]{escape(item['error'])}[/red]" if item["error"] else ""
         src = " [magenta]llm[/magenta]" if item["source"] == "llm" else ""
+        if item["llm_status"] in not_assisted:
+            src += f" [yellow]llm {item['llm_status']}[/yellow]"
         console.print(
             f"{item['confidence']:.2f}{src}  [bold]{item['folder_name']}[/bold]{action}  "
             f"[dim]{item['title']} · {item['cmds'] or '-'} · {item['index']}[/dim]{error}"
+        )
+    if llm_failed:
+        reason = breaker.reason or llm_failed[0]["llm_error"]
+        console.print(
+            f"[yellow]LLM assist failed for {len(llm_failed)} recordings[/yellow]: {escape(reason)}",
+            soft_wrap=True,
         )
     if apply:
         console.print(

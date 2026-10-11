@@ -115,6 +115,114 @@ def test_failure_records_backoff(storage: Storage, monkeypatch: pytest.MonkeyPat
     assert report2.failed == {}
 
 
+def _auto_meta(storage: Storage, file_id: str) -> dict:
+    return json.loads(storage.get_note_metadata(file_id)["metadata_json"])["auto_meta"]
+
+
+@pytest.fixture()
+def calls(monkeypatch: pytest.MonkeyPatch):
+    """`generate` raising what `calls["raise"]` maps the file id to, if anything."""
+    from core import metadata, summarize
+
+    state: dict = {"seen": [], "raise": {}}
+
+    def generate(storage: Storage, file_id: str, **kwargs):
+        state["seen"].append(file_id)
+        exc = state["raise"].get(file_id) or state["raise"].get("*")
+        if exc is not None:
+            raise exc
+        return fake_generate(storage, file_id, **kwargs)
+
+    monkeypatch.setattr(summarize, "model_available", lambda model: True)
+    monkeypatch.setattr(metadata, "generate_note_metadata", generate)
+    return state
+
+
+def test_failure_records_reason_for_the_app(storage: Storage, calls) -> None:
+    from core.summarize import ModelFailed
+
+    calls["raise"]["*"] = ModelFailed("codex CLI failed (exit 1): ERROR: usage limit\nmore")
+    add_recording(storage, "f1")
+    report = am.run_auto_metadata(storage, model="codex", limit=5)
+    info = _auto_meta(storage, "f1")
+    assert "usage limit" in info["last_error"] and "\n" not in info["last_error"]
+    assert isinstance(info["last_error_at"], int)
+    assert info["attempts"] == 1
+    assert report.failed["f1"] == info["last_error"]
+
+
+def test_provider_failure_stops_the_batch(storage: Storage, calls) -> None:
+    from core.summarize import ModelFailed
+
+    calls["raise"]["*"] = ModelFailed("codex CLI failed (exit 1): ERROR: usage limit")
+    for i in range(3):
+        add_recording(storage, f"f{i}")
+    report = am.run_auto_metadata(storage, model="codex", limit=5)
+    assert len(calls["seen"]) == 1
+    assert len(report.failed) == 1
+    assert "usage limit" in report.stopped
+    assert report.remaining == 2
+    assert "stopped: " in report.summary()
+    untouched = [f for f in ("f0", "f1", "f2") if f not in calls["seen"]]
+    assert [storage.get_note_metadata(f) for f in untouched] == [None, None]
+
+
+def test_unusable_reply_does_not_stop_the_batch(storage: Storage, calls) -> None:
+    from core.metadata import MetadataUnavailable
+
+    for i in range(3):
+        add_recording(storage, f"f{i}")
+    first = storage.files_for_auto_metadata(fetched_after=None)[0]["file_id"]
+    calls["raise"][first] = MetadataUnavailable("model reply contained no usable metadata JSON")
+    report = am.run_auto_metadata(storage, model="codex", limit=5)
+    assert list(report.failed) == [first]
+    assert len(report.generated) == 2
+    assert report.stopped == ""
+
+
+def test_success_clears_the_recorded_failure(storage: Storage, calls) -> None:
+    from core.summarize import ModelFailed
+
+    add_recording(storage, "f1")
+    calls["raise"]["*"] = ModelFailed("codex CLI timed out after 600s")
+    am.run_auto_metadata(storage, model="codex", limit=5)
+    assert _auto_meta(storage, "f1")["last_error"]
+    # Age the failure past the backoff window, then succeed.
+    info = {**_auto_meta(storage, "f1"), "last_attempt": NOW - 2 * 86400}
+    storage.upsert_note_metadata(file_id="f1", metadata={"auto_meta": info}, generated_at=0, now=0)
+    calls["raise"].clear()
+    report = am.run_auto_metadata(storage, model="codex", limit=5)
+    assert report.generated == ["f1"]
+    info = _auto_meta(storage, "f1")
+    assert "last_error" not in info and "last_error_at" not in info
+    assert info["source_hash"]
+
+
+def test_a_reply_without_json_is_not_cached_with_a_source_hash(
+    storage: Storage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real generate_note_metadata against a model that answers in prose:
+    # the reply used to be stored as source 'ai' with the source hash, so the
+    # file was never retried.
+    from core import app_config, metadata, summarize, vault_index
+
+    monkeypatch.setattr(app_config, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.delenv("PLAUD_OBSIDIAN_VAULT", raising=False)
+    monkeypatch.setattr(metadata, "integrated_dir", lambda _: tmp_path / "integrated")
+    monkeypatch.setattr(metadata, "load_vault_context", lambda _: "")
+    monkeypatch.setattr(vault_index, "related_wikilinks", lambda _: [])
+    monkeypatch.setattr(summarize, "model_available", lambda model: True)
+    monkeypatch.setattr(summarize, "run_model", lambda *a, **k: "Sorry, I can't do that.")
+    add_recording(storage, "f1")
+    report = am.run_auto_metadata(storage, model="codex", limit=5)
+    assert "no usable metadata JSON" in report.failed["f1"]
+    assert report.stopped == ""
+    stored = json.loads(storage.get_note_metadata("f1")["metadata_json"])
+    assert "source_hash" not in stored["auto_meta"]
+    assert "no usable metadata JSON" in stored["auto_meta"]["last_error"]
+    assert "title" not in stored  # nothing from the reply was stored as metadata
+
+
 def test_model_unavailable_aborts_without_fallback_spam(
     storage: Storage, monkeypatch: pytest.MonkeyPatch
 ) -> None:
