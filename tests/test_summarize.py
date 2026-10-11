@@ -174,36 +174,45 @@ user
 ERROR: You've hit your usage limit. Visit https://example.test/usage to purchase more credits."""
 
 
-def test_cli_reason_keeps_the_error_that_a_long_banner_used_to_truncate_away() -> None:
-    # The banner alone is over 400 characters, so taking the head of stderr cut
-    # the actual cause off the end.
+def test_cli_reason_finds_the_cause_a_long_banner_used_to_truncate_away() -> None:
+    # The banner alone is over 400 characters; the cause is the last line.
     assert len(CODEX_BANNER) > 400
-    reason = summarize._cli_reason(_Proc(stderr=CODEX_BANNER))
-    assert "usage limit" in reason
-    assert "OpenAI Codex v0.153.4" not in reason
+    assert summarize._cli_reason(_Proc(stderr=CODEX_BANNER)) == summarize.REASON_QUOTA
 
 
-def test_cli_reason_falls_back_to_the_tail_when_nothing_looks_like_an_error() -> None:
-    reason = summarize._cli_reason(_Proc(stderr="line one\nline two\nline three\nline four"))
-    assert "line four" in reason
-    assert "line one" not in reason
+@pytest.mark.parametrize(
+    "text, reason",
+    [
+        ("ERROR: You've hit your usage limit. Try again at 5:36 PM.", "REASON_QUOTA"),
+        ("Error: 429 Too Many Requests", "REASON_QUOTA"),
+        ("Your credit balance is too low", "REASON_QUOTA"),
+        ("Invalid API key · Please run /login", "REASON_AUTH"),
+        ("Not logged in", "REASON_AUTH"),
+        ("IneligibleTierError: this model is not available on your tier", "REASON_MODEL"),
+        ("Error: prompt is too long: 250000 tokens > 200000 maximum", "REASON_TOO_LONG"),
+        ("API Error: 529 Overloaded", "REASON_OVERLOADED"),
+    ],
+)
+def test_cli_reason_names_the_cause_in_fixed_words(text: str, reason: str) -> None:
+    assert summarize._cli_reason(_Proc(stderr=f"banner\n{text}")) == getattr(summarize, reason)
+
+
+def test_cli_reason_never_returns_the_clis_own_text() -> None:
+    assert summarize._cli_reason(_Proc(stderr="line one\nline four")) == summarize.REASON_UNKNOWN
+    assert summarize._cli_reason(_Proc(stdout="error: boom")) == summarize.REASON_UNKNOWN
 
 
 def test_cli_reason_reads_stdout_when_stderr_is_empty() -> None:
-    assert "boom" in summarize._cli_reason(_Proc(stdout="boom"))
-
-
-def test_cli_reason_deduplicates_a_line_written_to_both_streams() -> None:
-    dup = "ERROR: quota exceeded\nERROR: quota exceeded\nERROR: quota exceeded"
-    assert summarize._cli_reason(_Proc(stderr=dup)) == "ERROR: quota exceeded"
+    assert summarize._cli_reason(_Proc(stdout="ERROR: quota exceeded")) == summarize.REASON_QUOTA
 
 
 def test_cli_reason_handles_a_silent_failure() -> None:
-    assert summarize._cli_reason(_Proc()) == "(no output)"
+    assert summarize._cli_reason(_Proc()) == summarize.REASON_SILENT
 
 
-def test_cli_reason_is_bounded() -> None:
-    assert len(summarize._cli_reason(_Proc(stderr="error: " + "x" * 5000))) <= 400
+def test_cli_reason_ignores_causes_named_only_by_the_echoed_prompt() -> None:
+    prompt = "회의 내용: 이번 달 quota 를 다 썼다"
+    assert summarize._cli_reason(_Proc(stderr=prompt), prompt=prompt) == summarize.REASON_UNKNOWN
 
 
 # -------- why a call failed: runner rules and the shared reason --------
@@ -257,6 +266,102 @@ def test_an_echoed_prompt_never_becomes_the_reason(fake_cli) -> None:
         summarize.run_model("codex", prompt)
     reason = summarize.failure_reason(exc.value)
     assert "비밀 전사" not in reason and "화자 식별" not in reason
+
+
+SENTINEL = "SYNTHETIC_PRIVATE_TRANSCRIPT_41"
+KEY = "SYNTHETIC_KEY_42"
+
+# (stdout, stderr) of a failing CLI that quotes the prompt in some form.
+CLI_ECHOES = {
+    "prefixed": ("", f"ERROR: rejected input: {SENTINEL}"),
+    "multiline": ("", f"ERROR: bad request\n  near: {SENTINEL}\nERROR: {SENTINEL} (cut)"),
+    "escaped": ("", '{"error": "invalid: \\"' + SENTINEL + '\\""}'),
+    "partial": ("", f"error: input rejected near '{SENTINEL[:12]}'"),
+    "stdout": (f"error while reading {SENTINEL}", ""),
+}
+
+
+@pytest.mark.parametrize("echo", CLI_ECHOES)
+def test_no_cli_diagnostic_text_reaches_the_reason(fake_cli, echo: str) -> None:
+    stdout, stderr = CLI_ECHOES[echo]
+    fake_cli["result"] = _Completed(1, stdout, stderr)
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model("codex", f"prompt line\n{SENTINEL}")
+    reason = summarize.failure_reason(exc.value)
+    assert "SYNTHETIC" not in reason
+    assert reason == f"codex CLI failed (exit 1): {summarize.REASON_UNKNOWN}"
+
+
+def test_a_known_cause_is_kept_without_the_echo_around_it(fake_cli) -> None:
+    fake_cli["result"] = _Completed(1, "", f"ERROR: You've hit your usage limit. Input: {SENTINEL}")
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model("codex", SENTINEL)
+    assert str(exc.value) == f"codex CLI failed (exit 1): {summarize.REASON_QUOTA}"
+
+
+API_PROVIDERS = [
+    ("claude", "Anthropic", "ANTHROPIC_API_KEY"),
+    ("codex", "OpenAI", "OPENAI_API_KEY"),
+    ("gemini", "Gemini", "GEMINI_API_KEY"),
+    ("grok", "xAI", "XAI_API_KEY"),
+]
+
+
+def _api_reply(monkeypatch, model: str, env: str, status: int, body: str) -> None:
+    import types
+
+    monkeypatch.setattr(summarize.app_config, "backend_for", lambda m: "api")
+    monkeypatch.setattr(summarize.app_config, "model_id_for", lambda m: "")
+    monkeypatch.setenv(env, KEY)
+    reply = types.SimpleNamespace(status_code=status, text=body)
+    monkeypatch.setattr(summarize.httpx, "post", lambda *a, **k: reply)
+
+
+@pytest.mark.parametrize("model, label, env", API_PROVIDERS)
+def test_no_api_error_body_reaches_the_reason(monkeypatch, model, label, env) -> None:
+    body = '{"error": {"message": "invalid request: ' + SENTINEL + "; key=" + KEY + '"}}'
+    _api_reply(monkeypatch, model, env, 400, body)
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model(model, f"prompt {SENTINEL}")
+    reason = summarize.failure_reason(exc.value)
+    assert SENTINEL not in reason and KEY not in reason
+    assert reason == f"{label} API 400: {summarize.REASON_REJECTED}"
+
+
+@pytest.mark.parametrize(
+    "status, body, reason",
+    [
+        (401, "", "REASON_AUTH"),
+        (403, "", "REASON_AUTH"),
+        (404, "", "REASON_MODEL"),
+        (429, "", "REASON_QUOTA"),
+        (529, "", "REASON_OVERLOADED"),
+        (
+            400,
+            '{"error": {"message": "API key not valid. Please pass a valid API key."}}',
+            "REASON_AUTH",
+        ),
+        (400, '{"error": {"message": "prompt is too long: 300000 tokens"}}', "REASON_TOO_LONG"),
+    ],
+)
+def test_an_api_failure_keeps_its_status_and_cause(monkeypatch, status, body, reason) -> None:
+    _api_reply(monkeypatch, "gemini", "GEMINI_API_KEY", status, body + SENTINEL)
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model("gemini", SENTINEL)
+    assert str(exc.value) == f"Gemini API {status}: {getattr(summarize, reason)}"
+
+
+def test_an_unexpected_backend_error_is_named_by_class_only(monkeypatch) -> None:
+    monkeypatch.setattr(summarize.app_config, "backend_for", lambda m: "api")
+
+    def broken(*_a, **_k):
+        raise ValueError(f"cannot parse the reply to {SENTINEL}")
+
+    monkeypatch.setattr(summarize, "_run_api", broken)
+    with pytest.raises(summarize.ModelFailed) as exc:
+        summarize.run_model("gemini", SENTINEL)
+    assert str(exc.value) == "gemini API call failed: ValueError"
+    assert exc.value.__cause__ is None and exc.value.__suppress_context__
 
 
 def test_api_empty_reply_and_transport_errors_are_failures(monkeypatch) -> None:

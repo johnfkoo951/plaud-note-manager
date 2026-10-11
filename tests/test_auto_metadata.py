@@ -198,12 +198,9 @@ def test_success_clears_the_recorded_failure(storage: Storage, calls) -> None:
     assert info["source_hash"]
 
 
-def test_a_reply_without_json_is_not_cached_with_a_source_hash(
-    storage: Storage, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # The real generate_note_metadata against a model that answers in prose:
-    # the reply used to be stored as source 'ai' with the source hash, so the
-    # file was never retried.
+@pytest.fixture()
+def real_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """The real generate_note_metadata, isolated from config, data/ and vaults."""
     from core import app_config, metadata, summarize, vault_index
 
     monkeypatch.setattr(app_config, "CONFIG_FILE", tmp_path / "config.json")
@@ -212,7 +209,36 @@ def test_a_reply_without_json_is_not_cached_with_a_source_hash(
     monkeypatch.setattr(metadata, "load_vault_context", lambda _: "")
     monkeypatch.setattr(vault_index, "related_wikilinks", lambda _: [])
     monkeypatch.setattr(summarize, "model_available", lambda model: True)
-    monkeypatch.setattr(summarize, "run_model", lambda *a, **k: "Sorry, I can't do that.")
+    return summarize
+
+
+def test_the_db_never_keeps_an_echo_of_the_prompt(
+    storage: Storage, real_metadata, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real runner against a CLI that quotes the transcript in its error.
+    import subprocess
+
+    sm = real_metadata
+    sentinel = "SYNTHETIC_PRIVATE_TRANSCRIPT_41"
+    monkeypatch.setattr(sm.app_config, "backend_for", lambda m: "cli")
+    monkeypatch.setattr(sm, "_resolve_binary", lambda *a: "/fake/codex")
+    fake = subprocess.CompletedProcess(["codex"], 1, "", f"ERROR: rejected input: {sentinel}")
+    monkeypatch.setattr(sm.subprocess, "run", lambda *a, **k: fake)
+    add_recording(storage, "f1", summary=sentinel)
+    report = am.run_auto_metadata(storage, model="codex", limit=5)
+    stored = _auto_meta(storage, "f1")["last_error"]
+    for reason in (report.failed["f1"], stored, report.stopped):
+        assert "SYNTHETIC" not in reason
+        assert reason == f"codex CLI failed (exit 1): {sm.REASON_UNKNOWN}"
+
+
+def test_a_reply_without_json_is_not_cached_with_a_source_hash(
+    storage: Storage, real_metadata, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The real generate_note_metadata against a model that answers in prose:
+    # the reply used to be stored as source 'ai' with the source hash, so the
+    # file was never retried.
+    monkeypatch.setattr(real_metadata, "run_model", lambda *a, **k: "Sorry, I can't do that.")
     add_recording(storage, "f1")
     report = am.run_auto_metadata(storage, model="codex", limit=5)
     assert "no usable metadata JSON" in report.failed["f1"]

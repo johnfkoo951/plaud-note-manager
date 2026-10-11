@@ -63,7 +63,9 @@ CLI_STRIP_ENV: dict[str, tuple[str, ...]] = {
 
 
 class ModelCallError(RuntimeError):
-    """A model call gave no usable reply. Its text is safe to show and store."""
+    """A model call gave no usable reply. Its text is safe to show and store:
+    every raise site builds it from fixed phrases, model names and numbers,
+    never from what the provider printed or returned."""
 
 
 class ModelNotInstalled(ModelCallError):
@@ -78,13 +80,91 @@ class PromptTooLarge(ModelFailed):
     """This file's prompt can't be passed to the CLI — not a provider failure."""
 
 
+# Why a provider call failed, in words of our own. A vendor CLI echoes the
+# prompt into its diagnostics and an API error body can quote the request or
+# the key, in forms (prefixed, escaped, cut) no scrub could be shown to catch.
+# So that text is only read, to pick one of these; it is never kept.
+REASON_QUOTA = "usage limit or quota reached"
+REASON_AUTH = "not logged in or not authorized"
+REASON_MODEL = "model not available to this account"
+REASON_TOO_LONG = "input too long for the model"
+REASON_OVERLOADED = "provider overloaded or unavailable"
+REASON_REJECTED = "request rejected"
+REASON_UNKNOWN = "no known cause in its output"
+REASON_SILENT = "it printed nothing"
+
+# Markers matched case-insensitively; the first kind that matches wins.
+FAILURE_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        REASON_QUOTA,
+        (
+            "usage limit",
+            "quota",
+            "rate limit",
+            "rate_limit",
+            "too many requests",
+            "resource_exhausted",
+            "credit balance",
+        ),
+    ),
+    (
+        REASON_AUTH,
+        (
+            "not logged in",
+            "unauthor",
+            "unauthenticated",
+            "forbidden",
+            "permission_denied",
+            "permission denied",
+            "authentication",
+            "api key",
+            "api_key",
+            "login",
+            "log in",
+            "expired",
+        ),
+    ),
+    (
+        REASON_MODEL,
+        ("ineligibletier", "model_not_found", "model not found", "not_found_error"),
+    ),
+    (
+        REASON_TOO_LONG,
+        ("context length", "context_length", "context window", "too many tokens", "too long"),
+    ),
+    (
+        REASON_OVERLOADED,
+        ("overloaded", "service unavailable", "internal server error", "server_error"),
+    ),
+)
+
+# An HTTP status that names the cause by itself.
+_STATUS_REASONS = {
+    401: REASON_AUTH,
+    403: REASON_AUTH,
+    404: REASON_MODEL,
+    413: REASON_TOO_LONG,
+    429: REASON_QUOTA,
+}
+
+
+def _failure_kind(text: str) -> str:
+    """The REASON_* a provider's own text points to, or ""."""
+    low = text.lower()
+    for reason, markers in FAILURE_MARKERS:
+        if any(marker in low for marker in markers):
+            return reason
+    return ""
+
+
 def failure_reason(exc: BaseException, *, limit: int = 400) -> str:
     """Why a call failed, as one stable line of at most `limit` characters.
 
     The same text goes to the CLI's error line, the DB and the integrate
-    sidecar. A transport or subprocess error is named by class only: its text
-    quotes the request URL (the Gemini key rides in it) or the argv (the whole
-    prompt, for the PROMPT_AS_ARG CLIs).
+    sidecar. A ModelCallError's text is ours (see its docstring). A transport
+    or subprocess error is named by class only: its text quotes the request
+    URL (the Gemini key rides in it) or the argv (the whole prompt, for the
+    PROMPT_AS_ARG CLIs). Anything else is a local error, named with its text.
     """
     name = type(exc).__name__
     if isinstance(exc, ModelCallError):
@@ -211,56 +291,48 @@ def run_model(
     timeout: int = 600,
 ) -> str:
     backend = app_config.backend_for(model)
-    if backend == "cli":
-        return _run_cli(model, prompt, timeout=timeout)
-    if backend == "api":
-        try:
-            reply = _run_api(model, prompt, model_id=model_id, timeout=timeout)
-        except httpx.HTTPError as exc:
-            # The request URL can carry the key (Gemini); name the error only.
-            raise ModelFailed(f"{model} API request failed: {type(exc).__name__}") from None
-        if not reply.strip():
-            raise ModelFailed(f"{model} API returned an empty reply")
-        return reply
-    raise ModelNotInstalled(f"unknown backend: {backend}")
+    if backend not in ("cli", "api"):
+        raise ModelNotInstalled(f"unknown backend: {backend}")
+    try:
+        if backend == "cli":
+            return _run_cli(model, prompt, timeout=timeout)
+        reply = _run_api(model, prompt, model_id=model_id, timeout=timeout)
+    except ModelCallError:
+        raise
+    except httpx.HTTPError as exc:
+        # The request URL can carry the key (Gemini); name the error only.
+        raise ModelFailed(f"{model} API request failed: {type(exc).__name__}") from None
+    except Exception as exc:
+        # A parse or OS error inside the backend; its text may quote the call.
+        raise ModelFailed(f"{model} {backend.upper()} call failed: {type(exc).__name__}") from None
+    if not reply.strip():
+        raise ModelFailed(f"{model} API returned an empty reply")
+    return reply
 
 
 # -------- CLI mode --------
 
 
 def _cli_reason(proc: subprocess.CompletedProcess[str], *, prompt: str = "") -> str:
-    """The part of a failed CLI's output that says why it failed.
+    """Why a vendor CLI failed, as a REASON_* phrase — never its own text.
 
     Vendor CLIs print a banner (version, workdir, model, sandbox) and echo the
     prompt before they fail, and the real cause — an exhausted quota, a revoked
-    token — is the LAST thing they write. Taking the head of stderr therefore
-    captured the banner and truncated the reason away, so read from the tail and
-    prefer lines that look like an error. Lines of the echoed `prompt` are
-    dropped first: the reason is stored, and the transcript must not be.
+    login — is the LAST thing they write. So lines are read from the end,
+    skipping lines of the echoed `prompt` (a transcript can mention "quota"
+    too), and the first one that names a known cause decides.
     """
     text = (proc.stderr or "").strip() or (proc.stdout or "").strip()
     if not text:
-        return "(no output)"
+        return REASON_SILENT
     echoed = {ln.strip() for ln in prompt.splitlines()}
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip() and ln.strip() not in echoed]
-    if not lines:
-        return "(no reason given)"
-    flagged = [
-        ln
-        for ln in lines
-        if any(
-            marker in ln.lower()
-            for marker in ("error", "usage limit", "quota", "unauthor", "forbidden", "expired")
-        )
-    ]
-    # Deduplicate: these CLIs often write the same line to both streams.
-    picked: list[str] = []
-    for ln in (flagged or lines)[::-1]:
-        if ln not in picked:
-            picked.append(ln)
-        if len(picked) >= 3:
-            break
-    return " | ".join(picked[::-1])[:400]
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if line and line not in echoed:
+            kind = _failure_kind(line)
+            if kind:
+                return kind
+    return REASON_UNKNOWN
 
 
 def _run_cli(model: str, prompt: str, *, timeout: int) -> str:
@@ -321,6 +393,23 @@ def _api_key_env(model: str) -> str:
     }.get(model, "")
 
 
+def _api_failure(provider: str, response: httpx.Response) -> ModelFailed:
+    """A non-200 reply, named by its status and a REASON_* phrase only.
+
+    The body is read to find the cause but never kept: it can quote the
+    request, which is the prompt, and the key.
+    """
+    status = response.status_code
+    kind = _STATUS_REASONS.get(status) or (REASON_OVERLOADED if status >= 500 else "")
+    if not kind:
+        try:
+            body = str(response.text)
+        except Exception:  # an undecodable body names nothing
+            body = ""
+        kind = _failure_kind(body) or REASON_REJECTED
+    return ModelFailed(f"{provider} API {status}: {kind}")
+
+
 def _run_api(model: str, prompt: str, *, model_id: str | None, timeout: int) -> str:
     if model == "claude":
         return _claude_api(prompt, model_id=model_id, timeout=timeout)
@@ -353,7 +442,7 @@ def _claude_api(prompt: str, *, model_id: str | None, timeout: int) -> str:
         timeout=timeout,
     )
     if r.status_code != 200:
-        raise ModelFailed(f"Anthropic API {r.status_code}: {r.text[:400]}")
+        raise _api_failure("Anthropic", r)
     data = r.json()
     parts = data.get("content") or []
     return "".join(p.get("text", "") for p in parts if p.get("type") == "text")
@@ -377,7 +466,7 @@ def _openai_api(prompt: str, *, model_id: str | None, timeout: int) -> str:
         timeout=timeout,
     )
     if r.status_code != 200:
-        raise ModelFailed(f"OpenAI API {r.status_code}: {r.text[:400]}")
+        raise _api_failure("OpenAI", r)
     data = r.json()
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
 
@@ -394,7 +483,7 @@ def _gemini_api(prompt: str, *, model_id: str | None, timeout: int) -> str:
         timeout=timeout,
     )
     if r.status_code != 200:
-        raise ModelFailed(f"Gemini API {r.status_code}: {r.text[:400]}")
+        raise _api_failure("Gemini", r)
     data = r.json()
     cands = data.get("candidates") or []
     if not cands:
@@ -422,7 +511,7 @@ def _xai_api(prompt: str, *, model_id: str | None, timeout: int) -> str:
         timeout=timeout,
     )
     if r.status_code != 200:
-        raise ModelFailed(f"xAI API {r.status_code}: {r.text[:400]}")
+        raise _api_failure("xAI", r)
     data = r.json()
     return (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
 

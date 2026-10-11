@@ -80,6 +80,81 @@ def test_failure_writes_error_sidecar_and_reraises(
     assert list(sidecar.parent.glob("*.md")) == []
 
 
+SENTINEL = "SYNTHETIC_PRIVATE_TRANSCRIPT_41"
+KEY = "SYNTHETIC_KEY_42"
+
+
+@pytest.fixture()
+def real_runner(calls, monkeypatch: pytest.MonkeyPatch):
+    """integrate through the real run_model, against a fake CLI or HTTP reply."""
+    import core.summarize as sm
+
+    monkeypatch.setattr(integrate_mod, "run_model", sm.run_model)
+    monkeypatch.setattr(sm, "_resolve_binary", lambda *a: "/fake/bin")
+    monkeypatch.setattr(sm.app_config, "model_id_for", lambda m: "")
+    return sm
+
+
+def _sidecar_reason(file_id: str, model: str) -> str:
+    path = paths_mod.integrated_error_path(file_id, model=model, template=DUAL_TEMPLATE)
+    return json.loads(path.read_text(encoding="utf-8"))["reason"]
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        f"ERROR: rejected input: {SENTINEL}",
+        f"ERROR: bad request\n  near: {SENTINEL}\nERROR: {SENTINEL} (cut)",
+        f"ERROR: You've hit your usage limit. Input was: {SENTINEL}",
+    ],
+)
+def test_the_sidecar_never_keeps_an_echo_of_the_prompt(
+    real_runner, monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    import subprocess
+
+    sm = real_runner
+    monkeypatch.setattr(sm.app_config, "backend_for", lambda m: "cli")
+    fake = subprocess.CompletedProcess(["codex"], 1, "", stderr)
+    monkeypatch.setattr(sm.subprocess, "run", lambda *a, **k: fake)
+    with pytest.raises(sm.ModelFailed):
+        integrate(
+            file_id="f1",
+            model="codex",
+            template_name=DUAL_TEMPLATE,
+            **{**INPUTS, "cmds_transcript": SENTINEL},
+        )
+    reason = _sidecar_reason("f1", "codex")
+    assert "SYNTHETIC" not in reason
+    assert reason.startswith("codex CLI failed (exit 1): ")
+    if "usage limit" in stderr:
+        assert reason.endswith(sm.REASON_QUOTA)  # the useful part survives
+
+
+def test_the_sidecar_never_keeps_an_api_error_body(
+    real_runner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    sm = real_runner
+    monkeypatch.setattr(sm.app_config, "backend_for", lambda m: "api")
+    monkeypatch.setenv("GEMINI_API_KEY", KEY)
+    body = '{"error": "invalid request: ' + SENTINEL + "; key=" + KEY + '"}'
+    reply = types.SimpleNamespace(status_code=400, text=body)
+    monkeypatch.setattr(sm.httpx, "post", lambda *a, **k: reply)
+    with pytest.raises(sm.ModelFailed):
+        integrate(
+            file_id="f1",
+            model="gemini",
+            model_id="m-x",
+            template_name=DUAL_TEMPLATE,
+            **{**INPUTS, "cmds_transcript": SENTINEL},
+        )
+    reason = _sidecar_reason("f1", "m-x")
+    assert SENTINEL not in reason and KEY not in reason
+    assert reason == f"Gemini API 400: {sm.REASON_REJECTED}"
+
+
 def test_success_removes_a_stale_error_sidecar(calls, tmp_path: Path) -> None:
     sidecar = paths_mod.integrated_error_path("f1", model="claude", template=DUAL_TEMPLATE)
     sidecar.write_text('{"reason": "old"}', encoding="utf-8")
