@@ -30,7 +30,9 @@ def storage(tmp_path: Path) -> Storage:
             file_id="f1",
             title="09-14 세미나",
             transcript=[
-                TranscriptSegment(start_time=0, end_time=900, speaker="구요한", content="안녕하세요")
+                TranscriptSegment(
+                    start_time=0, end_time=900, speaker="구요한", content="안녕하세요"
+                )
             ],
             keywords=["옵시디언"],
         ),
@@ -91,9 +93,11 @@ def test_wiki_refuses_without_a_collection_purpose(storage, vaults, stub_model) 
     )
     assert result.status == "needs_purpose"
     # Nothing may be written while a required field is missing.
-    assert not list((vaults["wiki"] / vc.WIKI_RAW_DEST).glob("*.md")) if (
-        vaults["wiki"] / vc.WIKI_RAW_DEST
-    ).exists() else True
+    assert (
+        not list((vaults["wiki"] / vc.WIKI_RAW_DEST).glob("*.md"))
+        if (vaults["wiki"] / vc.WIKI_RAW_DEST).exists()
+        else True
+    )
 
 
 def test_wiki_writes_into_the_category_subfolder_the_vault_already_uses(
@@ -123,9 +127,7 @@ def test_every_category_maps_to_an_existing_subfolder() -> None:
         assert vc.wiki_raw_dest(category).startswith("10. Raw Sources/")
 
 
-def test_filename_follows_the_vaults_date_slug_convention(
-    storage, vaults, stub_model
-) -> None:
+def test_filename_follows_the_vaults_date_slug_convention(storage, vaults, stub_model) -> None:
     result = vc.compose(
         "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage
     )
@@ -233,9 +235,7 @@ def test_wiki_note_satisfies_the_raw_source_contract(storage, vaults, stub_model
     assert "\nindex:" not in text
 
 
-def test_wiki_note_names_the_agent_rather_than_the_vault_owner(
-    storage, vaults, stub_model
-) -> None:
+def test_wiki_note_names_the_agent_rather_than_the_vault_owner(storage, vaults, stub_model) -> None:
     result = vc.compose(
         "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage
     )
@@ -292,7 +292,11 @@ def test_vault_choices_lists_only_existing_vaults(vaults) -> None:
 
 def test_compose_result_is_json_serializable(storage, vaults, stub_model) -> None:
     result = vc.compose(
-        "f1", template="note-lecture", to="wiki", collection_purpose="p", dry_run=True,
+        "f1",
+        template="note-lecture",
+        to="wiki",
+        collection_purpose="p",
+        dry_run=True,
         storage=storage,
     )
     assert json.loads(json.dumps(result.as_dict()))["status"] == "ok"

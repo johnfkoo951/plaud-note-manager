@@ -47,8 +47,16 @@ def _keys(fm: WikiRawSourceFrontmatter) -> list[str]:
 
 def test_all_eleven_required_fields_are_emitted() -> None:
     required = {
-        "type", "aliases", "description", "author", "date created",
-        "date modified", "tags", "source", "date ingested", "category",
+        "type",
+        "aliases",
+        "description",
+        "author",
+        "date created",
+        "date modified",
+        "tags",
+        "source",
+        "date ingested",
+        "category",
         "collectionPurpose",
     }
     assert required <= set(_keys(_fm()))
@@ -154,9 +162,7 @@ def test_cross_vault_links_use_advanced_uri_never_wikilinks() -> None:
 
 
 def test_main_vault_related_needs_a_source_vault_to_be_addressable() -> None:
-    lines = _fm(
-        main_vault_related=[{"title": "Pipeline", "rel_path": "x/Pipeline"}]
-    ).lines()
+    lines = _fm(main_vault_related=[{"title": "Pipeline", "rel_path": "x/Pipeline"}]).lines()
     assert not any("mainVaultRelated" in ln for ln in lines)
 
 
@@ -197,5 +203,12 @@ def test_a_raw_source_with_no_original_content_is_refused() -> None:
 
 
 def test_enums_match_the_vault_schema() -> None:
-    assert wf.CATEGORIES == ("Articles", "Papers", "Books", "Transcripts", "Clippings", "AI Research")
+    assert wf.CATEGORIES == (
+        "Articles",
+        "Papers",
+        "Books",
+        "Transcripts",
+        "Clippings",
+        "AI Research",
+    )
     assert wf.STATUSES == ("ingested", "stub", "reading", "completed")

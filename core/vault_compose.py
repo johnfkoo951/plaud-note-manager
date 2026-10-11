@@ -82,7 +82,7 @@ def is_placeholder_speaker(name: str) -> bool:
         return True
     for prefix in _PLACEHOLDER_PREFIXES:
         if lowered.startswith(prefix):
-            rest = lowered[len(prefix):].strip()
+            rest = lowered[len(prefix) :].strip()
             if not rest or rest.isdigit():
                 return True
     return False
@@ -114,7 +114,7 @@ def wiki_slug(title: str, *, max_len: int = 80) -> str:
     """
     body = re.sub(r"^\d{2}-\d{2}\s+", "", title.strip())
     cleaned = re.sub(r"[^0-9A-Za-z가-힣ぁ-んァ-ヶ一-龥]+", "-", body).strip("-")
-    return (cleaned[:max_len].rstrip("-") or "plaud-transcript")
+    return cleaned[:max_len].rstrip("-") or "plaud-transcript"
 
 
 @dataclass

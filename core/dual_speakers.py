@@ -192,9 +192,7 @@ def propose_speaker_names(
         return []
     model = model or app_config.metadata_model()
     if not model_available(model):
-        raise SpeakerProposalUnavailable(
-            f"model '{model}' unavailable (CLI missing or no API key)"
-        )
+        raise SpeakerProposalUnavailable(f"model '{model}' unavailable (CLI missing or no API key)")
 
     file_row = storage.get_file_row(file_id)
     known = ", ".join(r["name"] for r in storage.list_speakers()) or "(없음)"

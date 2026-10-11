@@ -1519,7 +1519,8 @@ def dual_cmd(
         False, "--auto-approve", help="Accept proposed names with confidence ≥ 0.7 without asking."
     ),
     continue_unmapped: bool = typer.Option(
-        False, "--continue-unmapped",
+        False,
+        "--continue-unmapped",
         help="Continue to final transcript/summary with existing speaker labels; names can be edited later.",
     ),
     to_vault: bool = typer.Option(

@@ -177,8 +177,7 @@ def build_raw_source_note(
     """
     if not original_content.strip():
         raise WikiSchemaError(
-            "a raw source with no original content is not a source — "
-            "run the transcription first"
+            "a raw source with no original content is not a source — run the transcription first"
         )
 
     out = frontmatter.lines()
