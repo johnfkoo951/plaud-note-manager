@@ -23,7 +23,11 @@ NOW = int(time.time())
 
 @pytest.fixture()
 def storage(tmp_path: Path) -> Storage:
-    st = Storage(tmp_path / "plaud.db")
+    return _seeded_storage(tmp_path / "plaud.db")
+
+
+def _seeded_storage(db: Path) -> Storage:
+    st = Storage(db)
     st.upsert_file(PlaudFile(id="f1", filename="09-14 세미나", duration=1000), now=NOW)
     st.save_content(
         FileContent(
@@ -502,6 +506,40 @@ def test_wiki_skip_returns_the_existing_raw_source(
     no_generation()
     skipped = _wiki(storage, on_duplicate="skip")
     assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
+
+
+def test_a_raw_source_is_found_by_its_source_url_without_a_reference(
+    storage, vaults, recording_model, no_generation, tmp_path: Path
+) -> None:
+    first = _wiki(storage)
+    no_generation()
+    again = _wiki(_seeded_storage(tmp_path / "fresh.db"))  # e.g. from another machine
+    assert again.status == "duplicate"
+    assert [e["path"] for e in again.existing] == [first.path]
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://web.plaud.ai/file/f10"'),
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://web.plaud.ai/file/xf1"'),
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://web.plaud.ai/file/f1/x"'),
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://example.com/file/f1"'),
+        ("type: raw-source", "plaud_id: f2\ntype: raw-source"),
+    ],
+)
+def test_a_raw_source_owned_by_another_recording_is_never_this_ones(
+    storage, vaults, recording_model, tmp_path: Path, old: str, new: str
+) -> None:
+    # The note still mentions f1 elsewhere (its Plaud link in the body).
+    first = Path(_wiki(storage).path)
+    text = first.read_text(encoding="utf-8")
+    assert old in text and "web.plaud.ai/file/f1" in text.split(old, 1)[1]
+    foreign = text.replace(old, new, 1)
+    first.write_text(foreign, encoding="utf-8")
+    again = _wiki(_seeded_storage(tmp_path / "fresh.db"))
+    assert (again.status, again.action, again.existing) == ("ok", "created", [])
+    assert first.read_text(encoding="utf-8") == foreign
 
 
 def test_wiki_overwrite_is_refused(storage, vaults, recording_model) -> None:

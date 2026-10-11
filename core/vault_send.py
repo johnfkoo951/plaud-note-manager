@@ -70,6 +70,12 @@ class ResolvedContent:
 #: the vault: ask (report it, write nothing) | skip | overwrite | new.
 ON_DUPLICATE = ("ask", "skip", "overwrite", "new")
 
+#: The note-reference kind of a wiki raw source, which identifies itself by
+#: its `source:` link rather than `plaud_id:`.
+WIKI_RAW_SOURCE_KIND = "wiki-raw-source"
+#: The Plaud link a raw source carries as `source`; the rest is the recording id.
+PLAUD_FILE_URL = "https://web.plaud.ai/file/"
+
 
 @dataclass(slots=True)
 class VaultSendResult:
@@ -541,18 +547,66 @@ def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
     return path
 
 
-def _front_matter_names(path: Path, file_id: str) -> bool:
-    """Whether the note's leading front matter block mentions `file_id` —
-    `plaud_id:` on main notes, the `source:` URL on wiki raw sources."""
+def _scalar(raw: str) -> str:
+    """A plain YAML scalar's text: one pair of quotes removed, else a trailing
+    ` #comment` dropped. Lists and other flow values stay as written, so they
+    never equal an id."""
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        return value[1:-1]
+    comment = value.find(" #")
+    return value[:comment].rstrip() if comment != -1 else value
+
+
+def _front_matter_fields(path: Path) -> dict[str, list[str]] | None:
+    """Column-0 `key: value` pairs of the note's leading front matter block,
+    every value of a repeated key kept. None when there is no complete block
+    at the very top of the file."""
     try:
         with path.open("rb") as fh:
-            head = fh.read(4096).decode("utf-8", errors="ignore")
+            head = fh.read(65536).decode("utf-8", errors="ignore")
     except OSError:
-        return False
-    if not head.startswith("---"):
-        return False
-    end = head.find("\n---", 3)
-    return file_id in (head[3:end] if end != -1 else head)
+        return None
+    lines = head.replace("\r\n", "\n").split("\n")
+    if lines[0].rstrip() != "---":
+        return None
+    fields: dict[str, list[str]] = {}
+    for line in lines[1:]:
+        if line.rstrip() == "---":
+            return fields
+        if not line or line[0] in " \t-#":
+            continue  # list items, nested values, comments
+        key, sep, value = line.partition(":")
+        if sep:
+            fields.setdefault(key.strip(), []).append(_scalar(value))
+    return None  # unterminated within what was read
+
+
+def _plaud_url_id(values: list[str]) -> str:
+    """The recording id of a single canonical `PLAUD_FILE_URL<id>` value."""
+    if len(set(values)) != 1 or not values[0].startswith(PLAUD_FILE_URL):
+        return ""
+    rest = values[0][len(PLAUD_FILE_URL) :]
+    return rest if rest and all(c.isalnum() or c in "-_" for c in rest) else ""
+
+
+def _note_owner(path: Path, kind: str) -> str:
+    """The recording a note says it belongs to, or "" unless it says so
+    unambiguously in its own identity field: `plaud_id` on a main note, the
+    canonical Plaud `source` link on a wiki raw source. Any `plaud_id` that
+    names a different recording disqualifies the note, so a note for another
+    recording is never claimed through a field that merely mentions this one."""
+    fields = _front_matter_fields(path)
+    if fields is None:
+        return ""
+    plaud_ids = set(fields.get("plaud_id", [])) - {""}
+    if kind == WIKI_RAW_SOURCE_KIND:
+        owner = _plaud_url_id(fields.get("source", []))
+    else:
+        owner = next(iter(plaud_ids)) if len(plaud_ids) == 1 else ""
+    if not owner or plaud_ids - {owner}:
+        return ""
+    return owner
 
 
 def existing_notes(
@@ -565,8 +619,8 @@ def existing_notes(
 ) -> list[dict]:
     """Notes of `kind` this app already wrote for `file_id` that still exist
     inside `vault` (any folder), newest first. `same_name` adds a note at that
-    path whose front matter names the recording even without a reference row
-    — written on another machine, before references existed, or by Claude."""
+    path whose own identity is the recording even without a reference row —
+    written on another machine, before references existed, or by Claude."""
     root = vault.resolve()
     seen: set[Path] = set()
     out: list[dict] = []
@@ -591,7 +645,8 @@ def existing_notes(
         and same_name.is_file()
         and same_name.resolve() not in seen
         and same_name.resolve().is_relative_to(root)
-        and _front_matter_names(same_name, file_id)
+        and file_id
+        and _note_owner(same_name, kind) == file_id
     ):
         out.append(
             {

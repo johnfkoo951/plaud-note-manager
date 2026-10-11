@@ -541,6 +541,93 @@ def test_a_same_name_note_naming_this_recording_counts_without_a_reference(
     assert created.action == "created" and created.path.endswith(" (2).md")
 
 
+FOREIGN_ID = "fed987cba654"  # another recording, same length as FILE_ID
+
+
+def _same_name_note(sandbox) -> Path:
+    """Where a send of FILE_ID writes, occupied by whatever the test puts there."""
+    _write_integrated(sandbox["tmp"])
+    return Path(vault_send(FILE_ID, storage=sandbox["storage"]).path)
+
+
+@pytest.mark.parametrize("policy", ["ask", "skip", "overwrite"])
+def test_another_recordings_note_that_mentions_this_one_is_never_its_duplicate(
+    sandbox, tmp_path: Path, policy: str
+) -> None:
+    # int-review-1 #1: recording B's note names A only in another field. With no
+    # reference row (a note from another machine), ask called it A's note,
+    # skip treated A as filed and overwrite replaced B's note.
+    note = _same_name_note(sandbox)
+    foreign = (
+        f"---\nplaud_id: {FOREIGN_ID}\n"
+        f"related_recording: https://web.plaud.ai/file/{FILE_ID}\n"
+        "---\nForeign recording original body\n"
+    )
+    note.write_text(foreign, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate=policy)
+    assert (result.status, result.action, result.existing) == ("ok", "created", [])
+    assert result.path.endswith(" (2).md")
+    assert note.read_text(encoding="utf-8") == foreign
+
+
+@pytest.mark.parametrize(
+    "front",
+    [
+        f"plaud_id: {FILE_ID}7",  # a longer id that contains this one
+        f"plaud_id: {FILE_ID[:-1]}",  # a prefix of this one
+        f"plaud_id: x{FILE_ID}",
+        f"plaud_id: [{FILE_ID}]",  # not a scalar
+        f"plaud_id: {FILE_ID}\nplaud_id: {FOREIGN_ID}",  # two identities
+        f"description: notes on {FILE_ID}",  # named outside plaud_id
+        f"source: https://web.plaud.ai/file/{FILE_ID}",  # a wiki field on a main note
+        f"related:\n  - {FILE_ID}",
+    ],
+)
+def test_only_this_notes_own_plaud_id_makes_it_a_duplicate(
+    sandbox, tmp_path: Path, front: str
+) -> None:
+    note = _same_name_note(sandbox)
+    note.write_text(f"---\n{front}\n---\nbody\n", encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_text(encoding="utf-8") == f"---\n{front}\n---\nbody\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"no front matter\nplaud_id: {FILE_ID}\n",  # the id only in the body
+        f"---\nplaud_id: {FILE_ID}\nbody without a closing line\n",  # unterminated
+        f"---\ntitle: x\n---\nplaud_id: {FILE_ID}\n",  # after the block
+    ],
+)
+def test_missing_or_malformed_front_matter_never_claims_the_note(
+    sandbox, tmp_path: Path, text: str
+) -> None:
+    note = _same_name_note(sandbox)
+    note.write_text(text, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'---\nplaud_id: "{FILE_ID}"\n---\n',
+        f"---\nplaud_id: '{FILE_ID}'  \n---\n",
+        f"---\r\ntitle: x\r\nplaud_id: {FILE_ID}\r\n---\r\nbody\r\n",
+        f"---\nplaud_id: {FILE_ID} # sent from the laptop\n---\n",
+    ],
+)
+def test_a_genuine_same_recording_note_is_still_found(sandbox, tmp_path: Path, text: str) -> None:
+    note = _same_name_note(sandbox)
+    note.write_text(text, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"))
+    assert result.status == "duplicate"
+    assert [e["path"] for e in result.existing] == [str(note)]
+
+
 def test_the_duplicate_check_precedes_the_model_call(sandbox, monkeypatch) -> None:
     _write_integrated(sandbox["tmp"])
     vault_send(FILE_ID, storage=sandbox["storage"])
