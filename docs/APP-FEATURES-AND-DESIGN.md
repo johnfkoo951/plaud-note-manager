@@ -872,6 +872,44 @@ model 미설정 상태에서 낮은 품질의 대량 fallback을 만드는 대�
 - provider×template summary
 - Plaud×CMDS integrated transcript·summary
 - reusable summary slot CRUD
+- prompt template 목록·조회·저장
+
+**Prompt template 계약 (`templates/*.md`)**
+- **front matter 키:**
+  - `name`, `description`
+  - `kind`: `summary` / `integrated` / `internal`. 없거나 모르는 값은 `summary`로 읽고,
+    `summarize`·`integrate`는 별칭이다.
+  - 선택 키: `deprecated`, `replaced_by`
+  - CRLF 파일도 같은 front matter로 읽는다.
+- **출시 template 21개:**
+
+  | kind | 개수 | template |
+  |---|---:|---|
+  | `integrated` | 2 | `default`, `integrated` |
+  | `internal` | 4 | `classify`, `metadata`, `speaker-names`, `vault-meeting-note` |
+  | `summary` | 15 | 나머지 (`note-*` 10개 포함) |
+
+  `cmds-meeting`·`cmds-lecture`·`cmds-coaching`은 deprecated다. 각각 `note-meeting`·
+  `note-lecture`·`note-consulting`으로 대체되며, 본문은 바꾸지 않았다.
+- **`templates [--json]`:** 이름순 목록이다.
+  - JSON 행은 `name`, `description`, `kind`, `deprecated`, `replaced_by`, `path`를 담는다.
+  - 텍스트 출력은 deprecated template에 `DEPRECATED -> <대체>`를 붙인다.
+- **`template-show <name> [--json]`:** 본문을 저장된 그대로 출력한다. `--json`은 위 필드에
+  `body`를 더한다. 없는 이름이면 stderr에 이유를 쓰고 exit 1로 끝난다.
+- **`template-save <name> [--description] [--kind] [--body-file]`:** 기존 front matter를
+  유지하고 준 값만 바꾼다.
+  - 다른 키와 순서는 보존되고, 생략한 `description`·`kind`도 그대로 남는다.
+  - 다음 경우에는 아무것도 쓰지 않고 거절한다(exit 1): 모르는 `kind`, 빈 본문, front
+    matter가 있는 그대로 담을 수 없는 값(작은따옴표와 큰따옴표를 모두 가져 어느 따옴표로도
+    감쌀 수 없는 값 등).
+- **종류 검사:** 모델 호출과 파일 쓰기 전에 한다. 거절 메시지는 대신 실행할 명령을 알려 준다.
+  - `cmds-summarize`와 core `summarize()`는 `summary` template만 받는다.
+  - `cmds-integrate`와 core `integrate()`는 `integrated` template만 받는다.
+  - `slot-add`는 `internal` template과 없는 template을 거절한다.
+- **deprecated 안내:** `cmds-summarize`와 `slot-add`에서 deprecated template을 쓰면 대체
+  template을 한 줄로 안내하고 그대로 실행한다. 기존 slot은 계속 돈다.
+- **기본 template:** `cmds-summarize`의 기본 template과 `data/slots.json`이 없을 때의 기본
+  slot은 `note-general`이다. `default`는 integrate 전용 prompt다.
 
 ### 6.6 Dual pipeline와 reuse query
 
@@ -892,6 +930,8 @@ model 미설정 상태에서 낮은 품질의 대량 fallback을 만드는 대�
 - vault index와 incremental refresh
 - Plaud keyword ↔ vault title/alias 연결
 - integrated-first vault send
+- template으로 작성해 보내기 (`vault-compose`)
+- 존재하는 vault 목록 (`vaults --json`: `key`, `label`, `name`, `path`)
 - meeting note 생성
 - Plaud Inbox용 Obsidian Bases view 설치
 - Plaud lane frontmatter lint
@@ -899,6 +939,82 @@ model 미설정 상태에서 낮은 품질의 대량 fallback을 만드는 대�
 
 incremental vault index는 변경 파일 upsert는 하지만 삭제·이동된 note를 자동 purge하는
 완전한 reconciliation은 아직 없다. YAML parser도 nested mapping 전체를 지원하지 않는다.
+
+**`vault-send`와 Wiki**
+
+`vault-send`는 Wiki에 쓰지 않는다. Wiki는 raw source만 받으며, `vault-compose --to wiki`가
+그것을 쓴다.
+- **거절 대상:** 다음은 모두 `wiki_unsupported`로 거절되며, `vault-compose --to wiki`를
+  안내한다.
+  - 대소문자와 상관없는 `wiki`
+  - Wiki 경로, 또는 그 안의 폴더
+  - Wiki가 설정되지 않았을 때 경로 구성요소에 `CMDS_LLM_Wiki`가 있는 경로
+  - 실제로 쓰게 될 폴더가 Wiki 안으로 떨어지는 `--dest`. 절대 경로, `..`, symlink 모두
+    해당한다.
+- **거절 시점:** DB, 모델, Terminal을 열기 전에 거절한다. `--via claude-window`도 같다.
+
+**`vault-compose <file_id> --template <t>`**
+- **옵션:** `--to main|wiki|<path>`, `--dest`, `--collection-purpose`, `--model`, `--id`,
+  `--dry-run`, `--on-duplicate`, `--json`
+- **검사 순서:** template 검사 → vault 확인 → 중복 확인 → 생성 순이다. 그래서 거절과 중복은
+  모델을 부르지 않는다.
+- **template:** deprecated가 아닌 `summary` 종류만 받는다. 없거나, 종류가 다르거나,
+  deprecated이면 `bad_template`이다. deprecated를 막는 이유는 자체 YAML을 내는 template이
+  front matter를 2겹으로 만들기 때문이다.
+- **Main(또는 다른 vault 경로):**
+  - transcript가 없으면 `no_transcript`다.
+  - summary를 생성한다. 같은 model·template의 캐시가 있으면 재사용한다. 생성 모델은 기본
+    metadata model이다.
+  - 그 결과를 `vault-send`로 `00. Inbox`(또는 `--dest`)에 쓴다. note front matter에
+    `model:`·`effort:`를 기록한다.
+  - `--dest`가 Wiki로 떨어지면 생성 전에 `wiki_unsupported`로 거절한다.
+- **Wiki:**
+  - `wiki`, Wiki 경로, 그 안의 폴더는 모두 raw source 경로로 간다.
+  - 수집 목적이 비어 있으면 `needs_purpose`다. 여러 줄은 한 줄로 합친다.
+  - 원문 전사본을 담은 note를 `10. Raw Sources/` 아래에 쓴다. 생성 모델은 dual model이다.
+- **vault 없음:** vault가 없거나 설정되지 않았으면 모델 호출 전에 `no_vault`다.
+- **status:** `--json`은 모든 status에서 exit 0으로 끝나며 status 필드로 결과를 알린다.
+
+  | status | 뜻 |
+  |---|---|
+  | `ok` | 기록됨 |
+  | `needs_purpose` | Wiki 수집 목적 없음 |
+  | `no_vault` | vault 없음 |
+  | `no_transcript` | transcript 없음 |
+  | `model_failed` | 모델 실패 |
+  | `schema_error` | 스키마 검사 실패 |
+  | `no_content` | 내용 없음 |
+  | `write_failed` | 쓰기 실패 |
+  | `bad_template` | 쓸 수 없는 template |
+  | `wiki_unsupported` | Main `--dest`가 Wiki로 떨어짐 |
+  | `duplicate` | 이미 보낸 녹음 |
+  | `invalid_option` | Wiki에 overwrite |
+
+**중복 정책 (`--on-duplicate ask|skip|overwrite|new`, 기본 `ask`)**
+
+`vault-send`와 `vault-compose` 모두에 적용된다. 모델 호출이나 Terminal 실행 전에 결정한다.
+- **"이미 보냄"으로 치는 경우:**
+  - 이 앱이 같은 녹음으로 같은 종류의 note를 남긴 reference 중, 파일이 실제로 있고 그
+    vault 안(폴더 무관)에 있는 것. Main 송출은 `vault-send`, Wiki 작성은 `wiki-raw-source`
+    reference를 본다.
+  - 목적지의 같은 이름 note가 front matter에 그 녹음 ID를 담고 있는 경우
+  - Wiki 안의 note는 Main 송출의 중복으로 치지 않는다.
+- **선택별 동작:**
+
+  | 선택 | 동작 |
+  |---|---|
+  | `ask` | `duplicate`를 돌려주고 아무것도 쓰지 않는다. 비JSON 출력은 기존 경로를 안내하고 exit 1로 끝난다. |
+  | `skip` | `ok`와 `action: skipped`를 돌려주고 아무것도 쓰지 않는다. |
+  | `overwrite` | 가장 최근 note를 지금 있는 자리에서 다시 쓴다. direct 송출은 `date created`를 유지한다. |
+  | `new` | 번호가 붙은 새 파일을 쓴다. Wiki에서는 새 버전이며 기존 버전은 보존된다. |
+
+  기존 note가 없으면 어느 선택이든 평소처럼 새로 쓴다.
+- **overwrite 거절:**
+  - Wiki: raw source는 불변이다. CLI는 option 오류로, core는 `invalid_option`으로 거절한다.
+  - `--via claude-window`: Claude가 파일을 직접 쓰기 때문이다.
+- **JSON 필드:** JSON 결과에 `action`(`created` / `overwritten` / `skipped`)과 `existing`이
+  더해진다. `existing`은 최신순 목록이며 각 항목에 `path`, `updated_at`,
+  `modified_after_send`, `obsidian_url`이 있다.
 
 ### 6.8 인증과 모델 상태 도구
 
