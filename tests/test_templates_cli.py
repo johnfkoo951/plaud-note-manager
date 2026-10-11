@@ -3,6 +3,7 @@ in front of `cmds-summarize`, `cmds-integrate` and `slot-add`."""
 
 from __future__ import annotations
 
+import inspect
 import json
 from pathlib import Path
 
@@ -242,6 +243,21 @@ def test_cmds_summarize_warns_on_a_deprecated_template_and_still_runs(summarize_
     assert len(summarize_env["prompts"]) == 1
     assert "SENTINEL-전사" in summarize_env["prompts"][0]
     assert (summarize_env["data"] / "summaries/f1/claude__cmds-meeting.md").is_file()
+
+
+def test_cmds_summarize_defaults_to_note_general(summarize_env) -> None:
+    # The old default, `default`, is an integrate prompt with no {transcript}:
+    # run through summarize it sent the model no transcript at all.
+    result = runner.invoke(cli.app, ["cmds-summarize", "f1"])
+    assert result.exit_code == 0, result.output
+    assert len(summarize_env["prompts"]) == 1
+    assert "SENTINEL-전사" in summarize_env["prompts"][0]
+    assert (summarize_env["data"] / "summaries/f1/claude__note-general.md").is_file()
+    assert "deprecated" not in result.stdout
+
+    option = inspect.signature(cli.cmds_summarize).parameters["template"].default
+    assert option.default == "note-general"
+    assert "cmds-integrate" in option.help
 
 
 @pytest.mark.parametrize("command", ["cmds-summarize", "cmds-integrate"])

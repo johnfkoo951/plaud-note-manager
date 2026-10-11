@@ -94,6 +94,14 @@ DEPRECATED = {
 }
 
 
+def test_default_describes_itself_as_an_integrate_prompt() -> None:
+    # It is still the template on existing slots, so it stays; its description
+    # must not read like a summary template any more.
+    t = load_template("default")
+    assert t.kind == KIND_INTEGRATED
+    assert "cmds-integrate" in t.description
+
+
 def test_legacy_templates_are_deprecated_with_live_replacements() -> None:
     assert {t.name: t.replaced_by for t in list_templates() if t.deprecated} == DEPRECATED
     for replacement in DEPRECATED.values():

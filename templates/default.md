@@ -1,6 +1,6 @@
 ---
 name: default
-description: Integrated summary + cleaned transcript using Plaud + CMDS sources.
+description: Integrate prompt (legacy ===TRANSCRIPT=== format) — run with cmds-integrate
 kind: integrated
 ---
 

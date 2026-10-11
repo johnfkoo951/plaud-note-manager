@@ -2756,7 +2756,10 @@ def cmds_summarize(
     file_id: str,
     model: str = typer.Option("claude", help=MODEL_HELP),
     model_id: str = typer.Option("", help="Optional provider API model id override."),
-    template: str = typer.Option("default", help="template name"),
+    template: str = typer.Option(
+        "note-general",
+        help="Summary template. Integrate templates (default, integrated) run via cmds-integrate.",
+    ),
     use_cmds_transcript: bool = typer.Option(
         True,
         help="Use CMDS (ElevenLabs) transcript when available; falls back to Plaud transcript.",
