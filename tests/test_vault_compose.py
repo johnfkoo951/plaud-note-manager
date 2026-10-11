@@ -559,6 +559,70 @@ def test_a_raw_source_owned_by_another_recording_is_never_this_ones(
     assert first.read_text(encoding="utf-8") == foreign
 
 
+# ----- integrate()'s placeholder is not a transcript ----------------------
+
+
+def _placeholder_integration() -> None:
+    """An integrated artifact whose reply had no transcript section."""
+    from core import integrate
+    from core import paths as paths_mod
+
+    out = paths_mod.integrated_paths("f1", model="claude", template="default")
+    out["summary"].write_text("---\nkind: summary\n---\n\n통합 요약", encoding="utf-8")
+    out["transcript"].write_text(
+        f"---\nkind: transcript\n---\n\n{integrate.NO_TRANSCRIPT}", encoding="utf-8"
+    )
+
+
+def _with_cmds(storage: Storage) -> Storage:
+    storage.save_cmds_transcript(
+        file_id="f1",
+        model="scribe",
+        language="ko",
+        text="CMDS 전사 원문",
+        segments_json=json.dumps([{"speaker": "구요한", "content": "CMDS 전사 원문"}]),
+        now=NOW,
+    )
+    return storage
+
+
+@pytest.mark.parametrize("to", ["wiki", "main"])
+def test_a_placeholder_transcript_gives_way_to_the_real_one(
+    storage, vaults, recording_model, to: str
+) -> None:
+    # claude-review-1 regress-1: the newest integrated transcript was the
+    # placeholder, and it became the immutable raw source's Original Content.
+    _with_cmds(storage)
+    _placeholder_integration()
+    if to == "wiki":
+        result = _wiki(storage)
+    else:
+        result = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    assert result.status == "ok"
+    note = Path(result.path).read_text(encoding="utf-8")
+    prompts = " ".join(str(call) for call in recording_model)
+    assert "(no transcript section)" not in note and "(no transcript section)" not in prompts
+    assert "CMDS 전사 원문" in prompts
+    if to == "wiki":
+        assert "CMDS 전사 원문" in note  # the verbatim Original Content
+
+
+@pytest.mark.parametrize("to", ["wiki", "main"])
+def test_a_placeholder_alone_is_no_transcript(
+    vaults, recording_model, tmp_path: Path, to: str
+) -> None:
+    bare = Storage(tmp_path / "bare.db")
+    bare.upsert_file(PlaudFile(id="f1", filename="09-14 세미나", duration=1000), now=NOW)
+    _placeholder_integration()
+    if to == "wiki":
+        result = _wiki(bare)
+    else:
+        result = vc.compose("f1", template="note-meeting", to="main", storage=bare)
+    assert result.status == "no_transcript"
+    assert recording_model == []
+    assert not list(vaults["wiki"].rglob("*.md")) and not list(vaults["main"].rglob("*.md"))
+
+
 def test_wiki_overwrite_is_refused(storage, vaults, recording_model) -> None:
     refused = _wiki(storage, on_duplicate="overwrite")
     assert refused.status == "invalid_option"

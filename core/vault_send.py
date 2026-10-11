@@ -39,6 +39,7 @@ from .metadata import (
     strip_frontmatter,
     strip_markdown_fence,
 )
+from .integrate import NO_TRANSCRIPT
 from .paths import integrated_dir, summaries_dir, summary_path
 from .paths import _safe as safe_component
 from .storage import Storage
@@ -199,11 +200,16 @@ def pick_integrated(file_id: str, *, model: str = "", template: str = "") -> Res
     if not summary:
         return None
     transcript_path = chosen.with_name(chosen.name.replace(".summary.md", ".transcript.md"))
+    transcript = _read(transcript_path if transcript_path.exists() else None)
+    if transcript == NO_TRANSCRIPT:
+        # integrate()'s stand-in for a reply with no transcript section: no
+        # transcript at all, so a raw source falls back to the CMDS / Plaud one.
+        transcript = ""
     return ResolvedContent(
         kind="integrated",
         label=chosen.name.removesuffix(".summary.md"),
         summary=summary,
-        transcript=_read(transcript_path if transcript_path.exists() else None),
+        transcript=transcript,
         source_path=str(chosen),
     )
 

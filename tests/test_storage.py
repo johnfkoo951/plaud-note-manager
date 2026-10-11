@@ -164,6 +164,24 @@ def test_list_note_references_filters_by_kind(tmp_path) -> None:
     ]
 
 
+def test_a_draft_reference_never_relabels_a_more_specific_kind(tmp_path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    sent = tmp_path / "a.md"
+    storage.upsert_note_reference(file_id="f", path=sent, kind="vault-send", title="sent", now=1)
+    storage.upsert_note_reference(file_id="f", path=sent, kind="draft", title="draft", now=2)
+    row = storage.list_note_references("f")[0]
+    assert (row["kind"], row["title"], row["updated_at"]) == ("vault-send", "sent", 1)
+
+    draft = tmp_path / "b.md"
+    storage.upsert_note_reference(file_id="f", path=draft, kind="draft", now=3)
+    storage.upsert_note_reference(file_id="f", path=draft, kind="draft", title="t", now=4)
+    row = storage.list_note_references("f", kind="draft")[0]
+    assert (row["title"], row["updated_at"]) == ("t", 4)  # a draft row still updates
+    storage.upsert_note_reference(file_id="f", path=draft, kind="vault-send", now=5)
+    kinds = {Path(r["path"]).name: r["kind"] for r in storage.list_note_references("f")}
+    assert kinds == {"a.md": "vault-send", "b.md": "vault-send"}
+
+
 def test_link_candidates_keep_whole_speaker_names(tmp_path, monkeypatch) -> None:
     from core import metadata, vault_index
 

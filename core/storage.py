@@ -1040,6 +1040,10 @@ class Storage:
         title: str | None = None,
         now: int,
     ) -> None:
+        """Record a note written for `file_id`. A `draft` (a note found by
+        meeting-note's id scan) never relabels a row of a more specific kind:
+        a `vault-send` row turned `draft` would hide that send from the
+        duplicate check."""
         with self._connect() as conn:
             conn.execute(
                 """
@@ -1049,6 +1053,7 @@ class Storage:
                     kind = excluded.kind,
                     title = COALESCE(excluded.title, title),
                     updated_at = excluded.updated_at
+                WHERE excluded.kind != 'draft' OR note_references.kind = 'draft'
                 """,
                 (file_id, str(path), kind, title, now),
             )

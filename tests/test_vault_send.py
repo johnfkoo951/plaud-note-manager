@@ -611,6 +611,36 @@ def test_missing_or_malformed_front_matter_never_claims_the_note(
     assert note.read_text(encoding="utf-8") == text
 
 
+def test_a_meeting_note_draft_scan_keeps_the_send_reference(sandbox) -> None:
+    # claude-review-1 regress-3: meeting-note records every vault note naming
+    # the recording as a `draft`; the upsert relabelled the vault-send row,
+    # so a later send to another folder missed it and wrote a second note.
+    st = sandbox["storage"]
+    _write_integrated(sandbox["tmp"])
+    first = vault_send(FILE_ID, storage=st, dest="60. Collections/63. Meetings")
+    st.upsert_note_reference(  # what write_meeting_note does for each draft it finds
+        file_id=FILE_ID, path=first.path, kind="draft", title="x", now=99
+    )
+    again = vault_send(FILE_ID, storage=st)  # default ask, into the Inbox
+    assert again.status == "duplicate"
+    assert [e["path"] for e in again.existing] == [first.path]
+    assert _inbox_notes(sandbox) == []
+
+
+def test_a_placeholder_transcript_is_never_sent(sandbox) -> None:
+    from core.integrate import NO_TRANSCRIPT
+
+    _write_integrated(sandbox["tmp"], transcript=NO_TRANSCRIPT)
+    note = Path(vault_send(FILE_ID, storage=sandbox["storage"], with_transcript=True).path)
+    assert NO_TRANSCRIPT not in note.read_text(encoding="utf-8")
+
+
+def test_a_real_integrated_transcript_is_still_sent(sandbox) -> None:
+    _write_integrated(sandbox["tmp"], transcript="통합 전사본 실제 내용")
+    note = Path(vault_send(FILE_ID, storage=sandbox["storage"], with_transcript=True).path)
+    assert "통합 전사본 실제 내용" in note.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("policy", ["ask", "skip", "overwrite"])
 def test_a_stale_reference_row_never_claims_another_recordings_note(sandbox, policy: str) -> None:
     # claude-review-1 regress-2: A's note was moved out of the Inbox, then B

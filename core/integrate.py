@@ -29,6 +29,11 @@ _SUM_RE = re.compile(
     re.DOTALL,
 )
 
+# Written in place of a section the reply did not have, so the slot still
+# shows something. Readers that pass a transcript on treat it as absent.
+NO_TRANSCRIPT = "(no transcript section)"
+NO_SUMMARY = "(no summary section)"
+
 
 def split_integrated(raw: str) -> tuple[str, str]:
     """Pull the transcript / summary parts out of the model's combined output.
@@ -158,12 +163,11 @@ def integrate(
     )
     paths["all"].write_text(front + response, encoding="utf-8")
     paths["transcript"].write_text(
-        front.replace("kind: integrated", "kind: transcript")
-        + (transcript or "(no transcript section)"),
+        front.replace("kind: integrated", "kind: transcript") + (transcript or NO_TRANSCRIPT),
         encoding="utf-8",
     )
     paths["summary"].write_text(
-        front.replace("kind: integrated", "kind: summary") + (summary or "(no summary section)"),
+        front.replace("kind: integrated", "kind: summary") + (summary or NO_SUMMARY),
         encoding="utf-8",
     )
     error_path.unlink(missing_ok=True)
