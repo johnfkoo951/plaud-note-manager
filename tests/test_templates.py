@@ -152,6 +152,107 @@ def test_as_dict_shape(tdir: Path) -> None:
     }
 
 
+# ----- parity with the app's reader -----------------------------------------
+# The parse cases of app/Tests/PlaudNoteAppTests/TemplateMetaTests.swift,
+# replayed through this reader. Both sides must agree on every one.
+
+
+def _read(tdir: Path, raw: str, name: str = "sample") -> dict:
+    (tdir / f"{name}.md").write_bytes(raw.encode())
+    t = load_template(name)
+    return {
+        "name": t.name,
+        "description": t.description,
+        "kind": t.kind,
+        "deprecated": t.deprecated,
+        "replaced_by": t.replaced_by,
+        "body": t.body,
+    }
+
+
+@pytest.mark.parametrize(
+    ("front", "expected"),
+    [
+        ('kind: "integrated"', {"kind": KIND_INTEGRATED}),
+        ("kind: integrate", {"kind": KIND_INTEGRATED}),
+        ("kind: 'Integrated'  # merged output", {"kind": KIND_INTEGRATED}),
+        ("kind: summarize", {"kind": KIND_SUMMARY}),
+        ("kind: summary", {"kind": KIND_SUMMARY}),
+        ("kind: internal", {"kind": KIND_INTERNAL}),
+        ("kind: transcript", {"kind": KIND_SUMMARY}),
+        ("kind:", {"kind": KIND_SUMMARY}),
+        ("name: x\ndescription: d", {"kind": KIND_SUMMARY, "deprecated": False, "replaced_by": ""}),
+        (
+            "deprecated: yes\nreplaced_by: note-meeting",
+            {"deprecated": True, "replaced_by": "note-meeting"},
+        ),
+        ("deprecated: TRUE", {"deprecated": True}),
+        ("deprecated: 1", {"deprecated": True}),
+        ("deprecated: no", {"deprecated": False}),
+        ("deprecated: maybe", {"deprecated": False}),
+        (
+            "description: first\nkind: internal\ndescription: second\nkind: summary",
+            {"description": "first", "kind": KIND_INTERNAL},
+        ),
+        ("description: Weekly sync # owner note", {"description": "Weekly sync"}),
+        ('description: "Use # for headings"', {"description": "Use # for headings"}),
+        ("description: 'single quoted'", {"description": "single quoted"}),
+        ("description: C# notes", {"description": "C# notes"}),
+        ('description: "unbalanced', {"description": '"unbalanced'}),
+        ('description: "a" and "b"', {"description": '"a" and "b"'}),
+        (
+            "tags:\n  description: nested\n# description: commented\nkind: internal",
+            {"description": "", "kind": KIND_INTERNAL},
+        ),
+    ],
+)
+def test_app_reader_cases(tdir: Path, front: str, expected: dict) -> None:
+    got = _read(tdir, f"---\n{front}\n---\n\nBody\n")
+    assert {k: got[k] for k in expected} == expected
+    assert got["body"] == "\nBody\n"
+
+
+def test_app_reader_every_key_and_file_name_identity(tdir: Path) -> None:
+    front = (
+        "name: something-else\n"
+        "description: Meeting minutes — decisions and action items.\n"
+        "kind: integrated\ndeprecated: false\nreplaced_by: note-meeting"
+    )
+    assert _read(tdir, f"---\n{front}\n---\n\nBody\n", name="note-sample") == {
+        "name": "note-sample",
+        "description": "Meeting minutes — decisions and action items.",
+        "kind": KIND_INTEGRATED,
+        "deprecated": False,
+        "replaced_by": "note-meeting",
+        "body": "\nBody\n",
+    }
+
+
+@pytest.mark.parametrize(
+    "raw", ["Summarise this:\n{transcript}\n", "---\ndescription: never closed\n\nBody\n"]
+)
+def test_app_reader_without_a_closed_block_keeps_the_whole_file(tdir: Path, raw: str) -> None:
+    got = _read(tdir, raw)
+    assert (got["description"], got["kind"], got["body"]) == ("", KIND_SUMMARY, raw)
+
+
+def test_app_reader_crlf_and_cr_twins(tdir: Path) -> None:
+    lf = (
+        "---\n"
+        'description: "Meeting minutes" # shipped\n'
+        "kind: integrate\ndeprecated: yes\nreplaced_by: note-meeting\n"
+        "---\n\n"
+        "관련 노트: [[Weekly Review]]\n\t- tab-indented line {transcript}\n---\nPart 2\n"
+    )
+    expected = _read(tdir, lf)
+    assert (expected["description"], expected["kind"]) == ("Meeting minutes", KIND_INTEGRATED)
+    assert (expected["deprecated"], expected["replaced_by"]) == (True, "note-meeting")
+    assert "\n---\nPart 2" in expected["body"]  # a later --- line belongs to the body
+    assert _read(tdir, lf.replace("\n", "\r\n")) == expected
+    assert _read(tdir, lf.replace("\n", "\r")) == expected
+    assert _read(tdir, "a\r\nb\rc\n", name="plain")["body"] == "a\nb\nc\n"
+
+
 # ----- kinds --------------------------------------------------------------
 
 
