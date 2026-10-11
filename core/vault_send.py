@@ -32,6 +32,7 @@ from .metadata import (
     first_nonempty,
     format_cmds_transcript,
     format_plaud_transcript,
+    human_speakers,
     looks_like_meeting,
     recorded_date,
     safe_filename,
@@ -230,7 +231,10 @@ def note_tags(snapshot: dict, note_type: str) -> list[str]:
 
 def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
     """CMDS/index/keywords/related/speakers for a note, from stored metadata
-    when present, else from the deterministic classifier."""
+    when present, else from the deterministic classifier.
+
+    `speakers` are whole real names (`human_speakers`): never split on
+    whitespace, no diarizer placeholders, NFC, deduplicated."""
     from .classification import classify_snapshot
 
     existing = storage.get_note_metadata(file_id)
@@ -256,12 +260,12 @@ def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
             related = [n["title"] for n in related_paths]
     except Exception:
         related_paths = []
-    speakers = [s for s in str(snapshot.get("speakers") or "").replace(",", " ").split() if s]
+    speakers = human_speakers(snapshot.get("speakers") or "")
     if not speakers:
         try:
             from .dual_pipeline import cmds_speakers
 
-            speakers = cmds_speakers(storage, file_id)
+            speakers = human_speakers(cmds_speakers(storage, file_id))
         except Exception:
             speakers = []
     aliases = [str(a) for a in as_list(meta.get("aliases"))][:3]

@@ -1,10 +1,15 @@
+import unicodedata
 from datetime import datetime
+
+import pytest
 
 from core.metadata import (
     _extract_json_object,
     as_list,
     first_nonempty,
     fmt_ts,
+    human_speakers,
+    is_placeholder_speaker,
     looks_like_meeting,
     recorded_date,
     safe_filename,
@@ -154,6 +159,42 @@ def test_looks_like_meeting_korean_and_english_markers() -> None:
 
 def test_looks_like_meeting_false_for_unrelated_text() -> None:
     assert not looks_like_meeting("a quiet walk in the park")
+
+
+# --- speaker labels are not people ----------------------------------------
+
+
+@pytest.mark.parametrize("label", ["speaker_0", "Speaker 3", "화자 2", "SPK_1", " "])
+def test_diarizer_placeholders_are_not_people(label: str) -> None:
+    assert is_placeholder_speaker(label)
+
+
+@pytest.mark.parametrize("name", ["구요한", "안창현", "@seulkiji1151"])
+def test_real_names_survive(name: str) -> None:
+    assert not is_placeholder_speaker(name)
+
+
+def test_human_speakers_filters_and_dedupes() -> None:
+    raw = ["Speaker 3", "Speaker 4", "speaker_0", "speaker_1", "구요한", "안창현", "구요한"]
+    assert human_speakers(raw) == ["구요한", "안창현"]
+
+
+def test_human_speakers_parses_the_snapshot_string() -> None:
+    # speaker_list() joins with ", "; a name is everything between commas.
+    assert human_speakers("Speaker 3, Speaker 4, 구요한, John Smith") == ["구요한", "John Smith"]
+
+
+def test_human_speakers_normalises_to_nfc_and_dedupes() -> None:
+    nfc = unicodedata.normalize("NFC", "구요한")
+    nfd = unicodedata.normalize("NFD", "구요한")
+    assert nfd != nfc
+    # Either order collapses to one composed name; normalising only after the
+    # dedupe check would let [nfc, nfd] through twice.
+    assert human_speakers([nfd, nfc]) == [nfc]
+    assert human_speakers([nfc, nfd]) == [nfc]
+    assert human_speakers(f"{nfc}, {nfd}") == [nfc]
+    # A decomposed diarizer label is still a placeholder.
+    assert human_speakers([unicodedata.normalize("NFD", "화자 2")]) == []
 
 
 # --- recorded_date (POST-FIX cascade) -------------------------------------
