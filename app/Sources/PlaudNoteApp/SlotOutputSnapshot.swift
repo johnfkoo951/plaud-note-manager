@@ -6,6 +6,8 @@ struct SlotOutputSnapshot {
     struct Output {
         let summary: String?
         let integrated: [Database.IntegratedKind: String]
+        /// The slot's last integration failed (its error sidecar exists).
+        var integrateFailure: IntegrateFailureVM? = nil
         var hasIntegrated: Bool { integrated[.all] != nil }
     }
 
@@ -34,7 +36,11 @@ struct SlotOutputSnapshot {
                     template: slot.template, kind: kind
                 )
             }
-            outputs[slot.id] = Output(summary: summary, integrated: integrated)
+            let failure = Database.shared.integrateFailure(
+                fileID: fileID, model: slot.outputModel, template: slot.template
+            )
+            outputs[slot.id] = Output(summary: summary, integrated: integrated,
+                                      integrateFailure: failure)
         }
         return SlotOutputSnapshot(fileID: fileID, outputs: outputs)
     }

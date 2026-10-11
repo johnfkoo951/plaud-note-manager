@@ -243,6 +243,77 @@ struct NoteMetadataVM: Hashable {
     let finalNotePath: String?
     let tags: [NoteTagVM]
     let references: [NoteReferenceVM]
+    var autoMetaFailure: AutoMetaFailureVM? = nil
+}
+
+/// Model-failure reasons come from vendor CLIs. The app shows them verbatim
+/// but on one line, and bounded, whatever an older or newer CLI stored.
+enum FailureText {
+    static func oneLine(_ raw: String, limit: Int = 400) -> String {
+        let line = raw.split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return line.count > limit ? String(line.prefix(limit - 1)) + "…" : line
+    }
+
+    /// Epoch seconds (what core writes) or an ISO 8601 string; nil otherwise.
+    static func date(_ value: Any?) -> Date? {
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            return Date(timeIntervalSince1970: number.doubleValue)
+        }
+        guard let text = value as? String else { return nil }
+        let iso = ISO8601DateFormatter()
+        if let date = iso.date(from: text) { return date }
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return iso.date(from: text)
+    }
+}
+
+/// Why automatic metadata last failed for a recording:
+/// `metadata_json.auto_meta.{last_error, last_error_at, attempts}`. A success
+/// rewrites `auto_meta` without `last_error`, so this is nil again.
+struct AutoMetaFailureVM: Hashable {
+    let reason: String
+    let at: Date?
+    let attempts: Int
+
+    var line: String {
+        attempts > 0 ? "자동 메타데이터 실패 (\(attempts)회): \(reason)" : "자동 메타데이터 실패: \(reason)"
+    }
+
+    /// Never throws: missing, malformed or older `metadata_json` gives nil.
+    static func parse(metadataJSON: String?) -> AutoMetaFailureVM? {
+        guard let data = metadataJSON?.data(using: .utf8),
+              let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let autoMeta = object["auto_meta"] as? [String: Any],
+              let raw = autoMeta["last_error"] as? String
+        else { return nil }
+        let reason = FailureText.oneLine(raw)
+        guard !reason.isEmpty else { return nil }
+        let attempts = autoMeta["attempts"] as? NSNumber
+        return AutoMetaFailureVM(reason: reason, at: FailureText.date(autoMeta["last_error_at"]),
+                                 attempts: attempts?.intValue ?? 0)
+    }
+}
+
+/// The last `cmds-integrate` run for a slot failed: the sidecar
+/// `<integrated>/<id>/<stem>.error.json` = `{at, provider, model, template,
+/// reason}`. A successful run deletes it.
+struct IntegrateFailureVM: Hashable {
+    let reason: String
+    let at: Date?
+
+    var line: String { "마지막 통합 실패: \(reason)" }
+
+    static func parse(_ data: Data) -> IntegrateFailureVM? {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let raw = object["reason"] as? String
+        else { return nil }
+        let reason = FailureText.oneLine(raw)
+        guard !reason.isEmpty else { return nil }
+        return IntegrateFailureVM(reason: reason, at: FailureText.date(object["at"]))
+    }
 }
 
 struct ModelPresetVM: Identifiable, Hashable {
@@ -1105,11 +1176,29 @@ final class Database: @unchecked Sendable {
         case summary
     }
 
+    /// `<model>__<template>` with the same character rule as core's `_safe`,
+    /// shared by the integrated outputs and their failure sidecar.
+    static func integratedStem(model: String, template: String) -> String {
+        "\(sanitizeName(model))__\(sanitizeName(template))"
+    }
+
+    static func integratedFailureFileName(model: String, template: String) -> String {
+        integratedStem(model: model, template: template) + ".error.json"
+    }
+
+    /// Why the slot's last integration failed; nil when its sidecar is
+    /// absent or unreadable. Reads a file: call off the main thread.
+    func integrateFailure(fileID: String, model: String, template: String) -> IntegrateFailureVM? {
+        guard !fileID.isEmpty else { return nil }
+        let name = Self.integratedFailureFileName(model: model, template: template)
+        let path = "\(outputBaseDir(kind: "integrated"))/\(fileID)/\(name)"
+        guard let data = FileManager.default.contents(atPath: path) else { return nil }
+        return IntegrateFailureVM.parse(data)
+    }
+
     func integratedFile(fileID: String, model: String, template: String,
                         kind: IntegratedKind) -> URL? {
-        let safeModel = sanitize(model)
-        let safeTpl = sanitize(template)
-        let stem = "\(safeModel)__\(safeTpl)"
+        let stem = Self.integratedStem(model: model, template: template)
         let suffix: String = {
             switch kind {
             case .all: return ".md"
@@ -1172,6 +1261,10 @@ final class Database: @unchecked Sendable {
     }
 
     private func sanitize(_ s: String) -> String {
+        Self.sanitizeName(s)
+    }
+
+    private static func sanitizeName(_ s: String) -> String {
         s.map { c in c.isLetter || c.isNumber || c == "-" || c == "_" ? String(c) : "_" }
          .joined()
     }
@@ -1513,6 +1606,7 @@ final class Database: @unchecked Sendable {
                  WHERE file_id = ?
                  ORDER BY updated_at DESC
             """, arguments: [fileID]).map(NoteReferenceVM.init(row:))
+            let metadataJSON: String? = meta?["metadata_json"]
             return NoteMetadataVM(
                 fileID: fileID,
                 title: meta?["title"],
@@ -1526,7 +1620,8 @@ final class Database: @unchecked Sendable {
                 draftPath: meta?["draft_path"],
                 finalNotePath: meta?["final_note_path"],
                 tags: tags,
-                references: refs
+                references: refs,
+                autoMetaFailure: AutoMetaFailureVM.parse(metadataJSON: metadataJSON)
             )
         }
         return (result ?? nil) ?? NoteMetadataVM(

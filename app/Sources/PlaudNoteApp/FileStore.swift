@@ -88,6 +88,17 @@ enum PlaudTagCommandArguments {
     }
 }
 
+/// One line for the classify preview when the LLM assist was needed but
+/// failed, was unavailable, or was skipped after an earlier failure.
+enum ClassifyLLMNotice {
+    static func line(for plans: [FileStore.ClassifyPlan]) -> String? {
+        let failed = plans.filter(\.llmFailed)
+        guard !failed.isEmpty else { return nil }
+        let reason = failed.lazy.map { FailureText.oneLine($0.llmError) }.first { !$0.isEmpty }
+        return "LLM 보조 실패 \(failed.count)건" + (reason.map { " — \($0)" } ?? "")
+    }
+}
+
 @MainActor
 final class FileStore: ObservableObject {
     /// The full library (trash included) loaded once from SQLite. The visible
@@ -820,6 +831,9 @@ final class FileStore: ObservableObject {
     @Published var classifyResult: String?
     /// Decoded dry-run plans driving the preview sheet (nil = sheet closed).
     @Published var classifyPlans: [ClassifyPlan]?
+    /// "LLM 보조 실패 N건 — <reason>" for the last dry run, counted over every
+    /// row — including the ones dropped from the sheet for having no folder.
+    @Published var classifyLLMNotice: String?
 
     /// v0.8: OAuth / subscription login state per LLM provider (`plaud llm-auth --json`).
     struct LLMAuthRow: Identifiable, Decodable {
@@ -879,9 +893,15 @@ final class FileStore: ObservableObject {
         var index: String = ""
         var source: String = "rule"
         var alternatives: [String] = []
+        /// How the LLM assist went: off | ok | rejected | failed |
+        /// unavailable | skipped. Older CLIs omit it (→ off).
+        var llmStatus: String = "off"
+        var llmError: String = ""
 
         var id: String { fileID }
         var isLLM: Bool { source == "llm" }
+        /// The assist was needed but produced nothing usable.
+        var llmFailed: Bool { ["failed", "unavailable", "skipped"].contains(llmStatus) }
 
         enum CodingKeys: String, CodingKey {
             case fileID = "file_id"
@@ -893,6 +913,8 @@ final class FileStore: ObservableObject {
             case index
             case source
             case alternatives
+            case llmStatus = "llm_status"
+            case llmError = "llm_error"
         }
 
         init(from decoder: Decoder) throws {
@@ -906,6 +928,8 @@ final class FileStore: ObservableObject {
             self.index = (try? c.decode(String.self, forKey: .index)) ?? ""
             self.source = (try? c.decode(String.self, forKey: .source)) ?? "rule"
             self.alternatives = (try? c.decode([String].self, forKey: .alternatives)) ?? []
+            self.llmStatus = (try? c.decode(String.self, forKey: .llmStatus)) ?? "off"
+            self.llmError = (try? c.decode(String.self, forKey: .llmError)) ?? ""
         }
     }
 
@@ -929,10 +953,13 @@ final class FileStore: ObservableObject {
             }
             return
         }
+        let notice = ClassifyLLMNotice.line(for: plans)
+        classifyLLMNotice = notice
         // Only files that resolved to a folder are actionable proposals.
         let actionable = plans.filter { !$0.folderName.isEmpty }
         if actionable.isEmpty {
-            classifyResult = "No recordings matched a folder."
+            classifyResult = ["No recordings matched a folder.", notice]
+                .compactMap { $0 }.joined(separator: "\n")
             return
         }
         classifyPlans = actionable.sorted { $0.confidence > $1.confidence }

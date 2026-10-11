@@ -745,6 +745,14 @@ private struct ClassifyPreviewSheet: View {
                     Text(headerLine)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    if let notice = store.classifyLLMNotice {
+                        Text(notice)
+                            .font(.caption)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .help(notice)
+                    }
                 }
                 Spacer()
                 Button { dismiss() } label: {
@@ -855,6 +863,16 @@ private struct ClassifyPreviewSheet: View {
                         .background(Color.purple.opacity(0.15), in: Capsule())
                         .foregroundStyle(.purple)
                         .help("규칙 신뢰도가 낮아 모델이 중재한 결과")
+                }
+                if plan.llmFailed {
+                    Text("LLM✕")
+                        .font(.system(size: 9, weight: .bold))
+                        .padding(.horizontal, 5).padding(.vertical, 2)
+                        .background(Color.orange.opacity(0.15), in: Capsule())
+                        .foregroundStyle(.orange)
+                        .help(plan.llmError.isEmpty
+                              ? "LLM 보조를 쓰지 못해 규칙 결과만 표시"
+                              : FailureText.oneLine(plan.llmError))
                 }
                 confidencePill(plan.confidence)
             }
@@ -3680,6 +3698,22 @@ private struct RecordingInfoPanel: View {
                 if let path = metadata?.finalNotePath, !path.isEmpty {
                     Button("생성한 볼트 노트 열기") { store.openPath(path) }
                 }
+                if let failure = metadata?.autoMetaFailure {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Label(failure.line, systemImage: "exclamationmark.triangle.fill")
+                            .font(AppUI.metaFont)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .help(failure.reason)
+                        Spacer(minLength: 4)
+                        Button("다시 시도") {
+                            Task { await store.generateMetadata(file.id) }
+                        }
+                        .controlSize(.small)
+                        .disabled(store.metadataGeneratingIDs.contains(file.id))
+                    }
+                }
             }
             Divider()
             VStack(alignment: .leading, spacing: 8) {
@@ -5406,6 +5440,15 @@ private struct AIInspectorPanel: View {
                     .buttonStyle(.borderless)
                     .font(AppUI.controlFont)
                 }
+            }
+
+            if m == .integrated, !isRunning, let failure = output(for: slot)?.integrateFailure {
+                Text(failure.line)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(failure.reason)
             }
 
             if isOpen, hasOutput {
