@@ -212,6 +212,14 @@ struct TemplateMeta: Hashable, Identifiable {
     }
 }
 
+/// When the AI inspector re-reads its slots and templates: after its own
+/// runs and slot edits (`refreshTick`), and whenever templates may have
+/// changed on disk (`FileStore.templatesRevision`). Either one moving reloads.
+struct SlotListLoadKey: Hashable {
+    let refreshTick: Int
+    let templatesRevision: Int
+}
+
 /// Result of reading the templates folder.
 struct TemplateScan: Equatable {
     var templates: [TemplateMeta] = []

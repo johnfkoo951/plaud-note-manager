@@ -206,6 +206,14 @@ final class TemplateMetaTests: XCTestCase {
         XCTAssertEqual(TemplateMeta.initialSelection(choices: []), "note-general")
     }
 
+    func testInspectorReloadsWhenEitherRunsOrTemplatesChange() {
+        let base = SlotListLoadKey(refreshTick: 3, templatesRevision: 7)
+        XCTAssertEqual(base, SlotListLoadKey(refreshTick: 3, templatesRevision: 7), "no change, no reload")
+        XCTAssertNotEqual(base, SlotListLoadKey(refreshTick: 4, templatesRevision: 7), "a run or slot edit")
+        XCTAssertNotEqual(base, SlotListLoadKey(refreshTick: 3, templatesRevision: 8),
+                          "Settings › Reload, closing Settings or returning to the app")
+    }
+
     func testViewerOrderPutsNoteTemplatesFirst() {
         let all = ["default", "note-meeting", "classify", "note-general"].map {
             meta("description: d", name: $0)

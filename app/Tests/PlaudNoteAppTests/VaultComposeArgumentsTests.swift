@@ -122,6 +122,26 @@ final class VaultComposeArgumentsTests: XCTestCase {
         XCTAssertEqual(outcome.fileID, "", "fileID is set by the app, never decoded")
     }
 
+    func testCostCaptionNamesComposesOwnModelAndConditionalReuse() {
+        let main = VaultComposeCaption.cost(vault: "main")
+        XCTAssertTrue(main.contains("Metadata model"))
+        XCTAssertFalse(main.contains("Cross-analysis"))
+
+        let wiki = VaultComposeCaption.cost(vault: "wiki")
+        XCTAssertTrue(wiki.contains("Cross-analysis model"))
+        XCTAssertTrue(wiki.contains("비어 있으면 Metadata model"), "dual_model falls back to metadata_model")
+
+        for caption in [main, wiki, VaultComposeCaption.cost(vault: "")] {
+            // Reuse is conditional on compose's own model, as in _summarize_with.
+            XCTAssertTrue(caption.contains("그 모델로 만든 같은 템플릿 요약이 있을 때만 재사용"), caption)
+            XCTAssertTrue(caption.contains("새로 실행"), caption)
+            XCTAssertTrue(caption.contains("슬롯이 다른 모델로 만든 요약은 재사용되지 않습니다"), caption)
+            // The app-03 wording promised reuse of any summary for the template.
+            XCTAssertFalse(caption.contains("요약이 이미 있으면 그것을 재사용"), caption)
+        }
+        XCTAssertNotEqual(main, wiki)
+    }
+
     func testErrorMessageCoversEveryComposeStatus() {
         XCTAssertNil(VaultComposeOutcome.errorMessage(status: "ok", detail: "written"))
         let statuses = ["needs_purpose", "no_vault", "no_transcript", "model_failed",

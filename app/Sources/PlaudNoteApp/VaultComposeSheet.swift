@@ -33,8 +33,7 @@ struct VaultComposeSheet: View {
                 if VaultComposeArguments.requiresPurpose(vault: vault) {
                     purposeRow
                 }
-                caption("선택한 템플릿을 모델로 실행해 노트를 작성합니다 — 쿼터를 쓰고 몇 분 걸릴 수 "
-                        + "있습니다. 이 녹음에 같은 템플릿의 요약이 이미 있으면 그것을 재사용합니다.")
+                caption(VaultComposeCaption.cost(vault: vault))
             } else {
                 HStack(spacing: 6) {
                     ProgressView().controlSize(.small)
