@@ -26,6 +26,7 @@ from .frontmatter import iso_minute
 from .metadata import build_recording_snapshot, recorded_date
 from .paths import summary_path
 from .storage import Storage
+from .templates import KIND_SUMMARY, TemplateKindError, load_template, require_kind
 from .vault_send import (
     VaultSendResult,
     _pick_transcript,
@@ -79,7 +80,8 @@ def wiki_slug(title: str, *, max_len: int = 80) -> str:
 
 @dataclass
 class ComposeResult:
-    status: str  # ok | no_transcript | no_vault | model_failed | schema_error | needs_purpose
+    # ok | bad_template | no_transcript | no_vault | model_failed | schema_error | needs_purpose
+    status: str
     detail: str = ""
     path: str = ""
     vault: str = ""
@@ -283,6 +285,19 @@ def compose(
     storage: Storage | None = None,
 ) -> ComposeResult:
     """Generate `template` for `file_id` and land it in vault `to`."""
+    # Checked first: a cached summary is reused without calling summarize(),
+    # so its own kind check would never see a cached integrate-prompt run.
+    try:
+        require_kind(load_template(template), KIND_SUMMARY)
+    except FileNotFoundError:
+        return ComposeResult("bad_template", f"template not found: {template}", template=template)
+    except (OSError, UnicodeDecodeError) as exc:
+        return ComposeResult(
+            "bad_template", f"template unreadable: {template} ({exc})", template=template
+        )
+    except TemplateKindError as exc:
+        return ComposeResult("bad_template", str(exc), template=template)
+
     storage = storage or Storage()
 
     if to == "wiki":

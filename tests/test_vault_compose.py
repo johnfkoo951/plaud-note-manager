@@ -238,6 +238,46 @@ def test_wiki_note_names_the_agent_rather_than_the_vault_owner(storage, vaults, 
 # ----- guards -----------------------------------------------------------
 
 
+def test_compose_refuses_a_non_summary_template(storage, vaults, monkeypatch) -> None:
+    from core import app_config
+    from core import paths as paths_mod
+    from core import summarize as sm
+
+    calls: list = []
+    monkeypatch.setattr(sm, "model_available", lambda m: True)
+    monkeypatch.setattr(sm, "run_model", lambda *a, **k: calls.append(a) or "x")
+    monkeypatch.setattr(app_config, "model_id_for", lambda m: "")
+    # A cached run of the integrate prompt is read without calling summarize(),
+    # so the check in summarize() alone would never see it.
+    cached = paths_mod.summary_path("f1", model="claude", template="default")
+    cached.write_text("---\ntemplate: default\n---\n\n## 요약\n캐시", encoding="utf-8")
+
+    for to in ("main", "wiki"):
+        result = vc.compose(
+            "f1",
+            template="default",
+            to=to,
+            collection_purpose="p",
+            model="claude",
+            storage=storage,
+        )
+        assert result.status == "bad_template"
+        assert "cmds-integrate" in result.detail
+        assert result.template == "default"
+    assert calls == []
+    assert not [p for v in vaults.values() for p in v.rglob("*") if p.is_file()]
+
+
+def test_compose_reports_a_missing_template_before_opening_storage(vaults, monkeypatch) -> None:
+    def no_storage():
+        raise AssertionError("Storage() opened before the template was checked")
+
+    monkeypatch.setattr(vc, "Storage", no_storage)
+    result = vc.compose("f1", template="no-such-template", to="main")
+    assert result.status == "bad_template"
+    assert "template not found: no-such-template" in result.detail
+
+
 def test_a_recording_with_no_transcript_cannot_become_a_raw_source(
     tmp_path, vaults, stub_model
 ) -> None:
