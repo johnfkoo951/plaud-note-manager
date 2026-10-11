@@ -49,6 +49,14 @@ final class PlaudProcessRunnerTests: XCTestCase {
         XCTAssertEqual(result.stderr, "failed\n")
     }
 
+    func testTemplateAndVaultListingsUseTheShortTimeout() {
+        XCTAssertEqual(PlaudCommand.timeout(for: ["templates", "--json"]), 30)
+        XCTAssertEqual(PlaudCommand.timeout(for: ["template-show", "note-general"]), 30)
+        XCTAssertEqual(PlaudCommand.timeout(for: ["vaults", "--json"]), 30)
+        XCTAssertEqual(PlaudCommand.timeout(for: ["vault-compose", "--template", "t"]), 7200,
+                       "compose passes its own 960 s timeout")
+    }
+
     func testRuntimeDoesNotResolvePackages() throws {
         let process = try PlaudCommand.makeProcess(args: ["auth", "--json"])
         XCTAssertTrue(process.executableURL!.path.hasSuffix(".venv/bin/python"))

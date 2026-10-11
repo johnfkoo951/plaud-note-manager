@@ -1093,6 +1093,8 @@ final class FileStore: ObservableObject {
     /// Last successful vault-send (path + obsidian:// URL) for the feedback
     /// row in the Work Sidebar. Cleared when the selection changes.
     @Published var lastVaultSend: VaultSendOutcome?
+    /// Non-nil while the compose sheet is open (`vault-compose`).
+    @Published var composeRequest: VaultComposeRequest?
 
     /// Generate metadata + auto tags. By default no `--model` is passed so the
     /// CLI resolves the configured classify model (`plaud config-classify`) —

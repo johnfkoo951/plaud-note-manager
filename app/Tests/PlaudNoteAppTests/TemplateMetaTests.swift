@@ -181,6 +181,21 @@ final class TemplateMetaTests: XCTestCase {
         XCTAssertTrue(TemplateMeta.slotChoices(all).contains { $0.name == "cmds-meeting" })
     }
 
+    func testComposeChoicesKeepOnlyNoteSummaryTemplates() {
+        let all = [
+            meta("kind: internal", name: "classify"),
+            meta("kind: summary\ndeprecated: true\nreplaced_by: note-meeting", name: "cmds-meeting"),
+            meta("kind: integrated", name: "default"),
+            meta("kind: summary", name: "meeting"),
+            meta("kind: internal", name: "note-internal-prompt"),
+            meta("kind: integrated", name: "note-fused"),
+            meta("kind: summary\ndeprecated: yes", name: "note-old"),
+            meta("kind: summary", name: "note-meeting"),
+            meta("description: no kind line", name: "note-general"),
+        ]
+        XCTAssertEqual(TemplateMeta.composeChoices(all).map(\.name), ["note-general", "note-meeting"])
+    }
+
     func testInitialSelectionPrefersNoteGeneralThenFirstChoice() {
         let withGeneral = ["default", "note-general", "note-meeting"].map {
             meta("description: d", name: $0)

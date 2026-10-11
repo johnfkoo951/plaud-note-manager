@@ -384,13 +384,24 @@ struct CommandPaletteOverlay: View {
         })
 
         items.append(PaletteAction(
+            id: "vault-compose",
+            title: "Compose with Template…",
+            systemImage: "doc.badge.gearshape",
+            isEnabled: hasSelection
+        ) {
+            guard let fileID else { return true }
+            store.composeRequest = VaultComposeRequest(fileID: fileID, presetVault: nil)
+            return true
+        })
+
+        items.append(PaletteAction(
             id: "obsidian-wiki",
-            title: "Send to Wiki Vault",
+            title: "Compose to Wiki (raw source)…",
             systemImage: "books.vertical",
             isEnabled: hasSelection
         ) {
             guard let fileID else { return true }
-            Task { await store.vaultSend(fileID, to: "wiki") }
+            store.composeRequest = VaultComposeRequest(fileID: fileID, presetVault: "wiki")
             return true
         })
 
