@@ -569,6 +569,15 @@ struct ContentView: View {
         }
     }
 
+    /// Overwrite is the destructive answer of the duplicate dialog.
+    private static func buttonRole(for choice: VaultDuplicatePrompt.Choice) -> ButtonRole? {
+        switch choice {
+        case .overwrite: return .destructive
+        case .cancel: return .cancel
+        case .openExisting, .createNew: return nil
+        }
+    }
+
     /// The original split view with its toolbar/sheets/alerts attached, kept
     /// on the NavigationSplitView itself so toolbar placement is unchanged by
     /// the palette's ZStack wrapper.
@@ -685,6 +694,23 @@ struct ContentView: View {
             VaultComposeSheet(store: store, request: request) {
                 store.composeRequest = nil
             }
+        }
+        .confirmationDialog(
+            store.pendingVaultDuplicate?.title ?? "",
+            isPresented: Binding(
+                get: { store.pendingVaultDuplicate != nil },
+                set: { if !$0 { store.pendingVaultDuplicate = nil } }
+            ),
+            titleVisibility: .visible,
+            presenting: store.pendingVaultDuplicate
+        ) { prompt in
+            ForEach(prompt.choices) { choice in
+                Button(prompt.label(for: choice), role: Self.buttonRole(for: choice)) {
+                    store.resolveVaultDuplicate(prompt, choice: choice)
+                }
+            }
+        } message: { prompt in
+            Text(prompt.message)
         }
     }
 }
@@ -5236,6 +5262,12 @@ private struct AIInspectorPanel: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                if let label = sent.feedbackLabel {
+                    Text(label)
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .fixedSize()
+                }
                 Spacer(minLength: 4)
                 Button("Open") {
                     store.openVaultNote(sent)
