@@ -547,23 +547,32 @@ def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
     return path
 
 
-# A front-matter value that is not one plain or quoted single-line string —
-# a list, a nested map, a block or multi-line scalar. It equals no id.
-_COMPLEX = "\x00"
-# The escapes a double-quoted value may use here; any other fails closed.
+# The identity check reads only a small, fully understood subset of YAML —
+# exactly what this app writes: single-line `key: value` with a plain or a
+# same-line quoted scalar, `  - scalar` block-list items under an empty key,
+# the empty list `[]`, whole-line comments and blank lines. Anything else
+# anywhere in the block (flow collections, block or multi-line scalars,
+# anchors, aliases, tags, quoted keys, other indentation) means the note
+# makes no ownership claim. A missed match only costs a numbered new note.
+
+# The value of a key that holds a list (block items or `[]`); equals no id.
+_LIST = "\x00"
+# The escapes a double-quoted scalar may use; any other means no claim.
 _ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t", "r": "\r", " ": " "}
+# A plain key or value may not start with these: each opens another construct.
+_INDICATORS = "[]{}&*!|>%@`,#'\""
 
 
 class _Unsupported(ValueError):
-    """Front matter this deliberately small YAML reader does not model."""
+    """Front matter outside the subset the identity check reads."""
 
 
-def _read_quoted(text: str, start: int) -> tuple[str, int]:
-    """The quoted scalar opening at `text[start]`, decoded, and the index just
-    past its closing quote. It may run over several lines."""
-    quote = text[start]
+def _read_quoted(text: str) -> tuple[str, str]:
+    """The quoted scalar opening `text`, decoded, and the rest of the line.
+    It must close on this line."""
+    quote = text[0]
     out: list[str] = []
-    j = start + 1
+    j = 1
     while j < len(text):
         ch = text[j]
         if quote == '"' and ch == "\\":
@@ -576,11 +585,11 @@ def _read_quoted(text: str, start: int) -> tuple[str, int]:
             out.append("'")
             j += 2
         elif ch == quote:
-            return "".join(out), j + 1
+            return "".join(out), text[j + 1 :]
         else:
             out.append(ch)
             j += 1
-    raise _Unsupported
+    raise _Unsupported  # it runs onto the next line, or never closes
 
 
 def _comment_at(text: str) -> int:
@@ -591,106 +600,96 @@ def _comment_at(text: str) -> int:
     return -1
 
 
+def _uncommented(text: str) -> str:
+    cut = _comment_at(text)
+    return (text[:cut] if cut != -1 else text).rstrip(" \t")
+
+
+def _read_scalar(text: str) -> str:
+    """One single-line scalar, plain or quoted, with an optional comment after
+    a blank, as YAML reads it."""
+    if text[:1] in ('"', "'"):
+        value, after = _read_quoted(text)
+        rest = after.lstrip(" \t")
+        if rest and not (rest.startswith("#") and rest != after):
+            raise _Unsupported  # only a blank-separated comment may follow
+        return value
+    value = _uncommented(text)
+    if not value or value[0] in _INDICATORS or value[:2].rstrip() in ("-", "?", ":"):
+        raise _Unsupported
+    if ": " in value or ":\t" in value or value.endswith(":"):
+        raise _Unsupported  # a mapping, not a scalar
+    return value
+
+
 def _read_key(line: str) -> tuple[str, str]:
-    """The key of a top-level `key: value` line, decoded when quoted, and the
-    text after its colon."""
-    if line[0] in "\"'":
-        key, end = _read_quoted(line, 0)  # a key never spans lines
-        rest = line[end:].lstrip(" \t")
-    elif line[0] in "?:,[]{}&*!|>%@`":
+    """The plain key of a column-0 `key: value` line and the text after it."""
+    colon = next(
+        (j for j, ch in enumerate(line) if ch == ":" and line[j + 1 : j + 2] in ("", " ", "\t")),
+        -1,
+    )
+    key = line[:colon].rstrip(" ") if colon > 0 else ""
+    if not key or key[0] in _INDICATORS or key[:2].rstrip() in ("-", "?", ":"):
         raise _Unsupported
-    else:
-        cut = _comment_at(line)
-        head = line[:cut] if cut != -1 else line
-        colon = next(
-            (
-                j
-                for j, ch in enumerate(head)
-                if ch == ":" and head[j + 1 : j + 2] in ("", " ", "\t")
-            ),
-            -1,
-        )
-        if colon <= 0:
-            raise _Unsupported
-        key, rest = line[:colon].rstrip(), line[colon:]
-    if not rest.startswith(":") or rest[1:2] not in ("", " ", "\t"):
+    if _comment_at(key) != -1:
         raise _Unsupported
-    return key, rest[1:]
+    return key, line[colon + 1 :]
 
 
 def _front_matter_fields(path: Path) -> dict[str, list[str]] | None:
-    """The top-level `key: value` pairs of the note's leading front matter,
-    every value of a repeated key kept and read as YAML reads it (quotes,
-    escapes, a trailing comment), `_COMPLEX` for any other kind of value.
-
-    None when there is no complete block at the very top of the file, or it
-    uses syntax this small reader does not model. Text inside a value, however
-    it is laid out, never becomes a field: such a note names no owner, and so
-    can never be taken for this recording's note.
-    """
+    """The `key: value` pairs of the note's leading front matter, every value
+    of a repeated key kept, `_LIST` for a list. None when there is no complete
+    block at the very top of the file, or anything in it lies outside the
+    subset described above."""
     try:
         with path.open("rb") as fh:
             head = fh.read(65536).decode("utf-8", errors="ignore")
     except OSError:
         return None
-    first, _, text = head.replace("\r\n", "\n").partition("\n")
-    if first.rstrip() != "---":
+    lines = head.replace("\r\n", "\n").split("\n")
+    if lines[0].rstrip() != "---":
         return None
     try:
-        return _read_mapping(text)
+        return _read_mapping(lines[1:])
     except _Unsupported:
         return None
 
 
-def _read_mapping(text: str) -> dict[str, list[str]]:
-    """`_front_matter_fields` over the text after the opening `---` line."""
+def _read_mapping(lines: list[str]) -> dict[str, list[str]]:
+    """`_front_matter_fields` over the lines after the opening `---`."""
     fields: dict[str, list[str]] = {}
-    last: list[str] | None = None
-    pos = 0
-    while pos < len(text):
-        eol = text.find("\n", pos)
-        eol = len(text) if eol == -1 else eol
-        line = text[pos:eol]
+    list_key: str | None = None  # an empty key whose `  - ` items may follow
+    list_indent = ""
+    for line in lines:
         if line.rstrip() == "---":
             return fields
-        if not line.strip() or line.lstrip().startswith("#"):
-            pos = eol + 1
-            continue
-        if line[0] in " \t-":
-            # The previous value goes on: a list, a nested map, a folded line.
-            if last is None:
+        body = line.lstrip(" ")
+        if not body.strip() or body.startswith("#"):
+            continue  # blank, or a whole-line comment
+        if line[0] in " \t":
+            indent = line[: len(line) - len(body)]
+            if (
+                list_key is None
+                or "\t" in body[:1]
+                or not body.startswith("- ")
+                or (list_indent and indent != list_indent)
+            ):
                 raise _Unsupported
-            last[-1] = _COMPLEX
-            pos = eol + 1
+            list_indent = indent
+            _read_scalar(body[2:].lstrip(" "))
+            fields[list_key][-1] = _LIST
             continue
         key, rest = _read_key(line)
-        value_text = rest.lstrip(" \t")
-        if value_text[:1] in ('"', "'"):
-            start = eol - len(value_text)
-            value, end = _read_quoted(text, start)
-            span = text[start:end]
-            if any(ln.rstrip() == "---" for ln in span.split("\n")[1:]):
-                raise _Unsupported  # it would run past the end of the block
-            if "\n" in span:
-                value = _COMPLEX
-            eol = text.find("\n", end)
-            eol = len(text) if eol == -1 else eol
-            tail = text[end:eol]
-            after = tail.lstrip(" \t")
-            if after and not (after.startswith("#") and after != tail):
-                raise _Unsupported  # only a blank-separated comment may follow
-        elif not value_text or value_text.startswith("#"):
-            value = ""  # null, or a block that follows on indented lines
-        elif value_text[0] in "[{&*!|>%@`":
-            value = _COMPLEX
+        value_text = rest.strip(" \t")
+        list_key, list_indent = None, ""
+        if not _uncommented(value_text):
+            value = ""  # null, or the head of a block list
+            list_key = key
+        elif _uncommented(value_text) == "[]":
+            value = _LIST  # the empty list this app writes for no aliases/tags
         else:
-            cut = _comment_at(value_text)
-            value = (value_text[:cut] if cut != -1 else value_text).rstrip()
-            if ": " in value or value.endswith(":"):
-                value = _COMPLEX
+            value = _read_scalar(value_text)
         fields.setdefault(key, []).append(value)
-        last = fields[key]
-        pos = eol + 1
     raise _Unsupported  # unterminated within what was read
 
 
@@ -716,7 +715,7 @@ def _note_owner(path: Path, kind: str) -> str:
         owner = _plaud_url_id(fields.get("source", []))
     else:
         owner = next(iter(plaud_ids)) if len(plaud_ids) == 1 else ""
-    if not owner or owner == _COMPLEX or plaud_ids - {owner}:
+    if not owner or owner == _LIST or plaud_ids - {owner}:
         return ""
     return owner
 
@@ -732,14 +731,26 @@ def existing_notes(
     """Notes of `kind` this app already wrote for `file_id` that still exist
     inside `vault` (any folder), newest first. `same_name` adds a note at that
     path whose own identity is the recording even without a reference row —
-    written on another machine, before references existed, or by Claude."""
+    written on another machine, before references existed, or by Claude.
+
+    Every candidate, a reference row's path included, must still name the
+    recording by its own identity (`_note_owner`): a note moved away can leave
+    its row pointing at a path another recording's same-named note now holds.
+    """
+    if not file_id:
+        return []
     root = vault.resolve()
     seen: set[Path] = set()
     out: list[dict] = []
     for row in storage.list_note_references(file_id, kind=kind):
         path = Path(row["path"])
         resolved = path.resolve()
-        if resolved in seen or not path.is_file() or not resolved.is_relative_to(root):
+        if (
+            resolved in seen
+            or not path.is_file()
+            or not resolved.is_relative_to(root)
+            or _note_owner(path, kind) != file_id
+        ):
             continue
         seen.add(resolved)
         updated_at = int(row["updated_at"] or 0)
@@ -757,7 +768,6 @@ def existing_notes(
         and same_name.is_file()
         and same_name.resolve() not in seen
         and same_name.resolve().is_relative_to(root)
-        and file_id
         and _note_owner(same_name, kind) == file_id
     ):
         out.append(

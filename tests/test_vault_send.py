@@ -611,38 +611,127 @@ def test_missing_or_malformed_front_matter_never_claims_the_note(
     assert note.read_text(encoding="utf-8") == text
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        # core-09 r1 #1: A only inside B's multi-line description; B's own id
-        # sits under a quoted key.
-        (
-            f'---\ndescription: "Reference for another recording:\nplaud_id: {FILE_ID}\n"\n'
-            f'"plaud_id": {FOREIGN_ID}\n---\nForeign recording original body\n'
-        ),
-        f"---\ndescription: 'quoted\nplaud_id: {FILE_ID}\n'\nplaud_id: {FOREIGN_ID}\n---\nbody\n",
-        f"---\nnotes: |\n  plaud_id: {FILE_ID}\nplaud_id: {FOREIGN_ID}\n---\nbody\n",
-        f'---\ndescription: "say \\"hi\\"\nplaud_id: {FILE_ID}"\n---\nbody\n',
-        f'---\nplaud_id: {FILE_ID}\n"plaud_id": {FOREIGN_ID}\n---\nbody\n',
-        f"---\n'plaud_id': {FOREIGN_ID}\nplaud_id: {FILE_ID}\n---\nbody\n",
-        f"---\nplaud_id: {FILE_ID}\n  continued\n---\nbody\n",  # value is "<A> continued"
-        f'---\nplaud_id: "{FILE_ID}\n"\n---\nbody\n',  # a multi-line identity
-        # Syntax this reader does not model names no owner.
-        f"---\nplaud_id: &anchor {FILE_ID}\n---\nbody\n",
-        f"---\n? plaud_id\n: {FILE_ID}\n---\nbody\n",
-        f'---\nplaud_id: "{FILE_ID}\\q"\n---\nbody\n',
-        f"---\n{{plaud_id: {FILE_ID}}}\n---\nbody\n",
-        f'---\ndescription: "never closed\nplaud_id: {FILE_ID}\n---\nbody\n',
-    ],
-)
-def test_an_id_inside_another_value_or_an_unclear_block_never_claims_the_note(
-    sandbox, tmp_path: Path, text: str
-) -> None:
+@pytest.mark.parametrize("policy", ["ask", "skip", "overwrite"])
+def test_a_stale_reference_row_never_claims_another_recordings_note(sandbox, policy: str) -> None:
+    # claude-review-1 regress-2: A's note was moved out of the Inbox, then B
+    # (same date, same title) was sent to A's old path, which A's reference
+    # row still names. Re-sending A reported B's note; overwrite replaced it.
+    st = sandbox["storage"]
+    for file_id in (FILE_ID, FOREIGN_ID):
+        st.upsert_file(PlaudFile(id=file_id, filename="Weekly meeting", start_time=1), now=1)
+        folder = sandbox["tmp"] / "integrated" / file_id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "claude__integrated.summary.md").write_text(
+            f"---\nkind: summary\n---\n\nbody of {file_id}", encoding="utf-8"
+        )
+    a_note = Path(vault_send(FILE_ID, storage=st).path)
+    moved = sandbox["vault"] / "60. Collections" / a_note.name
+    moved.parent.mkdir(parents=True)
+    a_note.rename(moved)
+    b_note = Path(vault_send(FOREIGN_ID, storage=st).path)
+    assert b_note == a_note  # B now sits where A's row points
+    b_text = b_note.read_text(encoding="utf-8")
+    result = vault_send(FILE_ID, storage=st, on_duplicate=policy)
+    assert (result.status, result.action) == ("ok", "created")
+    assert str(b_note) not in [e["path"] for e in result.existing]
+    assert b_note.read_text(encoding="utf-8") == b_text
+
+
+def _never_claimed(sandbox, tmp_path: Path, text: str) -> None:
+    """Sending FILE_ID with `overwrite` and no reference row leaves `text` alone."""
     note = _same_name_note(sandbox)
     note.write_text(text, encoding="utf-8")
     result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
     assert (result.action, result.existing) == ("created", [])
     assert note.read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            f'---\ndescription: "Reference for another recording:\nplaud_id: {FILE_ID}\n"\n'
+            f'"plaud_id": {FOREIGN_ID}\n---\nForeign recording original body\n',
+            id="r1-multiline-description-and-quoted-key",
+        ),
+        pytest.param(
+            f'---\ndescription: ["Reference for another recording:\nplaud_id: {FILE_ID}\n'
+            f'# end"]\n---\nForeign recording original body\n',
+            id="r2-flow-collection-wrapping-a-multiline-scalar",
+        ),
+    ],
+)
+def test_the_reviewers_cases_never_claim_the_note(sandbox, tmp_path: Path, text: str) -> None:
+    _never_claimed(sandbox, tmp_path, text)
+
+
+# Each block also carries this recording's own, correct `plaud_id`: one
+# construct the reader does not model, anywhere, is enough to claim nothing.
+UNSUPPORTED = [
+    pytest.param("tags: [a, b]", id="flow-sequence"),
+    pytest.param("meta: {a: 1}", id="flow-mapping"),
+    pytest.param("notes: |\n  text", id="block-scalar-literal"),
+    pytest.param("notes: >-\n  folded\n  text", id="block-scalar-folded"),
+    pytest.param('description: "line one\n  line two"', id="multiline-double-quoted"),
+    pytest.param("description: 'line one\n  line two'", id="multiline-single-quoted"),
+    pytest.param("description: plain\n  continued", id="multiline-plain"),
+    pytest.param('description: "never closed', id="unclosed-quote"),
+    pytest.param("ref: &anchor value", id="anchor"),
+    pytest.param("ref: *anchor", id="alias"),
+    pytest.param("ref: !!str value", id="tag"),
+    pytest.param('"title": quoted key', id="quoted-key"),
+    pytest.param("meta:\n  nested: 1", id="nested-mapping"),
+    pytest.param("tags:\n- a", id="list-at-column-0"),
+    pytest.param("tags:\n\t- a", id="tab-indent"),
+    pytest.param("tags:\n  - a\n    - b", id="uneven-list-indent"),
+    pytest.param("? key\n: value", id="complex-key"),
+    pytest.param('title: "a\\qb"', id="unknown-escape"),
+    pytest.param("title: a: b", id="mapping-in-a-value"),
+]
+
+
+@pytest.mark.parametrize("construct", UNSUPPORTED)
+@pytest.mark.parametrize("where", ["before", "after"])
+def test_an_unsupported_construct_anywhere_means_no_claim(
+    sandbox, tmp_path: Path, construct: str, where: str
+) -> None:
+    lines = [f"plaud_id: {FILE_ID}", construct]
+    if where == "before":
+        lines.reverse()
+    _never_claimed(sandbox, tmp_path, "---\n" + "\n".join(lines) + "\n---\nbody\n")
+
+
+def test_the_apps_own_note_format_is_still_found(sandbox, tmp_path: Path) -> None:
+    from core.frontmatter import CmdsFrontmatter
+
+    front = CmdsFrontmatter(
+        type="meeting",
+        description='Plaud recording note: "주간 회의". Generated from the integrated output.',
+        tags=["plaud", "meeting"],
+        aliases=["주간 회의", "weekly: sync"],
+        author="테스터",
+        model="claude",
+        date_created="2026-05-29T14:30",
+        date="2026-05-29",
+        cmds="📚 840 Lectures",
+        index="🏷 Meeting Notes",
+        plaud_id=FILE_ID,
+        dual=True,
+        speakers=["구요한", "John Smith"],
+        attendees=["구요한"],
+        keywords=["옵시디언", "AI #교육"],
+        related=["Obsidian"],
+        reuse_channels=["newsletter:idea"],
+        extra={"content_kind": "integrated (claude__integrated)"},
+    ).render()
+    sparse = CmdsFrontmatter(type="note", description="x", plaud_id=FILE_ID).render()
+    assert "aliases: []" in sparse and "tags: []" in sparse
+    for text in (front, sparse):
+        note = _same_name_note(sandbox)
+        note.write_text(text + "\n\nbody\n", encoding="utf-8")
+        result = vault_send(FILE_ID, storage=Storage(tmp_path / f"{len(text)}.db"))
+        assert result.status == "duplicate", text
+        assert [e["path"] for e in result.existing] == [str(note)]
 
 
 @pytest.mark.parametrize(
@@ -656,11 +745,8 @@ def test_an_id_inside_another_value_or_an_unclear_block_never_claims_the_note(
         f'---\nplaud_id: "{FILE_ID}" # correct owner\n---\nOriginal\n',
         f"---\nplaud_id: '{FILE_ID}'\t# after a tab\n---\n",
         f"---\nplaud_id: {FILE_ID}\t# after a tab\n---\n",
-        f'---\n"plaud_id": {FILE_ID}\n---\n',
-        f'---\ndescription: "line one\n  line two: with a colon"\nplaud_id: {FILE_ID}\n---\n',
-        f"---\ndescription: >\n  folded\n  text\nplaud_id: {FILE_ID}\n---\n",
-        f"---\ntags:\n- a\n- b\nplaud_id: {FILE_ID}\n---\n",
-        f"---\n# a comment\nplaud_id: {FILE_ID}\n\n---\n",
+        f"---\ntags:\n  - a\n  - 'b' # c\naliases: [] # none\nplaud_id: {FILE_ID}\n---\n",
+        f"---\n# a comment\nplaud_id: {FILE_ID}\n\n  # indented comment\n---\n",
     ],
 )
 def test_a_genuine_same_recording_note_is_still_found(sandbox, tmp_path: Path, text: str) -> None:
