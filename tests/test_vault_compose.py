@@ -508,10 +508,22 @@ def test_wiki_skip_returns_the_existing_raw_source(
     assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
 
 
+@pytest.mark.parametrize(
+    "new",
+    [
+        None,  # as written
+        'source: "https://web.plaud.ai/file/f1" # canonical',
+        "source: 'https://web.plaud.ai/file/f1'\t# canonical",
+    ],
+)
 def test_a_raw_source_is_found_by_its_source_url_without_a_reference(
-    storage, vaults, recording_model, no_generation, tmp_path: Path
+    storage, vaults, recording_model, no_generation, tmp_path: Path, new
 ) -> None:
     first = _wiki(storage)
+    if new is not None:
+        path = Path(first.path)
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace('source: "https://web.plaud.ai/file/f1"', new, 1), "utf-8")
     no_generation()
     again = _wiki(_seeded_storage(tmp_path / "fresh.db"))  # e.g. from another machine
     assert again.status == "duplicate"
@@ -526,6 +538,11 @@ def test_a_raw_source_is_found_by_its_source_url_without_a_reference(
         ('source: "https://web.plaud.ai/file/f1"', 'source: "https://web.plaud.ai/file/f1/x"'),
         ('source: "https://web.plaud.ai/file/f1"', 'source: "https://example.com/file/f1"'),
         ("type: raw-source", "plaud_id: f2\ntype: raw-source"),
+        # The canonical link only inside another field's multi-line value.
+        (
+            'source: "https://web.plaud.ai/file/f1"',
+            'source: "https://web.plaud.ai/file/f2"\nnote: "see\nsource: https://web.plaud.ai/file/f1\n"',
+        ),
     ],
 )
 def test_a_raw_source_owned_by_another_recording_is_never_this_ones(

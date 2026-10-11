@@ -614,10 +614,53 @@ def test_missing_or_malformed_front_matter_never_claims_the_note(
 @pytest.mark.parametrize(
     "text",
     [
+        # core-09 r1 #1: A only inside B's multi-line description; B's own id
+        # sits under a quoted key.
+        (
+            f'---\ndescription: "Reference for another recording:\nplaud_id: {FILE_ID}\n"\n'
+            f'"plaud_id": {FOREIGN_ID}\n---\nForeign recording original body\n'
+        ),
+        f"---\ndescription: 'quoted\nplaud_id: {FILE_ID}\n'\nplaud_id: {FOREIGN_ID}\n---\nbody\n",
+        f"---\nnotes: |\n  plaud_id: {FILE_ID}\nplaud_id: {FOREIGN_ID}\n---\nbody\n",
+        f'---\ndescription: "say \\"hi\\"\nplaud_id: {FILE_ID}"\n---\nbody\n',
+        f'---\nplaud_id: {FILE_ID}\n"plaud_id": {FOREIGN_ID}\n---\nbody\n',
+        f"---\n'plaud_id': {FOREIGN_ID}\nplaud_id: {FILE_ID}\n---\nbody\n",
+        f"---\nplaud_id: {FILE_ID}\n  continued\n---\nbody\n",  # value is "<A> continued"
+        f'---\nplaud_id: "{FILE_ID}\n"\n---\nbody\n',  # a multi-line identity
+        # Syntax this reader does not model names no owner.
+        f"---\nplaud_id: &anchor {FILE_ID}\n---\nbody\n",
+        f"---\n? plaud_id\n: {FILE_ID}\n---\nbody\n",
+        f'---\nplaud_id: "{FILE_ID}\\q"\n---\nbody\n',
+        f"---\n{{plaud_id: {FILE_ID}}}\n---\nbody\n",
+        f'---\ndescription: "never closed\nplaud_id: {FILE_ID}\n---\nbody\n',
+    ],
+)
+def test_an_id_inside_another_value_or_an_unclear_block_never_claims_the_note(
+    sandbox, tmp_path: Path, text: str
+) -> None:
+    note = _same_name_note(sandbox)
+    note.write_text(text, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
         f'---\nplaud_id: "{FILE_ID}"\n---\n',
         f"---\nplaud_id: '{FILE_ID}'  \n---\n",
         f"---\r\ntitle: x\r\nplaud_id: {FILE_ID}\r\n---\r\nbody\r\n",
         f"---\nplaud_id: {FILE_ID} # sent from the laptop\n---\n",
+        # core-09 r1 #2: a quoted id followed by a comment.
+        f'---\nplaud_id: "{FILE_ID}" # correct owner\n---\nOriginal\n',
+        f"---\nplaud_id: '{FILE_ID}'\t# after a tab\n---\n",
+        f"---\nplaud_id: {FILE_ID}\t# after a tab\n---\n",
+        f'---\n"plaud_id": {FILE_ID}\n---\n',
+        f'---\ndescription: "line one\n  line two: with a colon"\nplaud_id: {FILE_ID}\n---\n',
+        f"---\ndescription: >\n  folded\n  text\nplaud_id: {FILE_ID}\n---\n",
+        f"---\ntags:\n- a\n- b\nplaud_id: {FILE_ID}\n---\n",
+        f"---\n# a comment\nplaud_id: {FILE_ID}\n\n---\n",
     ],
 )
 def test_a_genuine_same_recording_note_is_still_found(sandbox, tmp_path: Path, text: str) -> None:
