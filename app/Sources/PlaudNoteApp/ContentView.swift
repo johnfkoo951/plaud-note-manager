@@ -681,6 +681,11 @@ struct ContentView: View {
                 }
             }
         }
+        .sheet(item: $store.composeRequest) { request in
+            VaultComposeSheet(store: store, request: request) {
+                store.composeRequest = nil
+            }
+        }
     }
 }
 
@@ -4785,11 +4790,18 @@ struct VaultSendMenu: View {
                     Label("Meetings 폴더로 (63. Meetings)", systemImage: "person.2")
                 }
             }
+            Section("템플릿으로 작성") {
+                Button {
+                    store.composeRequest = VaultComposeRequest(fileID: fileID, presetVault: nil)
+                } label: {
+                    Label("템플릿으로 작성해서 보내기…", systemImage: "doc.badge.gearshape")
+                }
+            }
             Section("Wiki Vault (CMDS_LLM_Wiki)") {
                 Button {
-                    send(to: "wiki")
+                    store.composeRequest = VaultComposeRequest(fileID: fileID, presetVault: "wiki")
                 } label: {
-                    Label("Wiki Inbox로 보내기", systemImage: "books.vertical")
+                    Label("Raw Source로 넣기… (수집 목적 입력)", systemImage: "books.vertical")
                 }
             }
             Section("AI로 다듬어서") {
@@ -4827,14 +4839,13 @@ struct VaultSendMenu: View {
     }
 
     private func send(
-        to: String = "main",
         dest: String = "",
         via: String = "direct",
         withTranscript: Bool = false
     ) {
         Task {
             await store.vaultSend(
-                fileID, to: to, dest: dest, via: via, withTranscript: withTranscript
+                fileID, dest: dest, via: via, withTranscript: withTranscript
             )
         }
     }
@@ -5215,7 +5226,7 @@ private struct AIInspectorPanel: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-        } else if let sent = store.lastVaultSend, sent.status == "ok", !sent.noteFilename.isEmpty {
+        } else if let sent = store.lastVaultSend, sent.showsFeedback(selectedID: fid) {
             HStack(spacing: 6) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)

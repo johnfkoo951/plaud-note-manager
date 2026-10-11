@@ -30,7 +30,8 @@ enum PlaudCommand {
 
     static func timeout(for args: [String]) -> TimeInterval {
         switch args.first {
-        case "auth", "models", "elevenlabs-status", "audio-url": return 30
+        case "auth", "models", "elevenlabs-status", "audio-url",
+             "templates", "template-show", "vaults": return 30
         case "sync", "detail": return 120
         default: return 7200
         }

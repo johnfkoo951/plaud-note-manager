@@ -55,6 +55,14 @@ struct TemplateMeta: Hashable, Identifiable {
         slotChoices(all).filter { !$0.deprecated }
     }
 
+    /// Templates the vault-compose sheet offers: the purpose-specific `note-*`
+    /// summary templates that are not deprecated, by name. Other templates
+    /// need variables compose never fills, or emit their own front matter.
+    static func composeChoices(_ all: [TemplateMeta]) -> [TemplateMeta] {
+        all.filter { $0.kind == .summary && !$0.deprecated && $0.name.hasPrefix("note-") }
+            .sorted { $0.name < $1.name }
+    }
+
     /// The new-slot picker's starting row: `note-general` when offered,
     /// otherwise the first choice. With no choices it is still `note-general`,
     /// the picker's fallback row, so the selection always matches a row.
