@@ -47,6 +47,42 @@ def tdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture()
+def summarize_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Shipped templates; data paths, Storage and the model all local to the test."""
+    from core.models import FileContent, PlaudFile, TranscriptSegment
+    from core.storage import Storage
+
+    data = tmp_path / "data"
+    monkeypatch.setattr(paths_mod, "DATA_DIR", data)
+    monkeypatch.setattr(paths_mod, "TRANSCRIPTS_DIR", data / "transcripts")
+    monkeypatch.setattr(paths_mod, "SUMMARIES_DIR", data / "summaries")
+    monkeypatch.setattr(paths_mod, "INTEGRATED_DIR", data / "integrated")
+    monkeypatch.setattr(paths_mod, "_override", lambda kind: None)
+    monkeypatch.setattr(slots_mod, "SLOTS_FILE", data / "slots.json")
+    storage = Storage(tmp_path / "plaud.db")
+    storage.upsert_file(PlaudFile(id="f1", filename="회의"), now=1)
+    storage.save_content(
+        FileContent(
+            file_id="f1",
+            title="회의",
+            transcript=[
+                TranscriptSegment(
+                    start_time=0, end_time=1, speaker="구요한", content="SENTINEL-전사"
+                )
+            ],
+        ),
+        now=1,
+    )
+    monkeypatch.setattr(cli, "Storage", lambda: storage)
+    prompts: list[str] = []
+    monkeypatch.setattr(summarize_mod, "model_available", lambda m: True)
+    monkeypatch.setattr(
+        summarize_mod, "run_model", lambda model, prompt, **k: prompts.append(prompt) or "결과"
+    )
+    return {"data": data, "prompts": prompts}
+
+
+@pytest.fixture()
 def nothing_downstream(monkeypatch: pytest.MonkeyPatch) -> None:
     """A refusal must come before the model check and the database."""
 
@@ -86,6 +122,23 @@ def test_templates_text_escapes_markup_marks_deprecation_and_does_not_wrap(tdir:
     assert old.index("DEPRECATED -> note-general") < old.index("legacy")
     assert any(LONG in ln for ln in lines)  # one line, not wrapped at 80 columns
     assert any("default" in ln and "integrated" in ln for ln in lines)
+
+
+def test_templates_marks_the_shipped_legacy_templates() -> None:
+    result = runner.invoke(cli.app, ["templates"])
+    assert result.exit_code == 0, result.output
+    line = next(ln for ln in result.stdout.splitlines() if "cmds-meeting" in ln)
+    description = templates_mod.load_template("cmds-meeting").description
+    # `-> note-meeting` only comes from the marker, which sits before the description.
+    assert line.index("DEPRECATED -> note-meeting") < line.index(description)
+    assert line.count("DEPRECATED") == 1
+
+    data = json.loads(runner.invoke(cli.app, ["templates", "--json"]).stdout)
+    assert {d["name"]: d["replaced_by"] for d in data if d["deprecated"]} == {
+        "cmds-coaching": "note-consulting",
+        "cmds-lecture": "note-lecture",
+        "cmds-meeting": "note-meeting",
+    }
 
 
 # ----- template-show ------------------------------------------------------
@@ -182,6 +235,15 @@ def test_cmds_integrate_refuses_a_summary_template_first(tdir, nothing_downstrea
     assert "cmds-summarize" in result.stderr
 
 
+def test_cmds_summarize_warns_on_a_deprecated_template_and_still_runs(summarize_env) -> None:
+    result = runner.invoke(cli.app, ["cmds-summarize", "f1", "--template", "cmds-meeting"])
+    assert result.exit_code == 0, result.output
+    assert "template 'cmds-meeting' is deprecated — use 'note-meeting'" in result.stdout
+    assert len(summarize_env["prompts"]) == 1
+    assert "SENTINEL-전사" in summarize_env["prompts"][0]
+    assert (summarize_env["data"] / "summaries/f1/claude__cmds-meeting.md").is_file()
+
+
 @pytest.mark.parametrize("command", ["cmds-summarize", "cmds-integrate"])
 def test_pipelines_report_a_missing_template_first(tdir, nothing_downstream, command) -> None:
     result = runner.invoke(cli.app, [command, "f1", "--template", "nope"])
@@ -199,6 +261,14 @@ def test_slot_add_rejects_internal_and_missing_templates(tdir: Path, template, m
     assert result.exit_code == 1
     assert message in result.stderr
     assert not slots_mod.SLOTS_FILE.exists()
+
+
+def test_slot_add_warns_on_a_deprecated_template_and_saves(summarize_env) -> None:
+    result = runner.invoke(cli.app, ["slot-add", "legacy", "claude", "cmds-lecture"])
+    assert result.exit_code == 0, result.output
+    assert "template 'cmds-lecture' is deprecated — use 'note-lecture'" in result.stdout
+    saved = json.loads(slots_mod.SLOTS_FILE.read_text(encoding="utf-8"))
+    assert saved[-1]["template"] == "cmds-lecture"
 
 
 def test_slot_add_accepts_summary_and_integrated_templates(tdir: Path) -> None:

@@ -19,6 +19,7 @@ from core.templates import (
     KIND_INTERNAL,
     KIND_SUMMARY,
     TemplateKindError,
+    deprecation_notice,
     load_template,
     normalize_kind,
     parse_frontmatter,
@@ -138,6 +139,15 @@ def test_deprecated_and_replaced_by(tdir: Path) -> None:
     old, cur = load_template("old"), load_template("cur")
     assert (old.deprecated, old.replaced_by) == (True, "note-meeting")
     assert (cur.deprecated, cur.replaced_by) == (False, "")
+
+
+def test_deprecation_notice(tdir: Path) -> None:
+    _write(tdir, "old", "name: old\ndeprecated: true\nreplaced_by: new")
+    _write(tdir, "bare", "name: bare\ndeprecated: yes")
+    _write(tdir, "live", "name: live")
+    assert deprecation_notice(load_template("old")) == "template 'old' is deprecated — use 'new'"
+    assert deprecation_notice(load_template("bare")) == "template 'bare' is deprecated"
+    assert deprecation_notice(load_template("live")) == ""
 
 
 def test_as_dict_shape(tdir: Path) -> None:

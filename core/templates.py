@@ -217,6 +217,14 @@ def require_kind(template: Template, expected: str) -> None:
     raise TemplateKindError(f"template '{name}' {detail}")
 
 
+def deprecation_notice(template: Template) -> str:
+    """One line naming the replacement of a deprecated template; "" otherwise."""
+    if not template.deprecated:
+        return ""
+    notice = f"template '{template.name}' is deprecated"
+    return f"{notice} — use '{template.replaced_by}'" if template.replaced_by else notice
+
+
 def load_template(name: str) -> Template:
     path = template_path(name)
     if not path.exists():

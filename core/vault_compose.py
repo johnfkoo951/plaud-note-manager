@@ -26,7 +26,13 @@ from .frontmatter import iso_minute
 from .metadata import build_recording_snapshot, recorded_date
 from .paths import summary_path
 from .storage import Storage
-from .templates import KIND_SUMMARY, TemplateKindError, load_template, require_kind
+from .templates import (
+    KIND_SUMMARY,
+    TemplateKindError,
+    deprecation_notice,
+    load_template,
+    require_kind,
+)
 from .vault_send import (
     VaultSendResult,
     _pick_transcript,
@@ -288,7 +294,8 @@ def compose(
     # Checked first: a cached summary is reused without calling summarize(),
     # so its own kind check would never see a cached integrate-prompt run.
     try:
-        require_kind(load_template(template), KIND_SUMMARY)
+        loaded = load_template(template)
+        require_kind(loaded, KIND_SUMMARY)
     except FileNotFoundError:
         return ComposeResult("bad_template", f"template not found: {template}", template=template)
     except (OSError, UnicodeDecodeError) as exc:
@@ -297,6 +304,11 @@ def compose(
         )
     except TemplateKindError as exc:
         return ComposeResult("bad_template", str(exc), template=template)
+    # Deprecated templates ask the model for their own YAML block, which would
+    # land as a second front matter block in the note. Only composing refuses
+    # them; summarize and existing slots keep running them.
+    if notice := deprecation_notice(loaded):
+        return ComposeResult("bad_template", notice, template=template)
 
     storage = storage or Storage()
 

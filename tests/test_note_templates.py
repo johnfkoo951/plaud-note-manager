@@ -87,6 +87,48 @@ def test_every_shipped_template_declares_its_kind() -> None:
     assert Counter(kinds.values()) == {KIND_INTEGRATED: 2, KIND_INTERNAL: 4, KIND_SUMMARY: 15}
 
 
+DEPRECATED = {
+    "cmds-meeting": "note-meeting",
+    "cmds-lecture": "note-lecture",
+    "cmds-coaching": "note-consulting",
+}
+
+
+def test_legacy_templates_are_deprecated_with_live_replacements() -> None:
+    assert {t.name: t.replaced_by for t in list_templates() if t.deprecated} == DEPRECATED
+    for replacement in DEPRECATED.values():
+        t = load_template(replacement)
+        assert (t.kind, t.deprecated) == (KIND_SUMMARY, False)
+
+
+def test_only_deprecated_templates_ask_the_model_for_a_yaml_block() -> None:
+    # summarize() prepends its own front matter, so a template that asks the
+    # model for another one yields two stacked blocks.
+    asks = {
+        t.name
+        for t in list_templates()
+        if re.search(r"^---\n[A-Za-z_][\w-]*:", t.body, re.MULTILINE)
+    }
+    assert asks == set(DEPRECATED)
+
+
+@pytest.mark.parametrize("name", sorted(DEPRECATED))
+def test_deprecated_templates_still_render_the_transcript(name: str) -> None:
+    # Existing slots and the CLI keep running them.
+    rendered = load_template(name).render(
+        transcript="SENTINEL-전사", title="t", keywords="k", speakers="s"
+    )
+    assert "SENTINEL-전사" in rendered
+
+
+@pytest.mark.parametrize("name", sorted(DEPRECATED))
+def test_deprecated_descriptions_leave_the_marker_to_the_cli(name: str) -> None:
+    # `plaud templates` adds DEPRECATED itself; Rich would swallow a leading `[`.
+    description = load_template(name).description
+    assert "deprecated" not in description.lower()
+    assert not description.startswith("[")
+
+
 @pytest.mark.parametrize("name", sorted(n for n, k in SHIPPED_KINDS.items() if k == KIND_SUMMARY))
 def test_summary_templates_take_the_transcript_and_no_integrate_inputs(name: str) -> None:
     used = _placeholders(load_template(name).body)

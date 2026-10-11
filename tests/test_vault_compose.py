@@ -268,6 +268,31 @@ def test_compose_refuses_a_non_summary_template(storage, vaults, monkeypatch) ->
     assert not [p for v in vaults.values() for p in v.rglob("*") if p.is_file()]
 
 
+def test_compose_refuses_a_deprecated_template(storage, vaults, monkeypatch) -> None:
+    # cmds-* ask the model for its own YAML block; filed into a vault it would
+    # sit in the note body as a second front matter block.
+    from core import app_config
+    from core import summarize as sm
+
+    calls: list = []
+    monkeypatch.setattr(sm, "model_available", lambda m: True)
+    monkeypatch.setattr(sm, "run_model", lambda *a, **k: calls.append(a) or "x")
+    monkeypatch.setattr(app_config, "model_id_for", lambda m: "")
+    for to in ("main", "wiki"):
+        result = vc.compose(
+            "f1",
+            template="cmds-meeting",
+            to=to,
+            collection_purpose="p",
+            model="claude",
+            storage=storage,
+        )
+        assert result.status == "bad_template"
+        assert result.detail == "template 'cmds-meeting' is deprecated — use 'note-meeting'"
+    assert calls == []
+    assert not [p for v in vaults.values() for p in v.rglob("*") if p.is_file()]
+
+
 def test_compose_reports_a_missing_template_before_opening_storage(vaults, monkeypatch) -> None:
     def no_storage():
         raise AssertionError("Storage() opened before the template was checked")

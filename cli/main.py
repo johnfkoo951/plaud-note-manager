@@ -94,6 +94,16 @@ def _require_template(name: str, *kinds: str) -> Any:
     raise typer.Exit(1)
 
 
+def _warn_if_deprecated(template: Any) -> None:
+    """Name a deprecated template's replacement and carry on — slots keep running it."""
+    from rich.markup import escape
+
+    from core.templates import deprecation_notice
+
+    if notice := deprecation_notice(template):
+        console.print(f"[yellow]{escape(notice)}[/yellow]", soft_wrap=True)
+
+
 def _peek_date(start_time_ms: int | None, edit_time_s: int | None) -> str | None:
     """Format a recording date (start_time is epoch-ms, edit_time epoch-s)."""
     for ts, divisor in ((start_time_ms, 1000), (edit_time_s, 1)):
@@ -2758,7 +2768,7 @@ def cmds_summarize(
     from core.paths import transcripts_dir
     from core.templates import KIND_SUMMARY
 
-    _require_template(template, KIND_SUMMARY)
+    _warn_if_deprecated(_require_template(template, KIND_SUMMARY))
     if not model_available(model):
         console.print(f"[red]{model} unavailable[/red] — {model_unavailable_message(model)}")
         raise typer.Exit(1)
@@ -3052,7 +3062,7 @@ def slot_add(
     from core.slots import load_slots, save_slots, Slot
     from core.templates import KIND_INTEGRATED, KIND_SUMMARY
 
-    _require_template(template, KIND_SUMMARY, KIND_INTEGRATED)
+    _warn_if_deprecated(_require_template(template, KIND_SUMMARY, KIND_INTEGRATED))
     slots = load_slots()
     slots = [s for s in slots if s.name != name]
     slots.append(Slot(name=name, model=model, template=template, model_id=model_id))
