@@ -2330,6 +2330,12 @@ def vault_compose_cmd(
     model: str = typer.Option("", help=MODEL_HELP + " Empty = configured model."),
     model_id: str = typer.Option("", "--id", help="Pin the API model id."),
     dry_run: bool = typer.Option(False, "--dry-run", help="Generate but do not write the note."),
+    on_duplicate: str = typer.Option(
+        "ask",
+        "--on-duplicate",
+        help="when this recording already has a note there: ask (report it, write nothing) | "
+        "skip | overwrite (main vault only) | new",
+    ),
     json_out: bool = typer.Option(False, "--json"),
 ) -> None:
     """Run a template over a recording and file the result in a vault.
@@ -2338,7 +2344,13 @@ def vault_compose_cmd(
     raw source: the verbatim transcript under `## Original Content` with the
     summary above it, landed in `10. Raw Sources/`.
     """
-    from core.vault_compose import compose
+    from core.vault_compose import WIKI_OVERWRITE_REFUSAL, compose
+    from core.vault_send import ON_DUPLICATE, is_wiki_target, resolve_vault
+
+    if on_duplicate not in ON_DUPLICATE:
+        raise typer.BadParameter(f"--on-duplicate must be one of: {', '.join(ON_DUPLICATE)}")
+    if on_duplicate == "overwrite" and is_wiki_target(to, resolve_vault(to)):
+        raise typer.BadParameter(WIKI_OVERWRITE_REFUSAL)
 
     result = compose(
         file_id,
@@ -2349,13 +2361,23 @@ def vault_compose_cmd(
         model=model,
         model_id=model_id,
         dry_run=dry_run,
+        on_duplicate=on_duplicate,
     )
     if json_out:
         _emit_json(result.as_dict())
         return
+    if result.status == "duplicate":
+        console.print(
+            f"[yellow]already in the vault[/yellow]: {result.path} — "
+            "re-run with --on-duplicate skip|overwrite|new"
+        )
+        raise typer.Exit(1)
     if result.status != "ok":
         console.print(f"[red]{result.status}[/red] — {result.detail}")
         raise typer.Exit(1)
+    if result.action == "skipped":
+        console.print(f"[yellow]skipped[/yellow] — already in the vault → {result.path}")
+        return
     console.print(f"[green]ok[/green] {result.detail}")
     if result.path:
         console.print(f"  {result.path}")
@@ -2395,6 +2417,12 @@ def vault_send_cmd(
         False, "--with-transcript", help="append the full transcript to the note"
     ),
     open_note: bool = typer.Option(False, "--open", help="open the note in Obsidian after writing"),
+    on_duplicate: str = typer.Option(
+        "ask",
+        "--on-duplicate",
+        help="when this recording already has a note in the vault: ask (report it, write "
+        "nothing) | skip | overwrite | new",
+    ),
     json_out: bool = typer.Option(
         False, "--json", help="Emit JSON and always exit 0; callers check the status field."
     ),
@@ -2416,23 +2444,57 @@ def vault_send_cmd(
 
     from core.vault_send import (
         MEETINGS_DEST,
+        ON_DUPLICATE,
         WIKI_SEND_REFUSAL,
         VaultSendResult,
         build_filing_prompt,
+        early_duplicate_result,
         resolve_content,
         resolve_vault,
+        send_destination,
+        send_duplicates,
         sends_into_wiki,
+        unique_note_path,
         vault_send,
     )
 
+    if on_duplicate not in ON_DUPLICATE:
+        raise typer.BadParameter(f"--on-duplicate must be one of: {', '.join(ON_DUPLICATE)}")
     if dest.strip().lower() in ("meetings", "meeting"):
         dest = MEETINGS_DEST
+
+    def report(result: VaultSendResult) -> None:
+        if result.status == "ok" and open_note and result.obsidian_url:
+            subprocess.run(["open", result.obsidian_url], check=False)
+        if json_out:
+            _emit_json(_asdict(result))
+            return
+        if result.status == "ok":
+            if result.action == "skipped":
+                console.print(f"[yellow]skipped[/yellow] — already in the vault → {result.path}")
+            elif result.action == "overwritten":
+                console.print(f"[green]overwrote[/green] → {result.path}")
+            else:
+                console.print(
+                    f"[green]sent[/green] ({result.content}, via {result.via}) → {result.path}"
+                )
+            return
+        if result.status == "duplicate":
+            console.print(
+                f"[yellow]already in the vault[/yellow]: {result.path} — "
+                "re-run with --on-duplicate skip|overwrite|new"
+            )
+            raise typer.Exit(1)
+        console.print(f"[red]vault-send failed[/red] ({result.status}) — {result.detail}")
+        raise typer.Exit(1)
 
     if via == "claude-window":
         # Interactive filing: Claude Code in a Terminal window writes the note
         # itself, so there is no deterministic output path to report.
-        from core.metadata import build_recording_snapshot
+        from core.metadata import build_recording_snapshot, recorded_date
 
+        if on_duplicate == "overwrite":
+            raise typer.BadParameter("overwrite is not supported with --via claude-window")
         vault_path = resolve_vault(to)
         # Same refusal as vault_send — target and effective --dest folder —
         # before the database or a Terminal opens.
@@ -2454,6 +2516,25 @@ def vault_send_cmd(
         if resolved is None:
             console.print(f"[red]no '{content}' output found[/red] — generate one first")
             raise typer.Exit(1)
+        date = recorded_date(snapshot)
+        existing = send_duplicates(
+            storage,
+            file_id,
+            vault=vault_path,
+            dest=dest,
+            title=snapshot["title"],
+            date=date,
+        )
+        early = early_duplicate_result(
+            existing, on_duplicate, vault=vault_path, content=resolved.kind, via=via
+        )
+        if early is not None:
+            report(early)
+            return
+        # Claude writes the file itself, so it gets the exact unused name the
+        # direct sender would pick, and — for `new` — the notes to leave alone.
+        folder = send_destination(vault_path, dest)
+        filename = unique_note_path(folder, date.replace("-", ""), snapshot["title"]).name
         prompt = build_filing_prompt(
             vault=vault_path,
             dest=dest.strip() or "00. Inbox",
@@ -2461,6 +2542,10 @@ def vault_send_cmd(
             file_id=file_id,
             resolved=resolved,
             with_transcript=with_transcript,
+            filename=filename,
+            keep=[
+                str(Path(e["path"]).resolve().relative_to(vault_path.resolve())) for e in existing
+            ],
         )
         launch_claude(prompt, cwd=vault_path)
         if json_out:
@@ -2480,17 +2565,9 @@ def vault_send_cmd(
         with_transcript=with_transcript,
         ai_model=ai_model,
         ai_model_id=ai_model_id,
+        on_duplicate=on_duplicate,
     )
-    if result.status == "ok" and open_note and result.obsidian_url:
-        subprocess.run(["open", result.obsidian_url], check=False)
-    if json_out:
-        _emit_json(_asdict(result))
-        return
-    if result.status == "ok":
-        console.print(f"[green]sent[/green] ({result.content}, via {result.via}) → {result.path}")
-        return
-    console.print(f"[red]vault-send failed[/red] ({result.status}) — {result.detail}")
-    raise typer.Exit(1)
+    report(result)
 
 
 @safe_command(name="audio-url")

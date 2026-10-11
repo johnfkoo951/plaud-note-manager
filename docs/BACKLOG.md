@@ -174,6 +174,13 @@ if slot.template == "integrated" { return .integrated }
 파일이 실존하면 (a) 덮어쓸지 (b) 건너뛸지 (c) 새로 만들지 사용자에게 묻는다.
 CLI는 `--on-duplicate skip|overwrite|new` 플래그.
 
+**남은 생산 경로 (G 범위 밖)**: `vault-send`와 `vault-compose`는 이제 기본이 `ask`이고
+(위키는 raw source가 불변이라 overwrite를 거절, new는 새 버전을 만들고 이전 것을 보존),
+아래 세 경로는 아직 이 검사를 거치지 않는다. `dual-send`는 여전히 ` (2).md`로 번호를 붙여
+새로 쓴다(`tests/test_dual_vault.py`가 이 동작을 고정). 목록 컨텍스트 메뉴의 구형
+"Send to Obsidian"(`plaud obsidian`)은 Claude가 참조 기록 없이 파일링한다. meeting-note는
+기존 노트를 묻지 않고 제자리에서 덮어쓴다.
+
 ---
 
 ## H. 위키 볼트 미인덱싱

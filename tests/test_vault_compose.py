@@ -452,4 +452,136 @@ def test_compose_result_is_json_serializable(storage, vaults, stub_model) -> Non
         dry_run=True,
         storage=storage,
     )
-    assert json.loads(json.dumps(result.as_dict()))["status"] == "ok"
+    data = json.loads(json.dumps(result.as_dict()))
+    assert data["status"] == "ok"
+    assert (data["action"], data["existing"]) == ("", [])
+
+
+# ----- a second compose for the same recording --------------------------
+
+
+@pytest.fixture()
+def no_generation(monkeypatch: pytest.MonkeyPatch):
+    """Call after the first compose: any later generation is a failure."""
+
+    def arm() -> None:
+        def boom(*_a, **_k):
+            raise AssertionError("generated before the duplicate check")
+
+        monkeypatch.setattr(vc, "_summarize_with", boom)
+
+    return arm
+
+
+def _raw_sources(vaults) -> list[Path]:
+    return sorted((vaults["wiki"] / "10. Raw Sources").rglob("*.md"))
+
+
+def _wiki(storage, **kw):
+    return vc.compose(
+        "f1", template="note-lecture", to="wiki", collection_purpose="p", storage=storage, **kw
+    )
+
+
+def test_wiki_resend_reports_duplicate_before_generation(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = _wiki(storage)
+    assert (first.status, first.action) == ("ok", "created")
+    no_generation()
+    again = _wiki(storage)
+    assert again.status == "duplicate"
+    assert again.existing[0]["path"] == first.path
+    assert _raw_sources(vaults) == [Path(first.path)]
+
+
+def test_wiki_skip_returns_the_existing_raw_source(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = _wiki(storage)
+    no_generation()
+    skipped = _wiki(storage, on_duplicate="skip")
+    assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
+
+
+def test_wiki_overwrite_is_refused(storage, vaults, recording_model) -> None:
+    refused = _wiki(storage, on_duplicate="overwrite")
+    assert refused.status == "invalid_option"
+    assert "immutable" in refused.detail
+    assert recording_model == [] and _raw_sources(vaults) == []
+    first = _wiki(storage)
+    assert _wiki(storage, on_duplicate="overwrite").status == "invalid_option"
+    assert _raw_sources(vaults) == [Path(first.path)]
+
+
+def test_wiki_new_writes_a_new_version_and_keeps_the_old(storage, vaults, recording_model) -> None:
+    first = _wiki(storage)
+    second = _wiki(storage, on_duplicate="new")
+    assert (second.status, second.action) == ("ok", "created")
+    assert "new version" in second.detail and "kept" in second.detail
+    assert _raw_sources(vaults) == sorted([Path(first.path), Path(second.path)])
+
+
+def test_main_compose_ask_returns_duplicate_before_generation(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    assert (first.status, first.action) == ("ok", "created")
+    no_generation()
+    again = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    assert again.status == "duplicate"
+    assert again.existing[0]["path"] == first.path
+
+
+def test_main_compose_skip_returns_existing_without_generating(
+    storage, vaults, recording_model, no_generation
+) -> None:
+    first = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    no_generation()
+    skipped = vc.compose(
+        "f1", template="note-meeting", to="main", storage=storage, on_duplicate="skip"
+    )
+    assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
+
+
+def test_main_compose_never_overwrites_a_wiki_nested_in_the_main_vault(
+    storage, vaults, recording_model, monkeypatch
+) -> None:
+    from core import vault_send as vs
+
+    nested = vaults["main"] / "nested-wiki"
+    nested.mkdir()
+    monkeypatch.setattr(vs, "wiki_vault", lambda: nested)
+    note = nested / "immutable-source.md"
+    note.write_text("---\nsource: https://web.plaud.ai/file/f1\n---\nORIGINAL\n", encoding="utf-8")
+    before = note.read_bytes()
+    storage.upsert_note_reference(file_id="f1", path=note, kind="vault-send", now=1)
+    result = vc.compose(
+        "f1", template="note-meeting", to="main", storage=storage, on_duplicate="overwrite"
+    )
+    assert (result.status, result.action) == ("ok", "created")
+    assert Path(result.path).parent == vaults["main"] / "00. Inbox"
+    assert note.read_bytes() == before
+
+
+def test_main_compose_overwrite_passes_through(storage, vaults, recording_model) -> None:
+    first = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    again = vc.compose(
+        "f1", template="note-meeting", to="main", storage=storage, on_duplicate="overwrite"
+    )
+    assert (again.status, again.action, again.path) == ("ok", "overwritten", first.path)
+
+
+def test_cli_vault_compose_rejects_overwrite_for_the_wiki(vaults, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import cli.main as cli
+
+    def never(*_a, **_k):
+        raise AssertionError("compose ran")
+
+    monkeypatch.setattr(vc, "compose", never)
+    argv = ["vault-compose", "f1", "--template", "note-lecture", "--to", "wiki"]
+    result = CliRunner().invoke(cli.app, [*argv, "--on-duplicate", "overwrite"])
+    assert result.exit_code != 0
+    assert "immutable" in result.output

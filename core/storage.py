@@ -1053,19 +1053,20 @@ class Storage:
                 (file_id, str(path), kind, title, now),
             )
 
-    def list_note_references(self, file_id: str) -> list[sqlite3.Row]:
+    def list_note_references(self, file_id: str, *, kind: str | None = None) -> list[sqlite3.Row]:
+        """Notes written for `file_id`, newest first; only one `kind` when given."""
+        sql = """
+            SELECT path, kind, title, updated_at
+              FROM note_references
+             WHERE file_id = ?
+        """
+        params: list[str] = [file_id]
+        if kind is not None:
+            sql += " AND kind = ?"
+            params.append(kind)
+        sql += " ORDER BY updated_at DESC"
         with self._connect() as conn:
-            return list(
-                conn.execute(
-                    """
-                    SELECT path, kind, title, updated_at
-                      FROM note_references
-                     WHERE file_id = ?
-                     ORDER BY updated_at DESC
-                    """,
-                    (file_id,),
-                )
-            )
+            return list(conn.execute(sql, params))
 
     # ---------- speakers (saved list) ----------
 
