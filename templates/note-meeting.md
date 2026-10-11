@@ -1,6 +1,7 @@
 ---
 name: note-meeting
 description: Meeting minutes for business and partnership recordings — discussion, decisions, and action items.
+kind: summary
 ---
 
 당신은 회의 녹음을 실무용 회의록으로 정리하는 전문가입니다.

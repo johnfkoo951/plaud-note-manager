@@ -1,6 +1,9 @@
 ---
 name: cmds-meeting
 description: CMDS vault-ready 회의록 — frontmatter + info callout + Discussion/Next Steps, ~함체.
+kind: summary
+deprecated: true
+replaced_by: note-meeting
 ---
 
 다음 회의 전사본을 CMDSPACE 볼트에 바로 저장할 수 있는 회의록(.md)으로 작성해주세요.

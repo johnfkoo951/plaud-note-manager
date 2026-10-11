@@ -1,6 +1,7 @@
 ---
 name: note-spiritual
 description: Sermons, Bible study, and devotional recordings — passage, reflection, and application.
+kind: summary
 ---
 
 당신은 설교·성경공부·묵상 녹음을 신앙 기록으로 정리하는 전문가입니다.

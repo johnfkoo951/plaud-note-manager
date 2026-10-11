@@ -1,6 +1,7 @@
 ---
 name: note-general
 description: General-purpose recording notes when no specific format fits.
+kind: summary
 ---
 
 당신은 녹음을 범용 노트로 정리하는 전문가입니다.

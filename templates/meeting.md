@@ -1,6 +1,7 @@
 ---
 name: meeting
 description: Meeting minutes — decisions, action items, discussion threads.
+kind: summary
 ---
 
 다음 회의 전사본을 회의록 형식으로 정리해주세요.

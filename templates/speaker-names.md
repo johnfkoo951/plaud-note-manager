@@ -1,6 +1,7 @@
 ---
 name: speaker-names
 description: CMDS(ElevenLabs) 화자 번호에 실명 후보를 매핑 (Plaud 라벨·발화 내용·실명 로스터 교차).
+kind: internal
 ---
 
 당신은 녹음 전사의 화자 식별 전문가입니다. 같은 녹음에 대한 두 전사본과 실명 로스터가 주어집니다. ElevenLabs 전사의 화자 번호(speaker_0, speaker_1, …)마다 실제 인물 이름을 추정하세요.

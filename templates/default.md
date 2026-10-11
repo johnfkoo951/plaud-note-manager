@@ -1,6 +1,7 @@
 ---
 name: default
-description: Integrated summary + cleaned transcript using Plaud + CMDS sources.
+description: Integrate prompt (legacy ===TRANSCRIPT=== format) — run with cmds-integrate
+kind: integrated
 ---
 
 당신은 두 개의 STT 소스(Plaud 자동 전사 + CMDS ElevenLabs 화자분리 전사)와 Plaud의 자동 요약을

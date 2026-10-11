@@ -5,20 +5,138 @@ A template is a markdown file with optional YAML-ish frontmatter:
     ---
     name: meeting
     description: Meeting minutes summary
+    kind: summary            # summary | integrated | internal; missing → summary
+    deprecated: true         # optional; true | yes | 1
+    replaced_by: note-meeting  # optional; the template to use instead
     ---
 
     <prompt body with {placeholders}>
 
-Supported placeholders: {title}, {keywords}, {speakers}, {transcript}.
+`kind` says which pipeline a template belongs to: `summary` runs through
+`summarize()` with {title}, {keywords}, {speakers}, {transcript};
+`integrated` runs through `integrate()` with the CMDS/Plaud inputs; `internal`
+templates are loaded by name by their own code (classify, metadata, …).
+
+The app's TemplateMeta reader parses the same files with the same rules, so
+keep the two identical: front matter is the text between a leading `---\\n`
+and the first `\\n---\\n`; only `key: value` lines starting at column 0 count;
+the first occurrence of a key wins; a value loses one pair of matching
+surrounding quotes, or else a trailing ` #comment`. `kind` is lowercased with
+the aliases `summarize` → summary and `integrate` → integrated, and anything
+unknown loads as `summary` — loading never fails on a bad kind.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from .paths import TEMPLATES_DIR, template_path
+
+KIND_SUMMARY = "summary"
+KIND_INTEGRATED = "integrated"
+KIND_INTERNAL = "internal"
+KINDS = (KIND_SUMMARY, KIND_INTEGRATED, KIND_INTERNAL)
+KIND_ALIASES = {"summarize": KIND_SUMMARY, "integrate": KIND_INTEGRATED}
+
+_OPEN = "---\n"
+_CLOSE = "\n---\n"
+
+
+class TemplateKindError(ValueError):
+    """A template was handed to a pipeline of a different kind."""
+
+
+def _is_blank(ch: str) -> bool:
+    # Swift's CharacterSet.whitespaces: Unicode Zs plus tab.
+    return ch == "\t" or unicodedata.category(ch) == "Zs"
+
+
+def _trim(text: str) -> str:
+    start, end = 0, len(text)
+    while start < end and _is_blank(text[start]):
+        start += 1
+    while end > start and _is_blank(text[end - 1]):
+        end -= 1
+    return text[start:end]
+
+
+def _clean_value(raw: str) -> str:
+    """One pair of matching quotes, or else a trailing ` #comment`, removed.
+    A `#` inside quotes, or not preceded by whitespace (`C#`), is kept."""
+    value = _trim(raw)
+    if value[:1] in ('"', "'"):
+        end = value.find(value[0], 1)
+        if end != -1:
+            tail = _trim(value[end + 1 :])
+            if not tail or tail.startswith("#"):
+                return value[1:end]
+    if value.startswith("#"):
+        return ""
+    cuts = [i for i in (value.find(" #"), value.find("\t#")) if i != -1]
+    if cuts:
+        value = value[: min(cuts)]
+    return _trim(value)
+
+
+def _line_key(line: str) -> str | None:
+    """The key of a column-0 `key: value` line; None for anything else."""
+    if not line or line[0] in " \t#" or ":" not in line:
+        return None
+    return _trim(line.split(":", 1)[0]) or None
+
+
+def parse_frontmatter(raw: str) -> tuple[list[str], dict[str, str], str]:
+    """(front matter lines, first-occurrence key → cleaned value, body).
+
+    Newlines are normalised first (`\\r\\n` and a lone `\\r` become `\\n`),
+    as Python's universal newlines and the app's reader both do. Without a
+    front matter block the lines and keys are empty and the whole text is the
+    body; otherwise the body is everything after the closing `---` line.
+    """
+    raw = raw.replace("\r\n", "\n").replace("\r", "\n")
+    if raw.startswith(_OPEN):
+        close = raw.find(_CLOSE, len(_OPEN))
+        if close != -1:
+            lines = raw[len(_OPEN) : close].split("\n")
+            meta: dict[str, str] = {}
+            for line in lines:
+                key = _line_key(line)
+                if key and key not in meta:
+                    meta[key] = _clean_value(line.split(":", 1)[1])
+            return lines, meta, raw[close + len(_CLOSE) :]
+    return [], {}, raw
+
+
+def _canonical_kind(value: str) -> str | None:
+    value = value.lower()
+    value = KIND_ALIASES.get(value, value)
+    return value if value in KINDS else None
+
+
+def normalize_kind(raw: str | None) -> str:
+    """The kind a template is read as: missing or unknown → summary.
+
+    `raw` is the already-cleaned front matter value and is matched as it is,
+    with no second trim — the app does the same, so `" integrated "` (quoted
+    padding) is unknown on both sides rather than integrated on one.
+    """
+    return _canonical_kind(raw or "") or KIND_SUMMARY
+
+
+def validate_kind(raw: str) -> str:
+    """Strict form for writes: an unknown kind is an error, not a summary.
+    Typed input is trimmed first; the canonical value is what gets written."""
+    kind = _canonical_kind(_trim(raw))
+    if kind is None:
+        raise ValueError(
+            f"unknown template kind {raw!r} — use one of: {', '.join(KINDS)} "
+            f"(aliases: {', '.join(KIND_ALIASES)})"
+        )
+    return kind
 
 
 @dataclass
@@ -27,6 +145,26 @@ class Template:
     description: str
     body: str
     path: Path
+    kind: str = KIND_SUMMARY
+    meta: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def deprecated(self) -> bool:
+        return self.meta.get("deprecated", "").lower() in {"true", "yes", "1"}
+
+    @property
+    def replaced_by(self) -> str:
+        return self.meta.get("replaced_by", "")
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "kind": self.kind,
+            "deprecated": self.deprecated,
+            "replaced_by": self.replaced_by,
+            "path": str(self.path),
+        }
 
     def render(
         self,
@@ -56,23 +194,50 @@ class Template:
         return out
 
 
-_FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+def require_kind(template: Template, expected: str) -> None:
+    """Refuse a template meant for another pipeline, saying what to run instead."""
+    if template.kind == expected:
+        return
+    name = template.name
+    if template.kind == KIND_INTERNAL:
+        detail = "is internal: it belongs to its own pipeline; pick one from `plaud templates`"
+    elif expected == KIND_SUMMARY:
+        detail = (
+            "is an integrated template — run "
+            f"`uv run plaud cmds-integrate <file_id> --template {name}`"
+        )
+    elif expected == KIND_INTEGRATED:
+        detail = (
+            "is a summary template — run "
+            f"`uv run plaud cmds-summarize <file_id> --template {name}`, "
+            f"or add `kind: integrated` to the front matter of templates/{name}.md"
+        )
+    else:
+        detail = f"is kind {template.kind!r}, not {expected!r}"
+    raise TemplateKindError(f"template '{name}' {detail}")
+
+
+def deprecation_notice(template: Template) -> str:
+    """One line naming the replacement of a deprecated template; "" otherwise."""
+    if not template.deprecated:
+        return ""
+    notice = f"template '{template.name}' is deprecated"
+    return f"{notice} — use '{template.replaced_by}'" if template.replaced_by else notice
 
 
 def load_template(name: str) -> Template:
     path = template_path(name)
     if not path.exists():
         raise FileNotFoundError(f"template not found: {name} ({path})")
-    raw = path.read_text(encoding="utf-8")
-    description = ""
-    body = raw
-    if m := _FRONTMATTER_RE.match(raw):
-        meta = m.group(1)
-        for line in meta.splitlines():
-            if line.startswith("description:"):
-                description = line.split(":", 1)[1].strip()
-        body = raw[m.end() :]
-    return Template(name=name, description=description, body=body, path=path)
+    _lines, meta, body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    return Template(
+        name=name,
+        description=meta.get("description", ""),
+        body=body,
+        path=path,
+        kind=normalize_kind(meta.get("kind")),
+        meta=meta,
+    )
 
 
 def list_templates() -> list[Template]:
@@ -87,11 +252,62 @@ def list_templates() -> list[Template]:
     return out
 
 
-def save_template(name: str, body: str, *, description: str = "") -> Path:
-    TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
+def _field_line(key: str, value: str) -> str:
+    """`key: value` in the first form the reader returns unchanged: as is,
+    then double- or single-quoted. Raises ValueError when none does — the
+    shared format has no escapes, so a value that needs quoting but holds
+    both quote characters cannot be stored faithfully."""
+    value = re.sub(r"\r\n|[\r\n]", " ", value)
+    for written in (value, f'"{value}"', f"'{value}'"):
+        if _clean_value(written) == value:
+            return f"{key}: {written}" if written else f"{key}:"
+    raise ValueError(
+        f"{key} {value!r} cannot be stored as written: the template front matter "
+        "would cut it (a ' #', a leading quote or #, or edge spaces need quotes), "
+        "and it contains both ' and \" so neither quote can wrap it — "
+        "drop one kind of quote or the ' #'"
+    )
+
+
+def _set_field(lines: list[str], key: str, line: str) -> bool:
+    """Replace the effective (first) `key:` line in place; False when absent."""
+    for i, existing in enumerate(lines):
+        if _line_key(existing) == key:
+            lines[i] = line
+            return True
+    return False
+
+
+def save_template(
+    name: str, body: str, *, description: str | None = None, kind: str | None = None
+) -> Path:
+    """Write `body` under the existing front matter, changing only what is given.
+
+    `name:` is set in place; `description:` and `kind:` only when passed;
+    every other line keeps its position. Exactly one blank line separates the
+    block from the body, so load → save → load is byte-stable.
+    """
+    kind = validate_kind(kind) if kind is not None else None  # before any write
     path = template_path(name)
-    front = f"---\nname: {name}\ndescription: {description}\n---\n\n"
-    path.write_text(front + body, encoding="utf-8")
+    lines: list[str] = []
+    if path.exists():
+        lines, _meta, _old_body = parse_frontmatter(path.read_text(encoding="utf-8"))
+    if not lines:  # new file, or one without a front matter block
+        lines = [_field_line("name", name), _field_line("description", description or "")]
+    else:
+        if not _set_field(lines, "name", _field_line("name", name)):
+            lines.insert(0, _field_line("name", name))
+        if description is not None:
+            line = _field_line("description", description)
+            if not _set_field(lines, "description", line):
+                at = next((i + 1 for i, ln in enumerate(lines) if _line_key(ln) == "name"), 0)
+                lines.insert(at, line)
+    if kind is not None and not _set_field(lines, "kind", _field_line("kind", kind)):
+        lines.append(_field_line("kind", kind))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = _OPEN + "\n".join(lines) + "\n---\n\n" + body.lstrip("\n")
+    path.write_text(text, encoding="utf-8")
     return path
 
 

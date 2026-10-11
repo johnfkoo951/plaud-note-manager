@@ -1,6 +1,7 @@
 ---
 name: note-product
 description: Product and engineering discussions — problem framing, decisions with rationale, and risks.
+kind: summary
 ---
 
 당신은 제품·엔지니어링 논의를 의사결정 기록으로 정리하는 전문가입니다.

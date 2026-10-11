@@ -2,7 +2,46 @@ from pathlib import Path
 
 import pytest
 
+import core.paths as paths_mod
+import core.templates as templates_mod
 from core import summarize
+from core.templates import TemplateKindError
+
+
+@pytest.fixture()
+def isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """Templates and summaries under tmp; run_model records instead of calling."""
+    tdir = tmp_path / "templates"
+    tdir.mkdir()
+    monkeypatch.setattr(paths_mod, "TEMPLATES_DIR", tdir)
+    monkeypatch.setattr(templates_mod, "TEMPLATES_DIR", tdir)
+    monkeypatch.setattr(paths_mod, "SUMMARIES_DIR", tmp_path / "summaries")
+    monkeypatch.setattr(paths_mod, "_override", lambda kind: None)
+    calls: list = []
+    monkeypatch.setattr(summarize, "run_model", lambda *a, **k: calls.append(a) or "요약")
+    return {"tmp": tmp_path, "templates": tdir, "calls": calls}
+
+
+def _template(tdir: Path, name: str, kind: str) -> None:
+    (tdir / f"{name}.md").write_text(
+        f"---\nname: {name}\nkind: {kind}\n---\n\n{{transcript}}\n", encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("kind", ["integrated", "internal"])
+def test_summarize_refuses_a_non_summary_template_before_the_model(isolated, kind) -> None:
+    _template(isolated["templates"], "t", kind)
+    with pytest.raises(TemplateKindError):
+        summarize.summarize(file_id="f1", model="claude", template_name="t", transcript="x")
+    assert isolated["calls"] == []
+    assert not (isolated["tmp"] / "summaries").exists()
+
+
+def test_summarize_runs_a_summary_template(isolated) -> None:
+    _template(isolated["templates"], "t", "summary")
+    out = summarize.summarize(file_id="f1", model="claude", template_name="t", transcript="x")
+    assert len(isolated["calls"]) == 1
+    assert out.read_text(encoding="utf-8").endswith("요약")
 
 
 # -------- _api_key_env mapping --------

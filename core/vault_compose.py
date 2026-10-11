@@ -26,6 +26,13 @@ from .frontmatter import iso_minute
 from .metadata import build_recording_snapshot, recorded_date
 from .paths import summary_path
 from .storage import Storage
+from .templates import (
+    KIND_SUMMARY,
+    TemplateKindError,
+    deprecation_notice,
+    load_template,
+    require_kind,
+)
 from .vault_send import (
     VaultSendResult,
     _pick_transcript,
@@ -79,7 +86,8 @@ def wiki_slug(title: str, *, max_len: int = 80) -> str:
 
 @dataclass
 class ComposeResult:
-    status: str  # ok | no_transcript | no_vault | model_failed | schema_error | needs_purpose
+    # ok | bad_template | no_transcript | no_vault | model_failed | schema_error | needs_purpose
+    status: str
     detail: str = ""
     path: str = ""
     vault: str = ""
@@ -283,6 +291,25 @@ def compose(
     storage: Storage | None = None,
 ) -> ComposeResult:
     """Generate `template` for `file_id` and land it in vault `to`."""
+    # Checked first: a cached summary is reused without calling summarize(),
+    # so its own kind check would never see a cached integrate-prompt run.
+    try:
+        loaded = load_template(template)
+        require_kind(loaded, KIND_SUMMARY)
+    except FileNotFoundError:
+        return ComposeResult("bad_template", f"template not found: {template}", template=template)
+    except (OSError, UnicodeDecodeError) as exc:
+        return ComposeResult(
+            "bad_template", f"template unreadable: {template} ({exc})", template=template
+        )
+    except TemplateKindError as exc:
+        return ComposeResult("bad_template", str(exc), template=template)
+    # Deprecated templates ask the model for their own YAML block, which would
+    # land as a second front matter block in the note. Only composing refuses
+    # them; summarize and existing slots keep running them.
+    if notice := deprecation_notice(loaded):
+        return ComposeResult("bad_template", notice, template=template)
+
     storage = storage or Storage()
 
     if to == "wiki":

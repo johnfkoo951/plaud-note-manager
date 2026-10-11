@@ -1,6 +1,9 @@
 ---
 name: cmds-lecture
 description: CMDS vault-ready 강의 노트 — 수업 정보 표 + 핵심 개념 + 학습 성과, ~함체.
+kind: summary
+deprecated: true
+replaced_by: note-lecture
 ---
 
 다음 강의/교육 전사본을 CMDSPACE 볼트에 바로 저장할 수 있는 강의 노트(.md)로 작성해주세요.

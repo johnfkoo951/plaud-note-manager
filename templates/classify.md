@@ -1,6 +1,7 @@
 ---
 name: classify
 description: Arbitrate the Plaud folder for a recording when keyword rules are unsure.
+kind: internal
 ---
 
 You are filing a voice recording into a fixed folder taxonomy for a Korean knowledge-management vault (CMDS). The rule engine already made a weak guess; you arbitrate.
