@@ -544,6 +544,26 @@ def test_main_compose_skip_returns_existing_without_generating(
     assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
 
 
+def test_main_compose_never_overwrites_a_wiki_nested_in_the_main_vault(
+    storage, vaults, recording_model, monkeypatch
+) -> None:
+    from core import vault_send as vs
+
+    nested = vaults["main"] / "nested-wiki"
+    nested.mkdir()
+    monkeypatch.setattr(vs, "wiki_vault", lambda: nested)
+    note = nested / "immutable-source.md"
+    note.write_text("---\nsource: https://web.plaud.ai/file/f1\n---\nORIGINAL\n", encoding="utf-8")
+    before = note.read_bytes()
+    storage.upsert_note_reference(file_id="f1", path=note, kind="vault-send", now=1)
+    result = vc.compose(
+        "f1", template="note-meeting", to="main", storage=storage, on_duplicate="overwrite"
+    )
+    assert (result.status, result.action) == ("ok", "created")
+    assert Path(result.path).parent == vaults["main"] / "00. Inbox"
+    assert note.read_bytes() == before
+
+
 def test_main_compose_overwrite_passes_through(storage, vaults, recording_model) -> None:
     first = vc.compose("f1", template="note-meeting", to="main", storage=storage)
     again = vc.compose(

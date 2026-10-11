@@ -2451,8 +2451,10 @@ def vault_send_cmd(
         early_duplicate_result,
         resolve_content,
         resolve_vault,
+        send_destination,
         send_duplicates,
         sends_into_wiki,
+        unique_note_path,
         vault_send,
     )
 
@@ -2514,13 +2516,14 @@ def vault_send_cmd(
         if resolved is None:
             console.print(f"[red]no '{content}' output found[/red] — generate one first")
             raise typer.Exit(1)
+        date = recorded_date(snapshot)
         existing = send_duplicates(
             storage,
             file_id,
             vault=vault_path,
             dest=dest,
             title=snapshot["title"],
-            date=recorded_date(snapshot),
+            date=date,
         )
         early = early_duplicate_result(
             existing, on_duplicate, vault=vault_path, content=resolved.kind, via=via
@@ -2528,6 +2531,10 @@ def vault_send_cmd(
         if early is not None:
             report(early)
             return
+        # Claude writes the file itself, so it gets the exact unused name the
+        # direct sender would pick, and — for `new` — the notes to leave alone.
+        folder = send_destination(vault_path, dest)
+        filename = unique_note_path(folder, date.replace("-", ""), snapshot["title"]).name
         prompt = build_filing_prompt(
             vault=vault_path,
             dest=dest.strip() or "00. Inbox",
@@ -2535,6 +2542,10 @@ def vault_send_cmd(
             file_id=file_id,
             resolved=resolved,
             with_transcript=with_transcript,
+            filename=filename,
+            keep=[
+                str(Path(e["path"]).resolve().relative_to(vault_path.resolve())) for e in existing
+            ],
         )
         launch_claude(prompt, cwd=vault_path)
         if json_out:

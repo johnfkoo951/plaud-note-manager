@@ -473,12 +473,26 @@ def build_filing_prompt(
     file_id: str,
     resolved: ResolvedContent,
     with_transcript: bool,
+    filename: str = "",
+    keep: list[str] | None = None,
 ) -> str:
     """Prompt for the interactive `--via claude-window` mode: Claude Code files
-    the note itself with the user's vault skills."""
+    the note itself with the user's vault skills. `filename` pins the exact
+    (unused) name, so the note neither replaces another file nor escapes a
+    later duplicate check; `keep` lists this recording's existing notes, which
+    Claude must leave alone."""
     transcript_block = (
         f"\n## 전사본\n{resolved.transcript[:40000]}\n"
         if with_transcript and resolved.transcript
+        else ""
+    )
+    name_rule = (
+        f"정확히 `{filename}` (새 파일)" if filename else "`YYYYMMDD_제목.md` (한글 제목 OK)"
+    )
+    keep_rule = (
+        "\n- 이 녹음의 기존 노트는 그대로 둔다 — 수정하거나 덮어쓰지 말 것: "
+        + ", ".join(f"`{name}`" for name in keep)
+        if keep
         else ""
     )
     return f"""아래 Plaud 녹음 콘텐츠를 옵시디언 볼트에 노트로 정리해서 저장해줘.
@@ -491,7 +505,7 @@ def build_filing_prompt(
 
 ## 작업
 1. obsidian-markdown / cmds-format 스킬 컨벤션으로 노트 1개를 만들어.
-2. 파일명은 `YYYYMMDD_제목.md` (한글 제목 OK), 위 대상 폴더에 저장.
+2. 파일명은 {name_rule}, 위 대상 폴더에 저장.{keep_rule}
 3. frontmatter에 source: plaud, plaud_id, tags, date created 포함.
 4. 아래 콘텐츠는 이미 통합·요약된 결과물이니 구조를 존중하며 다듬어.
 5. 저장 후 파일 절대 경로를 마지막 줄에 출력하고 종료.
@@ -594,9 +608,15 @@ def send_duplicates(
     storage: Storage, file_id: str, *, vault: Path, dest: str, title: str, date: str
 ) -> list[dict]:
     """Earlier vault-send notes for this recording in `vault`, including a
-    same-name note in the destination folder that names the recording."""
+    same-name note in the destination folder that names the recording.
+    Wiki-owned notes never count — a wiki can sit inside the main vault, and
+    its raw sources must not become a main send's overwrite target."""
     same_name = send_destination(vault, dest) / f"{note_stem(date.replace('-', ''), title)}.md"
-    return existing_notes(storage, file_id, vault=vault, same_name=same_name)
+    return [
+        entry
+        for entry in existing_notes(storage, file_id, vault=vault, same_name=same_name)
+        if not is_wiki_target("", Path(entry["path"]))
+    ]
 
 
 def folder_in_vault(vault: Path, path: str) -> str:
@@ -725,6 +745,10 @@ def vault_send(
     if early is not None:
         return early
     overwrite = Path(existing[0]["path"]) if existing and on_duplicate == "overwrite" else None
+    # The target replaces the folder checked above, so it is checked again —
+    # before any model call or write.
+    if overwrite is not None and is_wiki_target(to, overwrite):
+        return VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, vault=str(vault), via=via)
 
     note_type = _note_type(storage, file_id, snapshot)
     tags = note_tags(snapshot, note_type)

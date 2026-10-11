@@ -613,6 +613,84 @@ def test_cli_claude_window_duplicate_launches_nothing(sandbox, monkeypatch) -> N
     assert launched == []
 
 
+def test_cli_claude_window_new_names_a_free_file_and_keeps_the_old_one(
+    sandbox, monkeypatch
+) -> None:
+    monkeypatch.setattr(cli, "Storage", lambda: sandbox["storage"])
+    prompts: list[str] = []
+    monkeypatch.setattr(cli, "launch_claude", lambda prompt, **k: prompts.append(prompt))
+    _write_integrated(sandbox["tmp"])
+    argv = ["vault-send", FILE_ID, "--via", "claude-window", "--json"]
+
+    CliRunner().invoke(cli.app, argv)  # nothing in the vault yet
+    first_name = Path(vault_send(FILE_ID, storage=sandbox["storage"]).path).name
+    assert f"`{first_name}`" in prompts[0]  # the exact name, so a later send can find it
+
+    result = CliRunner().invoke(cli.app, [*argv, "--on-duplicate", "new"])
+    assert result.exit_code == 0, result.output
+    lines = prompts[1].splitlines()
+    numbered = first_name.removesuffix(".md") + " (2).md"
+    name_line = next(ln for ln in lines if "파일명" in ln)
+    assert f"`{numbered}`" in name_line  # a free name, never the occupied one
+    assert f"`{first_name}`" not in name_line
+    keep_line = next(ln for ln in lines if "덮어쓰지" in ln)
+    assert first_name in keep_line  # the existing note is named as one to leave alone
+
+
+# ----- a wiki nested inside the main vault is still the wiki -----------------
+
+
+@pytest.fixture()
+def nested_wiki(sandbox, monkeypatch: pytest.MonkeyPatch) -> dict:
+    """A configured wiki inside the main vault, holding a raw source that a
+    legacy vault-send reference points at."""
+    root = sandbox["vault"] / "nested-wiki"
+    root.mkdir()
+    monkeypatch.setattr(vault_send_mod, "wiki_vault", lambda: root)
+    note = root / "immutable-source.md"
+    note.write_text(
+        f"---\nsource: https://web.plaud.ai/file/{FILE_ID}\n---\nORIGINAL\n", encoding="utf-8"
+    )
+    sandbox["storage"].upsert_note_reference(file_id=FILE_ID, path=note, kind="vault-send", now=1)
+    _write_integrated(sandbox["tmp"], summary="NEW MAIN NOTE")
+    return {"root": root, "note": note, "bytes": note.read_bytes()}
+
+
+@pytest.mark.parametrize("policy", ["ask", "overwrite"])
+def test_a_main_send_never_treats_a_nested_wiki_note_as_its_duplicate(
+    sandbox, nested_wiki, policy
+) -> None:
+    result = vault_send(FILE_ID, to="main", storage=sandbox["storage"], on_duplicate=policy)
+    assert (result.status, result.action) == ("ok", "created")
+    assert not Path(result.path).resolve().is_relative_to(nested_wiki["root"].resolve())
+    assert nested_wiki["note"].read_bytes() == nested_wiki["bytes"]
+
+
+def test_an_overwrite_target_in_the_wiki_is_refused_before_the_model(
+    sandbox, nested_wiki, monkeypatch
+) -> None:
+    # Belt and braces: even if a wiki note reached the candidates, overwrite
+    # re-checks its target before any model call or write.
+    wiki_entry = {
+        "path": str(nested_wiki["note"]),
+        "updated_at": 1,
+        "modified_after_send": False,
+        "obsidian_url": "",
+    }
+    monkeypatch.setattr(vault_send_mod, "send_duplicates", lambda *a, **k: [wiki_entry])
+
+    def boom(*_a, **_k):
+        raise AssertionError("the model ran for a wiki overwrite target")
+
+    monkeypatch.setattr(summarize_mod, "model_available", lambda m: True)
+    monkeypatch.setattr(summarize_mod, "run_model", boom)
+    result = vault_send(
+        FILE_ID, to="main", storage=sandbox["storage"], via="claude", on_duplicate="overwrite"
+    )
+    assert result.status == "wiki_unsupported"
+    assert nested_wiki["note"].read_bytes() == nested_wiki["bytes"]
+
+
 def test_cli_claude_window_to_the_wiki_launches_nothing(wiki: Path, monkeypatch) -> None:
     launched: list = []
     monkeypatch.setattr(cli, "launch_claude", lambda *a, **k: launched.append(a))
