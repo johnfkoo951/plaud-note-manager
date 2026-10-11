@@ -1042,14 +1042,19 @@ final class Database: @unchecked Sendable {
 
     /// Templates living under `templates/`. Each `.md` filename is a template id.
     func listTemplates() -> [String] {
-        let dir = "\(Self.projectRoot)/templates"
-        let url = URL(fileURLWithPath: dir)
-        guard let items = try? FileManager.default.contentsOfDirectory(
-            at: url, includingPropertiesForKeys: nil
-        ) else { return [] }
-        return items.filter { $0.pathExtension == "md" }
-                    .map { $0.deletingPathExtension().lastPathComponent }
-                    .sorted()
+        listTemplateInfos().map(\.name)
+    }
+
+    /// Every readable template with its parsed front matter, sorted by name.
+    /// Reads files: call off the main thread.
+    func listTemplateInfos() -> [TemplateMeta] {
+        scanTemplates().templates
+    }
+
+    /// Like `listTemplateInfos`, but also reports a missing folder and files
+    /// that could not be read, for views that must explain an empty list.
+    func scanTemplates() -> TemplateScan {
+        TemplateMeta.scan(directory: URL(fileURLWithPath: "\(Self.projectRoot)/templates"))
     }
 
     /// Resolve the base directory for a configured output kind
