@@ -28,8 +28,9 @@ struct TemplateMeta: Hashable, Identifiable {
     let kind: Kind
     let deprecated: Bool
     let replacedBy: String
-    /// Everything after the closing `---` line, unchanged. Shipped files keep
-    /// one blank line there, so this usually starts with `\n`.
+    /// Everything after the closing `---` line, unchanged apart from newline
+    /// normalisation (see `parse`). Shipped files keep one blank line there,
+    /// so this usually starts with `\n`.
     let body: String
 
     var id: String { name }
@@ -48,6 +49,20 @@ struct TemplateMeta: Hashable, Identifiable {
         all.filter { $0.kind != .internalUse }.sorted { $0.name < $1.name }
     }
 
+    /// Templates offered when creating a slot: slot choices minus deprecated
+    /// ones. Existing slots keep a deprecated template; it is only not offered.
+    static func newSlotChoices(_ all: [TemplateMeta]) -> [TemplateMeta] {
+        slotChoices(all).filter { !$0.deprecated }
+    }
+
+    /// The new-slot picker's starting row: `note-general` when offered,
+    /// otherwise the first choice. With no choices it is still `note-general`,
+    /// the picker's fallback row, so the selection always matches a row.
+    static func initialSelection(choices: [TemplateMeta]) -> String {
+        if choices.contains(where: { $0.name == "note-general" }) { return "note-general" }
+        return choices.first?.name ?? "note-general"
+    }
+
     /// Viewer order: the purpose-specific `note-*` templates first, then the
     /// rest, each group by name.
     static func viewerOrder(_ all: [TemplateMeta]) -> [TemplateMeta] {
@@ -58,12 +73,13 @@ struct TemplateMeta: Hashable, Identifiable {
 
     // MARK: - Parsing
 
-    /// Pure parse of one template file. The front matter is the text after a
-    /// leading `---\n` up to the first `\n---\n` (the same bounds as the
-    /// Python loader's regex); without it the whole file is the body.
-    /// Works on UTF-8 bytes so the body is returned byte for byte.
+    /// Pure parse of one template file. CRLF and lone CR become LF first, as
+    /// Python's `Path.read_text` does before its loader runs. The front matter
+    /// is then the text after a leading `---\n` up to the first `\n---\n` (the
+    /// loader regex's bounds); without it the whole file is the body. Works on
+    /// UTF-8 bytes, so apart from that newline step the body is byte for byte.
     static func parse(name: String, raw: String) -> TemplateMeta {
-        let bytes = Array(raw.utf8)
+        let bytes = normalizedNewlines(Array(raw.utf8))
         let open = Array("---\n".utf8)
         let close = Array("\n---\n".utf8)
 
@@ -71,7 +87,8 @@ struct TemplateMeta: Hashable, Identifiable {
               let closeAt = firstIndex(of: close, in: bytes, from: open.count)
         else {
             return TemplateMeta(name: name, description: "", kind: .summary,
-                                deprecated: false, replacedBy: "", body: raw)
+                                deprecated: false, replacedBy: "",
+                                body: String(decoding: bytes, as: UTF8.self))
         }
 
         let fields = frontMatterFields(Array(bytes[open.count..<closeAt]))
@@ -84,6 +101,25 @@ struct TemplateMeta: Hashable, Identifiable {
             replacedBy: fields["replaced_by"] ?? "",
             body: body
         )
+    }
+
+    /// Python's universal newlines: `\r\n` and a lone `\r` each become `\n`.
+    private static func normalizedNewlines(_ bytes: [UInt8]) -> [UInt8] {
+        let cr = UInt8(ascii: "\r"), lf = UInt8(ascii: "\n")
+        guard bytes.contains(cr) else { return bytes }
+        var out: [UInt8] = []
+        out.reserveCapacity(bytes.count)
+        var i = 0
+        while i < bytes.count {
+            if bytes[i] == cr {
+                out.append(lf)
+                if i + 1 < bytes.count, bytes[i + 1] == lf { i += 1 }
+            } else {
+                out.append(bytes[i])
+            }
+            i += 1
+        }
+        return out
     }
 
     private static func firstIndex(of needle: [UInt8], in haystack: [UInt8],
@@ -103,8 +139,7 @@ struct TemplateMeta: Hashable, Identifiable {
         var fields: [String: String] = [:]
         for lineBytes in bytes.split(separator: UInt8(ascii: "\n"),
                                      omittingEmptySubsequences: true) {
-            var line = String(decoding: lineBytes, as: UTF8.self)
-            if line.hasSuffix("\r") { line.removeLast() }
+            let line = String(decoding: lineBytes, as: UTF8.self)
             guard let first = line.first, first != " ", first != "\t", first != "#",
                   let colon = line.firstIndex(of: ":")
             else { continue }

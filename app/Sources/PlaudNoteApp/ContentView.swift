@@ -4853,10 +4853,11 @@ private struct AIInspectorPanel: View {
     @AppStorage("workInspectorTab") private var inspectorTab = "info"
 
     @State private var slots: [Database.Slot] = []
-    @State private var templates: [String] = []
+    @State private var templates: [TemplateMeta] = []
     @State private var addingSlot: Bool = false
-    /// Per-slot mode (.summary or .integrated). Defaults to .integrated when
-    /// the slot's template is "integrated", else .summary.
+    /// Per-slot mode the user picked (.summary or .integrated). Without a
+    /// pick, `SlotModeDefaults.opensIntegrated` decides from the template's
+    /// declared kind.
     @State private var modeMap: [String: SlotMode] = [:]
     @State private var expanded: Set<String> = []
     /// Slot whose output is shown in the large expand sheet (nil = closed).
@@ -4951,7 +4952,7 @@ private struct AIInspectorPanel: View {
         .background(Color(NSColor.windowBackgroundColor))
         .task(id: refreshTick) {
             let loaded = await Task.detached(priority: .userInitiated) {
-                (Database.shared.loadSlots(), Database.shared.listTemplates())
+                (Database.shared.loadSlots(), Database.shared.listTemplateInfos())
             }.value
             guard !Task.isCancelled else { return }
             slots = loaded.0
@@ -4969,7 +4970,7 @@ private struct AIInspectorPanel: View {
         .onChange(of: store.selectedID) { _, _ in
             expanded.removeAll()
             expandedSlot = nil
-            modeMap.removeAll()  // re-derive integrated-first defaults per file
+            modeMap.removeAll()  // re-derive the template-kind defaults per file
             store.lastVaultSend = nil
         }
         .sheet(isPresented: $addingSlot) {
@@ -5118,16 +5119,29 @@ private struct AIInspectorPanel: View {
             }
             HStack(spacing: 12) {
                 Button {
-                    // Kick every slot's Integrated generation concurrently —
-                    // each runs as its own CLI process; per-card spinners come
-                    // from summarizingKeys.
+                    // Kick every slot's generation concurrently, in the mode
+                    // its template's kind declares (internal ones are skipped)
+                    // — each runs as its own CLI process; per-card spinners
+                    // come from summarizingKeys.
                     for slot in slots {
                         let s = slot
+                        let action = batchAction(for: s)
+                        guard action != .skip else { continue }
                         Task {
-                            await store.integrate(
-                                fileID: fid, model: s.model,
-                                modelID: s.modelID ?? "", template: s.template
-                            )
+                            switch action {
+                            case .summarize:
+                                await store.summarize(
+                                    fileID: fid, model: s.model,
+                                    modelID: s.modelID ?? "", template: s.template
+                                )
+                            case .integrate:
+                                await store.integrate(
+                                    fileID: fid, model: s.model,
+                                    modelID: s.modelID ?? "", template: s.template
+                                )
+                            case .skip:
+                                break
+                            }
                             refreshTick &+= 1
                         }
                     }
@@ -5135,8 +5149,10 @@ private struct AIInspectorPanel: View {
                     Label("Generate All", systemImage: "arrow.triangle.merge")
                 }
                 .fixedSize()
-                .disabled(fid.isEmpty || slots.isEmpty || !store.summarizingKeys.isEmpty)
-                .help("모든 슬롯의 Integrated 결과를 한 번에 생성")
+                .disabled(fid.isEmpty || !slots.contains { batchAction(for: $0) != .skip }
+                          || !store.summarizingKeys.isEmpty)
+                .help("모든 슬롯을 템플릿 종류대로 한 번에 생성 — integrated는 Integrated, "
+                      + "summary는 Summary, 내부용(internal)은 건너뜀")
 
                 // CLI/MCP bridge: open a Claude Code session preloaded with
                 // this recording's context — plaud-* skills + Plaud MCP +
@@ -5219,15 +5235,24 @@ private struct AIInspectorPanel: View {
         }
     }
 
+    /// The slot template's parsed front matter; nil when the file is gone.
+    private func templateMeta(_ name: String) -> TemplateMeta? {
+        templates.first { $0.name == name }
+    }
+
+    private func batchAction(for slot: Database.Slot) -> SlotModeDefaults.BatchAction {
+        SlotModeDefaults.batchAction(kind: templateMeta(slot.template)?.kind)
+    }
+
+    /// The user's pick wins; otherwise the template's declared kind decides,
+    /// and only a template missing from disk falls back to "integrated when a
+    /// fused output already exists".
     private func mode(for slot: Database.Slot) -> SlotMode {
         if let m = modeMap[slot.id] { return m }
-        if slot.template == "integrated" { return .integrated }
-        // Integrated-first: when a fused output already exists for this slot,
-        // surface it by default — it is the artifact the user actually uses.
-        if output(for: slot)?.hasIntegrated == true {
-            return .integrated
-        }
-        return .summary
+        return SlotModeDefaults.opensIntegrated(
+            kind: templateMeta(slot.template)?.kind,
+            hasIntegratedOutput: output(for: slot)?.hasIntegrated == true
+        ) ? .integrated : .summary
     }
 
     private func viewKind(for slot: Database.Slot) -> Database.IntegratedKind {
@@ -5241,6 +5266,9 @@ private struct AIInspectorPanel: View {
         let isRunning = store.summarizingKeys.contains(key)
         let isOpen = expanded.contains(slot.id)
         let m = mode(for: slot)
+        let meta = templateMeta(slot.template)
+        let runnable = SlotModeDefaults.canGenerate(integratedMode: m == .integrated,
+                                                    kind: meta?.kind)
         let hasOutput: Bool = {
             switch m {
             case .summary:
@@ -5259,7 +5287,7 @@ private struct AIInspectorPanel: View {
                     HStack(spacing: 4) {
                         slotChip("\(slot.model) · \(slot.outputModel)",
                                  icon: "cpu")
-                        slotChip(slot.template, icon: "doc.plaintext")
+                        slotChip(meta?.pickerLabel ?? slot.template, icon: "doc.plaintext")
                     }
                 }
                 Spacer()
@@ -5298,7 +5326,8 @@ private struct AIInspectorPanel: View {
                         }
                     }
                     .controlSize(.small)
-                    .disabled(fid.isEmpty)
+                    .disabled(fid.isEmpty || !runnable)
+                    .help(runnable ? "" : SlotModeDefaults.generateBlockedHelp(kind: meta?.kind))
                 }
                 Spacer()
                 if hasOutput {
@@ -5537,15 +5566,24 @@ private struct AIInspectorPanel: View {
 }
 
 private struct AddSlotSheet: View {
-    let templates: [String]
+    /// Usable templates only: no internal prompts, no deprecated ones.
+    let choices: [TemplateMeta]
     @ObservedObject var store: FileStore
     let dismiss: () -> Void
 
     @State private var name: String = ""
     @State private var model: String = "claude"
     @State private var modelID: String = Database.fallbackModelIDs["claude"] ?? "claude-fable-5"
-    @State private var template: String = "integrated"
+    @State private var template: String
     @State private var presets: [ModelPresetVM] = []
+
+    init(templates: [TemplateMeta], store: FileStore, dismiss: @escaping () -> Void) {
+        let choices = TemplateMeta.newSlotChoices(templates)
+        self.choices = choices
+        self.store = store
+        self.dismiss = dismiss
+        _template = State(initialValue: TemplateMeta.initialSelection(choices: choices))
+    }
 
     private let models = ["claude", "codex", "gemini", "grok"]
 
@@ -5592,8 +5630,13 @@ private struct AddSlotSheet: View {
             HStack {
                 Text("Template").frame(width: 80, alignment: .leading)
                 Picker("", selection: $template) {
-                    ForEach(templates.isEmpty ? ["default"] : templates,
-                            id: \.self) { Text($0).tag($0) }
+                    if choices.isEmpty {
+                        Text("note-general").tag("note-general")
+                    } else {
+                        ForEach(choices) { meta in
+                            Text(meta.pickerLabel).tag(meta.name)
+                        }
+                    }
                 }.labelsHidden()
             }
             HStack {

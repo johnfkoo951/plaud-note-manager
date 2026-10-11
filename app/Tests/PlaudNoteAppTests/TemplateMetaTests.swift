@@ -68,13 +68,44 @@ final class TemplateMetaTests: XCTestCase {
         XCTAssertEqual(t.body, raw)
     }
 
-    func testUnterminatedOrCRLFFrontMatterIsNotFrontMatter() {
+    func testUnterminatedFrontMatterIsNotFrontMatter() {
         // Same bounds as the Python loader: a leading "---\n" and a closing "\n---\n".
         let open = "---\ndescription: never closed\n\nBody\n"
         XCTAssertEqual(TemplateMeta.parse(name: "x", raw: open).body, open)
         XCTAssertEqual(TemplateMeta.parse(name: "x", raw: open).description, "")
-        let crlf = "---\r\ndescription: d\r\n---\r\nBody\r\n"
-        XCTAssertEqual(TemplateMeta.parse(name: "x", raw: crlf).body, crlf)
+    }
+
+    func testCRLFAndCRFilesParseLikeTheirLFTwin() {
+        // Python's Path.read_text turns CRLF and lone CR into LF before its loader runs.
+        let lf = """
+            ---
+            description: "Meeting minutes" # shipped
+            kind: integrate
+            deprecated: yes
+            replaced_by: note-meeting
+            ---
+
+            관련 노트: [[Weekly Review]]
+            \t- tab-indented line {transcript}
+            ---
+            Part 2
+
+            """
+        let expected = TemplateMeta.parse(name: "twin", raw: lf)
+        XCTAssertEqual(expected.description, "Meeting minutes")
+        XCTAssertEqual(expected.kind, .integrated)
+        XCTAssertTrue(expected.deprecated)
+        XCTAssertEqual(expected.replacedBy, "note-meeting")
+
+        let crlf = lf.replacingOccurrences(of: "\n", with: "\r\n")
+        let cr = lf.replacingOccurrences(of: "\n", with: "\r")
+        XCTAssertTrue(crlf.utf8.contains(UInt8(ascii: "\r")))
+        XCTAssertEqual(TemplateMeta.parse(name: "twin", raw: crlf), expected)
+        XCTAssertEqual(TemplateMeta.parse(name: "twin", raw: cr), expected)
+        XCTAssertEqual(Array(TemplateMeta.parse(name: "twin", raw: crlf).body.utf8),
+                       Array(expected.body.utf8))
+        // Without front matter the normalised text is the body, as in Python.
+        XCTAssertEqual(TemplateMeta.parse(name: "plain", raw: "a\r\nb\rc\n").body, "a\nb\nc\n")
     }
 
     func testBodyIsKeptByteForByte() {
@@ -134,6 +165,30 @@ final class TemplateMetaTests: XCTestCase {
         ]
         XCTAssertEqual(TemplateMeta.slotChoices(all).map(\.name),
                        ["cmds-lecture", "default", "note-meeting"])
+    }
+
+    func testNewSlotChoicesDropInternalAndDeprecatedAndSortByName() {
+        let all = [
+            meta("kind: summary", name: "note-meeting"),
+            meta("kind: internal", name: "classify"),
+            meta("kind: summary\ndeprecated: true\nreplaced_by: note-meeting", name: "cmds-meeting"),
+            meta("kind: integrated", name: "default"),
+            meta("kind: summary", name: "note-general"),
+        ]
+        XCTAssertEqual(TemplateMeta.newSlotChoices(all).map(\.name),
+                       ["default", "note-general", "note-meeting"])
+        // Existing slots still resolve a deprecated template through slotChoices.
+        XCTAssertTrue(TemplateMeta.slotChoices(all).contains { $0.name == "cmds-meeting" })
+    }
+
+    func testInitialSelectionPrefersNoteGeneralThenFirstChoice() {
+        let withGeneral = ["default", "note-general", "note-meeting"].map {
+            meta("description: d", name: $0)
+        }
+        XCTAssertEqual(TemplateMeta.initialSelection(choices: withGeneral), "note-general")
+        let withoutGeneral = ["default", "note-meeting"].map { meta("description: d", name: $0) }
+        XCTAssertEqual(TemplateMeta.initialSelection(choices: withoutGeneral), "default")
+        XCTAssertEqual(TemplateMeta.initialSelection(choices: []), "note-general")
     }
 
     func testViewerOrderPutsNoteTemplatesFirst() {

@@ -930,13 +930,19 @@ final class Database: @unchecked Sendable {
         return cfg
     }
 
+    /// Slots used when `data/slots.json` is absent or unreadable. Keep equal to
+    /// Python's `DEFAULT_SLOTS` in `core/slots.py`.
+    static let fallbackSlots: [Slot] = [
+        Slot(name: "Default (Claude)", model: "claude", template: "note-general"),
+    ]
+
     func loadSlots() -> [Slot] {
         let path = "\(Self.projectRoot)/data/slots.json"
         if let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
            let arr = try? JSONDecoder().decode([Slot].self, from: data) {
             return arr
         }
-        return [Slot(name: "Default (Claude)", model: "claude", template: "default")]
+        return Self.fallbackSlots
     }
 
     /// Model presets come from the Python CLI (`plaud models --json`), which is
