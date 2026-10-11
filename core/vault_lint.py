@@ -137,7 +137,8 @@ def lint_lane(
             text = path.read_text(encoding="utf-8")
         except OSError:
             continue
-        if "source: plaud" not in text.split("\n---", 2)[0] if text.startswith("---") else True:
+        frontmatter = text.split("\n---", 2)[0] if text.startswith("---") else ""
+        if "source: plaud" not in frontmatter:
             continue
         new_text, issues, fixed = lint_text(text, fix=fix, model_label=model_label)
         if fix and fixed and new_text != text:
