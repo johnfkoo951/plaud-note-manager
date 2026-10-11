@@ -293,6 +293,90 @@ def test_compose_refuses_a_deprecated_template(storage, vaults, monkeypatch) -> 
     assert not [p for v in vaults.values() for p in v.rglob("*") if p.is_file()]
 
 
+@pytest.fixture()
+def recording_model(monkeypatch: pytest.MonkeyPatch) -> list:
+    """Stub model that records calls, so a test can show none happened."""
+    from core import app_config
+    from core import summarize as sm
+
+    calls: list = []
+    monkeypatch.setattr(sm, "model_available", lambda m: True)
+    monkeypatch.setattr(
+        sm, "run_model", lambda *a, **k: calls.append(a) or "## 핵심 요약\n\n시연함."
+    )
+    monkeypatch.setattr(app_config, "model_id_for", lambda m: "")
+    return calls
+
+
+@pytest.mark.parametrize("inside", ["", "10. Raw Sources"])
+def test_a_path_into_the_wiki_takes_the_raw_source_route(
+    storage, vaults, recording_model, inside
+) -> None:
+    target = vaults["wiki"] / inside if inside else vaults["wiki"]
+    target.mkdir(parents=True, exist_ok=True)
+    result = vc.compose(
+        "f1", template="note-lecture", to=str(target), collection_purpose="", storage=storage
+    )
+    assert result.status == "needs_purpose"
+    assert recording_model == []
+
+
+def test_compose_to_the_wiki_path_lands_in_raw_sources(storage, vaults, recording_model) -> None:
+    result = vc.compose(
+        "f1",
+        template="note-lecture",
+        to=str(vaults["wiki"]),
+        collection_purpose="p",
+        storage=storage,
+    )
+    assert result.status == "ok"
+    assert result.dest.startswith("10. Raw Sources/")
+    assert not (vaults["wiki"] / "00. Inbox").exists()
+
+
+def test_compose_to_the_main_vault_path_stays_main(storage, vaults, recording_model) -> None:
+    result = vc.compose("f1", template="note-meeting", to=str(vaults["main"]), storage=storage)
+    assert result.status == "ok"
+    assert Path(result.path).parent == vaults["main"] / "00. Inbox"
+    assert not [p for p in vaults["wiki"].rglob("*") if p.is_file()]
+
+
+def test_compose_to_a_missing_vault_is_no_vault_before_the_model(
+    storage, vaults, recording_model, monkeypatch, tmp_path
+) -> None:
+    from core import vault_send as vs
+
+    monkeypatch.setattr(vs, "wiki_vault", lambda: None)  # a fresh clone: no wiki anywhere
+    for to, purpose in ((str(tmp_path / "missing"), ""), ("wiki", "p")):
+        result = vc.compose(
+            "f1", template="note-lecture", to=to, collection_purpose=purpose, storage=storage
+        )
+        assert result.status == "no_vault", to
+    assert recording_model == []
+
+
+def test_main_compose_note_records_the_generating_model(storage, vaults, recording_model) -> None:
+    # The vault requires model: and effort: on agent-written notes.
+    result = vc.compose("f1", template="note-meeting", to="main", model="claude", storage=storage)
+    assert result.status == "ok"
+    front = Path(result.path).read_text(encoding="utf-8").split("\n---\n", 1)[0]
+    assert 'model: "claude"' in front
+    assert "\neffort: " in front
+
+
+def test_a_multi_line_purpose_becomes_one_line(storage, vaults, recording_model) -> None:
+    result = vc.compose(
+        "f1",
+        template="note-lecture",
+        to="wiki",
+        collection_purpose="강의 설계\n재사용\r\n  목적",
+        storage=storage,
+    )
+    assert result.status == "ok"
+    text = Path(result.path).read_text(encoding="utf-8")
+    assert 'collectionPurpose: "강의 설계 재사용 목적"' in text
+
+
 def test_compose_reports_a_missing_template_before_opening_storage(vaults, monkeypatch) -> None:
     def no_storage():
         raise AssertionError("Storage() opened before the template was checked")

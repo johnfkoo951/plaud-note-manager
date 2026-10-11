@@ -584,7 +584,7 @@ API backend는 사용자가 명시적으로 선택할 수 있으며 별도 과�
 - Main Vault Inbox에 integrated-first direct send
 - transcript 포함 옵션
 - `60. Collections/63. Meetings` 목적지
-- Wiki Vault Inbox
+- Wiki Vault Raw Source (`vault-compose --to wiki`, 수집 목적 필수)
 - Claude headless 정형화 후 저장
 - Claude Terminal interactive filing
 - 개별 summary slot 결과만 전송
@@ -614,9 +614,12 @@ headless AI가 완성 frontmatter를 반환하는 경로, Claude Terminal이 직
 AI meeting note 경로는 builder가 결과를 다시 강제하지 않고 prompt 계약에 의존하므로
 `vault-lint`로 확인해야 한다.
 
-일반 `vault-send`는 Main Inbox가 기본이지만 Meetings, Wiki, 또는 지정한 목적지를 쓸 수
-있다. Dual output만 고정 Plaud transcript Inbox lane에 착륙한다. 어느 경로도 영구노트
-승격이나 최종 publish까지 자동 결정하지 않으며 그 단계는 vault-side workflow가 담당한다.
+일반 `vault-send`는 Main Inbox가 기본이지만 Meetings 또는 지정한 목적지를 쓸 수 있다.
+Wiki는 `vault-send`의 대상이 아니다. Wiki는 raw source만 받으므로 `vault-compose --to wiki
+--template <note-...> --collection-purpose "..."`가 원문 전사본을 `10. Raw Sources/` 아래에
+쓰며, `vault-send`에 wiki를 주면 `wiki_unsupported`로 거절한다. Dual output만 고정 Plaud
+transcript Inbox lane에 착륙한다. 어느 경로도 영구노트 승격이나 최종 publish까지 자동
+결정하지 않으며 그 단계는 vault-side workflow가 담당한다.
 
 목록 context menu에 남아 있는 `Send to Obsidian`은 구형 `plaud obsidian` 경로다. Work
 Sidebar와 Command Palette의 `vault-send`가 현재 통합본 우선 송출 경로다.
@@ -633,7 +636,7 @@ Sidebar와 Command Palette의 `vault-send`가 현재 통합본 우선 송출 경
 - Move to Folder / Unfile
 - Generate Metadata
 - Transcribe with CMDS
-- Main Vault / Wiki Vault / Claude Vault send
+- Main Vault / Claude Vault send, Wiki raw source compose
 - Plaud Web 열기 / URL 복사
 - Rename
 - Re-fetch Detail

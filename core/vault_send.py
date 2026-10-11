@@ -46,7 +46,15 @@ from .tags import normalize_tags
 
 MEETINGS_DEST = "60. Collections/63. Meetings"
 DEFAULT_DEST = "00. Inbox"
+#: The wiki's folder name: the sibling looked for next to the main vault, and
+#: how a path is recognised as the wiki when none is configured.
 WIKI_VAULT_DIRNAME = "CMDS_LLM_Wiki"
+WIKI_KEYWORD = "wiki"
+WIKI_SEND_REFUSAL = (
+    "the wiki takes raw sources only — use "
+    "`uv run plaud vault-compose <id> --to wiki --template <note-...> "
+    '--collection-purpose "..."`'
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +68,7 @@ class ResolvedContent:
 
 @dataclass(slots=True)
 class VaultSendResult:
-    status: str  # ok | no_content | no_vault | write_failed | model_failed
+    status: str  # ok | no_content | no_vault | write_failed | model_failed | wiki_unsupported
     detail: str = ""
     path: str = ""
     vault: str = ""
@@ -92,17 +100,36 @@ def set_wiki_vault(path: str) -> None:
     app_config.save(cfg)
 
 
+def _is_wiki_keyword(target: str) -> bool:
+    return (target or "").strip().lower() == WIKI_KEYWORD
+
+
 def resolve_vault(target: str) -> Path | None:
     """Map a --to value onto a vault root. main|wiki|<absolute path>."""
     target = (target or "main").strip()
     if target in ("", "main"):
         return app_config.obsidian_vault()
-    if target == "wiki":
+    if _is_wiki_keyword(target):
         return wiki_vault()
     import os
 
     path = Path(os.path.expanduser(target))
     return path if path.is_dir() else None
+
+
+def is_wiki_target(to: str, vault: Path | None = None) -> bool:
+    """True for the word `wiki`, or a resolved `vault` that is the wiki or a
+    folder inside it. With no wiki configured, a path is the wiki when one of
+    its components is WIKI_VAULT_DIRNAME."""
+    if _is_wiki_keyword(to):
+        return True
+    if vault is None:
+        return False
+    target = vault.resolve()
+    wiki = wiki_vault()
+    if wiki is not None:
+        return target.is_relative_to(wiki.resolve())
+    return WIKI_VAULT_DIRNAME in target.parts
 
 
 def _latest(paths: list[Path]) -> Path | None:
@@ -308,8 +335,6 @@ def build_note_markdown(
     related: list[str] | None = None,
     model: str = "",
     aliases: list[str] | None = None,
-    source_vault: str = "",
-    main_vault_related: list[dict[str, str]] | None = None,
 ) -> str:
     """Deterministic CMDS-style note (direct mode). Frontmatter follows the
     vault's frontmatter-standard (7 required fields + CMDS/index + Plaud lane
@@ -334,10 +359,8 @@ def build_note_markdown(
         plaud_id=file_id,
         speakers=list(speakers or []),
         keywords=list(keywords or []),
-        related=[] if source_vault else list(related or []),
+        related=list(related or []),
         reuse_channels=list(reuse_channels or []),
-        source_vault=source_vault,
-        main_vault_related=list(main_vault_related or []),
         extra={"content_kind": kind_label},
     )
     lines = fm.lines()
@@ -355,21 +378,11 @@ def build_note_markdown(
             lines.append("## Transcript")
             lines.append("")
         lines.append(resolved.transcript)
-    if related and not source_vault:
+    if related:
         lines.append("")
         lines.append("## 관련 노트")
         lines.append("")
         lines.extend(f"- [[{r}]]" for r in related)
-    elif main_vault_related and source_vault:
-        from .frontmatter import advanced_uri_link
-
-        lines.append("")
-        lines.append("## 관련 노트 (main vault)")
-        lines.append("")
-        lines.extend(
-            "- " + advanced_uri_link(n.get("title", ""), source_vault, n.get("rel_path", ""))
-            for n in main_vault_related
-        )
     lines.append("")
     return "\n".join(lines)
 
@@ -459,8 +472,6 @@ def _ctx_kwargs(ctx: dict) -> dict:
         "keywords": ctx.get("keywords") or [],
         "related": ctx.get("related") or [],
         "aliases": ctx.get("aliases") or [],
-        "source_vault": ctx.get("source_vault", ""),
-        "main_vault_related": ctx.get("related_paths") or [],
     }
 
 
@@ -498,19 +509,27 @@ def vault_send(
     ai_model_id: str = "",
     storage: Storage | None = None,
     vault_override: Path | None = None,
+    note_model: str = "",
 ) -> VaultSendResult:
     """Resolve content, build the note (direct or headless-AI), write it into
     the vault, and record the reference. `claude-window` is NOT handled here —
-    the CLI launches the Terminal itself using build_filing_prompt."""
-    storage = storage or Storage()
+    the CLI launches the Terminal itself using build_filing_prompt.
+
+    The wiki is refused: it takes raw sources, which `vault-compose --to wiki`
+    writes. Both checks run before the database is opened. `note_model` names
+    the model that wrote the content, for the note's `model:`/`effort:`."""
+    if is_wiki_target(to):
+        return VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, via=via)
     vault = vault_override or resolve_vault(to)
     if vault is None or not vault.is_dir():
         return VaultSendResult(
             "no_vault",
-            f"vault '{to}' not configured/found — set it via `plaud config-vault` "
-            "(main) or `plaud config-wiki-vault` (wiki)",
+            f"vault '{to}' not configured/found — set it via `plaud config-vault`",
             via=via,
         )
+    if is_wiki_target(to, vault):
+        return VaultSendResult("wiki_unsupported", WIKI_SEND_REFUSAL, vault=str(vault), via=via)
+    storage = storage or Storage()
 
     snapshot = build_recording_snapshot(storage, file_id)
     resolved = resolve_content(
@@ -536,11 +555,6 @@ def vault_send(
     ctx = note_context(storage, file_id, snapshot)
     if ctx["tags"]:
         tags = normalize_tags([*tags, *ctx["tags"]])[:20]
-    # Wiki (satellite) vault: `[[…]]` cannot cross vaults, so main-vault
-    # relations become advanced-uri links under `mainVaultRelated:`.
-    if to == "wiki":
-        main_vault = app_config.obsidian_vault()
-        ctx["source_vault"] = main_vault.name if main_vault else ""
 
     if via == "claude":
         from .summarize import model_available, model_unavailable_message, run_model
@@ -602,6 +616,7 @@ def vault_send(
             with_transcript=with_transcript,
             author=author,
             reuse_channels=reuse_channels,
+            model=note_model,
             **_ctx_kwargs(ctx),
         )
 
