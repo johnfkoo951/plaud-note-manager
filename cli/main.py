@@ -74,6 +74,26 @@ def _emit_json(obj: Any) -> None:
     sys.stdout.write("\n")
 
 
+def _require_template(name: str, *kinds: str) -> Any:
+    """Load template `name`, one of `kinds` when given; otherwise say why on
+    stderr and exit 1 — before a command touches the model, the DB or a file."""
+    from core.templates import TemplateKindError, load_template, require_kind
+
+    try:
+        template = load_template(name)
+        if kinds and template.kind not in kinds:
+            require_kind(template, kinds[0])  # raises, naming what to run instead
+        return template
+    except FileNotFoundError:
+        message = f"template not found: {name}"
+    except (OSError, UnicodeDecodeError) as exc:
+        message = f"template unreadable: {name} ({exc})"
+    except TemplateKindError as exc:
+        message = str(exc)
+    typer.echo(message, err=True)
+    raise typer.Exit(1)
+
+
 def _peek_date(start_time_ms: int | None, edit_time_s: int | None) -> str | None:
     """Format a recording date (start_time is epoch-ms, edit_time epoch-s)."""
     for ts, divisor in ((start_time_ms, 1000), (edit_time_s, 1)):
@@ -2736,7 +2756,9 @@ def cmds_summarize(
     import json as _json
     from core.summarize import model_available, model_unavailable_message, summarize
     from core.paths import transcripts_dir
+    from core.templates import KIND_SUMMARY
 
+    _require_template(template, KIND_SUMMARY)
     if not model_available(model):
         console.print(f"[red]{model} unavailable[/red] — {model_unavailable_message(model)}")
         raise typer.Exit(1)
@@ -2829,7 +2851,9 @@ def cmds_integrate(
     import json as _json
     from core.integrate import integrate
     from core.summarize import model_available, model_unavailable_message
+    from core.templates import KIND_INTEGRATED
 
+    _require_template(template, KIND_INTEGRATED)
     if not model_available(model):
         console.print(f"[red]{model} unavailable[/red] — {model_unavailable_message(model)}")
         raise typer.Exit(1)
@@ -2903,12 +2927,28 @@ def cmds_integrate(
 
 
 @safe_command(name="templates")
-def templates_list() -> None:
-    """List available prompt templates."""
+def templates_list(
+    json_out: bool = typer.Option(False, "--json", help="Print the templates as JSON."),
+) -> None:
+    """List prompt templates: name, kind, deprecation, description."""
+    from rich.markup import escape
+
     from core.templates import list_templates
 
-    for t in list_templates():
-        console.print(f"  [bold]{t.name}[/bold]  [dim]{t.description}[/dim]")
+    items = sorted(list_templates(), key=lambda t: t.name)
+    if json_out:
+        _emit_json([t.as_dict() for t in items])
+        return
+    for t in items:
+        marker = ""
+        if t.deprecated:
+            target = f" -> {escape(t.replaced_by)}" if t.replaced_by else ""
+            marker = f"[yellow]DEPRECATED{target}[/yellow]  "
+        console.print(
+            f"  [bold]{escape(t.name)}[/bold]  {escape(t.kind)}  "
+            f"{marker}[dim]{escape(t.description)}[/dim]",
+            soft_wrap=True,
+        )
 
 
 @safe_command(name="models")
@@ -2936,21 +2976,37 @@ def models_list(
 
 
 @safe_command(name="template-show")
-def template_show(name: str) -> None:
-    from core.templates import load_template
-
-    t = load_template(name)
-    console.print(t.body)
+def template_show(
+    name: str,
+    json_out: bool = typer.Option(False, "--json", help="Print metadata and body as JSON."),
+) -> None:
+    """Print a template's body exactly as stored."""
+    t = _require_template(name)
+    if json_out:
+        _emit_json({**t.as_dict(), "body": t.body})
+        return
+    sys.stdout.write(t.body)
 
 
 @safe_command(name="template-save")
 def template_save(
     name: str,
-    description: str = typer.Option("", help="Short description"),
+    description: str | None = typer.Option(None, help="Short description (kept when omitted)"),
+    kind: str | None = typer.Option(
+        None, help="summary | integrated | internal (kept when omitted)"
+    ),
     body_file: Path = typer.Option(None, help="Read body from file (else stdin)"),
 ) -> None:
-    from core.templates import save_template
+    from rich.markup import escape
 
+    from core.templates import save_template, validate_kind
+
+    if kind is not None:
+        try:
+            validate_kind(kind)
+        except ValueError as exc:
+            console.print(f"[red]{escape(str(exc))}[/red]")
+            raise typer.Exit(1) from None
     if body_file:
         body = body_file.read_text(encoding="utf-8")
     else:
@@ -2960,7 +3016,7 @@ def template_save(
     if not body.strip():
         console.print("[red]empty body[/red]")
         raise typer.Exit(1)
-    path = save_template(name, body, description=description)
+    path = save_template(name, body, description=description, kind=kind)
     console.print(f"[green]saved[/green] {path}")
 
 
@@ -2990,7 +3046,9 @@ def slot_add(
     model_id: str = typer.Option("", help="Optional provider API model id override."),
 ) -> None:
     from core.slots import load_slots, save_slots, Slot
+    from core.templates import KIND_INTEGRATED, KIND_SUMMARY
 
+    _require_template(template, KIND_SUMMARY, KIND_INTEGRATED)
     slots = load_slots()
     slots = [s for s in slots if s.name != name]
     slots.append(Slot(name=name, model=model, template=template, model_id=model_id))
