@@ -1095,6 +1095,8 @@ final class FileStore: ObservableObject {
     @Published var lastVaultSend: VaultSendOutcome?
     /// Non-nil while the compose sheet is open (`vault-compose`).
     @Published var composeRequest: VaultComposeRequest?
+    /// A send or compose found an existing note; the root dialog asks.
+    @Published var pendingVaultDuplicate: VaultDuplicatePrompt?
 
     /// Generate metadata + auto tags. By default no `--model` is passed so the
     /// CLI resolves the configured classify model (`plaud config-classify`) —

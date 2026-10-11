@@ -52,17 +52,27 @@ struct VaultChoices: Equatable {
     }
 }
 
+/// One submitted compose, kept whole so a duplicate prompt can re-run it.
+/// (`VaultComposeRequest` only opens the sheet.)
+struct VaultComposeJob: Equatable {
+    let fileID: String
+    let template: String
+    let vault: String
+    let purpose: String
+}
+
 /// argv and form rules for `plaud vault-compose`.
 enum VaultComposeArguments {
-    /// `vault-compose --template T --to V [--collection-purpose P] --json -- FILE_ID`.
-    /// The purpose is sent only for the wiki, trimmed; `--` keeps a file id
-    /// that starts with `-` from being read as an option.
-    static func build(fileID: String, template: String, vault: String, purpose: String) -> [String] {
-        var args = ["vault-compose", "--template", template, "--to", vault]
-        if requiresPurpose(vault: vault) {
-            args += ["--collection-purpose", purpose.trimmingCharacters(in: .whitespacesAndNewlines)]
+    /// `vault-compose --template T --to V [--collection-purpose P]
+    /// --on-duplicate D --json -- FILE_ID`. The purpose is sent only for the
+    /// wiki, trimmed; `--` keeps a file id that starts with `-` from being
+    /// read as an option.
+    static func build(_ job: VaultComposeJob, onDuplicate: String) -> [String] {
+        var args = ["vault-compose", "--template", job.template, "--to", job.vault]
+        if requiresPurpose(vault: job.vault) {
+            args += ["--collection-purpose", job.purpose.trimmingCharacters(in: .whitespacesAndNewlines)]
         }
-        return args + ["--json", "--", fileID]
+        return args + ["--on-duplicate", onDuplicate, "--json", "--", job.fileID]
     }
 
     /// A wiki raw source must say why it was collected.
@@ -86,13 +96,16 @@ enum VaultComposeArguments {
 
 /// User-facing text for `vault-compose --json` statuses.
 enum VaultComposeOutcome {
-    /// nil for `ok`; otherwise a Korean message, with the CLI's detail
-    /// appended when it has one.
+    /// nil for `ok`, and for `duplicate`, which the duplicate dialog answers
+    /// instead; otherwise a Korean message, with the CLI's detail appended
+    /// when it has one.
     static func errorMessage(status: String, detail: String?) -> String? {
         let base: String
         switch status {
-        case "ok":
+        case "ok", "duplicate":
             return nil
+        case "invalid_option":
+            base = "위키 Raw Source는 덮어쓸 수 없습니다 — 새 버전으로 만들어 주세요."
         case "needs_purpose":
             base = "위키 Raw Source에는 수집 목적이 필요합니다 — 왜 수집했고 어떻게 재사용할지 적어 주세요."
         case "no_vault":

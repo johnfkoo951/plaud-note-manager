@@ -2,26 +2,34 @@ import XCTest
 @testable import PlaudNoteApp
 
 final class VaultComposeArgumentsTests: XCTestCase {
+    private func job(_ fileID: String = "f1", template: String, vault: String,
+                     purpose: String) -> VaultComposeJob {
+        VaultComposeJob(fileID: fileID, template: template, vault: vault, purpose: purpose)
+    }
+
     func testMainVaultOmitsCollectionPurpose() {
         XCTAssertEqual(
-            VaultComposeArguments.build(fileID: "f1", template: "note-meeting",
-                                        vault: "main", purpose: "ignored"),
-            ["vault-compose", "--template", "note-meeting", "--to", "main", "--json", "--", "f1"]
+            VaultComposeArguments.build(job(template: "note-meeting", vault: "main", purpose: "ignored"),
+                                        onDuplicate: "ask"),
+            ["vault-compose", "--template", "note-meeting", "--to", "main",
+             "--on-duplicate", "ask", "--json", "--", "f1"]
         )
     }
 
     func testWikiCarriesTrimmedCollectionPurpose() {
         XCTAssertEqual(
-            VaultComposeArguments.build(fileID: "f1", template: "note-lecture",
-                                        vault: "wiki", purpose: "  강의 설계 재사용 \n"),
+            VaultComposeArguments.build(job(template: "note-lecture", vault: "wiki",
+                                            purpose: "  강의 설계 재사용 \n"),
+                                        onDuplicate: "new"),
             ["vault-compose", "--template", "note-lecture", "--to", "wiki",
-             "--collection-purpose", "강의 설계 재사용", "--json", "--", "f1"]
+             "--collection-purpose", "강의 설계 재사용", "--on-duplicate", "new", "--json", "--", "f1"]
         )
     }
 
     func testPurposeThatLooksLikeAFlagStaysAValue() {
-        let args = VaultComposeArguments.build(fileID: "f1", template: "note-general",
-                                               vault: "wiki", purpose: "--json")
+        let args = VaultComposeArguments.build(job(template: "note-general", vault: "wiki",
+                                                   purpose: "--json"),
+                                               onDuplicate: "ask")
         let at = try! XCTUnwrap(args.firstIndex(of: "--collection-purpose"))
         XCTAssertEqual(args[at + 1], "--json")
         XCTAssertEqual(Array(args.suffix(3)), ["--json", "--", "f1"])
@@ -29,8 +37,9 @@ final class VaultComposeArgumentsTests: XCTestCase {
 
     func testFileIDFollowsOptionTerminator() {
         for vault in ["main", "wiki"] {
-            let args = VaultComposeArguments.build(fileID: "-x", template: "note-general",
-                                                   vault: vault, purpose: "p")
+            let args = VaultComposeArguments.build(job("-x", template: "note-general", vault: vault,
+                                                       purpose: "p"),
+                                                   onDuplicate: "ask")
             XCTAssertEqual(Array(args.suffix(2)), ["--", "-x"])
             XCTAssertEqual(args.filter { $0 == "-x" }.count, 1)
         }
@@ -116,7 +125,8 @@ final class VaultComposeArgumentsTests: XCTestCase {
     func testErrorMessageCoversEveryComposeStatus() {
         XCTAssertNil(VaultComposeOutcome.errorMessage(status: "ok", detail: "written"))
         let statuses = ["needs_purpose", "no_vault", "no_transcript", "model_failed",
-                        "schema_error", "no_content", "write_failed", "bad_template"]
+                        "schema_error", "no_content", "write_failed", "bad_template",
+                        "invalid_option"]
         var seen = Set<String>()
         for status in statuses {
             let message = VaultComposeOutcome.errorMessage(status: status, detail: nil)
@@ -126,10 +136,10 @@ final class VaultComposeArgumentsTests: XCTestCase {
             seen.insert(message!)
         }
         XCTAssertEqual(seen.count, statuses.count, "each status reads differently")
-        XCTAssertEqual(VaultComposeOutcome.errorMessage(status: "duplicate", detail: nil),
-                       "볼트 작성에 실패했습니다 (duplicate)")
-        XCTAssertEqual(VaultComposeOutcome.errorMessage(status: "duplicate", detail: "  exists  "),
-                       "볼트 작성에 실패했습니다 (duplicate) — exists")
+        XCTAssertEqual(VaultComposeOutcome.errorMessage(status: "wiki_unsupported", detail: nil),
+                       "볼트 작성에 실패했습니다 (wiki_unsupported)")
+        XCTAssertEqual(VaultComposeOutcome.errorMessage(status: "wiki_unsupported", detail: "  into the wiki  "),
+                       "볼트 작성에 실패했습니다 (wiki_unsupported) — into the wiki")
         XCTAssertTrue(VaultComposeOutcome.errorMessage(status: "model_failed",
                                                        detail: "quota exceeded")!
             .hasSuffix(" — quota exceeded"))

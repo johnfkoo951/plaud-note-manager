@@ -133,11 +133,9 @@ struct VaultComposeSheet: View {
     private func send() {
         IMETextField.finishEditing()
         guard canSend else { return }
-        let fileID = request.fileID
-        let template = template, vault = vault, purpose = purpose
-        Task {
-            await store.vaultCompose(fileID, template: template, vault: vault, purpose: purpose)
-        }
+        let job = VaultComposeJob(fileID: request.fileID, template: template,
+                                  vault: vault, purpose: purpose)
+        Task { await store.vaultCompose(job) }
         dismiss()
     }
 
