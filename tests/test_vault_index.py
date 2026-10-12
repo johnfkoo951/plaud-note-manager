@@ -566,3 +566,54 @@ def test_refresh_if_stale_reindexes_a_vault_whose_root_moved(tmp_path, monkeypat
     roots[0] = new
     _real_refresh(now=lambda: 1_000_010.0)
     assert _note_count(tmp_path / "plaud.db") == 1
+
+
+def test_rows_of_an_old_root_never_become_links(tmp_path, monkeypatch) -> None:
+    # core-08 r1 #2: after the wiki moved, its old rows (files kept as a
+    # backup) were linked as `vault=Wiki&filepath=Concept.md`, which the
+    # current Wiki folder does not have.
+    from core.frontmatter import wiki_vault_links
+
+    _setup_db(tmp_path, monkeypatch).close()
+    old, current = tmp_path / "old" / "Wiki", tmp_path / "current" / "Wiki"
+    for root in (old, current):
+        root.mkdir(parents=True)
+    (old / "Concept.md").write_text("old", encoding="utf-8")
+    (old / "Both.md").write_text("old", encoding="utf-8")
+    roots = [old]
+    monkeypatch.setattr(vault_index, "configured_vaults", lambda: [("Wiki", roots[0])])
+    _real_refresh(now=lambda: 1_000_000.0)
+    roots[0] = current
+    (current / "NewTopic.md").write_text("new", encoding="utf-8")
+    (current / "Both.md").write_text("new", encoding="utf-8")
+    _real_refresh(now=lambda: 1_000_001.0)
+    found = related_notes(["Concept", "NewTopic", "Both"], vaults=["Wiki"])
+    assert [(n["title"], n["path"]) for n in found] == [
+        ("NewTopic", str(current / "NewTopic.md")),
+        ("Both", str(current / "Both.md")),  # the current row, not the old one
+    ]
+    assert all((current / n["rel_path"]).is_file() for n in found)
+    assert "Concept" not in " ".join(wiki_vault_links(found))
+
+
+def test_a_failed_refresh_also_waits_an_hour(tmp_path, monkeypatch) -> None:
+    # core-08 r1 #3: a walk that raised left no record, so every send tried again.
+    _setup_db(tmp_path, monkeypatch).close()
+    root = tmp_path / "Main"
+    root.mkdir()
+    monkeypatch.setattr(vault_index, "configured_vaults", lambda: [("Main", root)])
+    calls: list[str] = []
+
+    def failing(name, **_k):
+        calls.append(name)
+        raise OSError("synthetic walk failure")
+
+    monkeypatch.setattr(vault_index, "index_vault", failing)
+    with pytest.raises(OSError):
+        _real_refresh(now=lambda: 1_000_000.0)
+    _real_refresh(now=lambda: 1_000_001.0)  # within the hour: not walked, no error
+    _real_refresh(now=lambda: 1_003_599.0)
+    assert calls == ["Main"]
+    with pytest.raises(OSError):
+        _real_refresh(now=lambda: 1_003_601.0)
+    assert calls == ["Main", "Main"]

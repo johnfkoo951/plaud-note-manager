@@ -314,8 +314,9 @@ def note_context(
 
     Related notes are looked up per vault: `main_related` in the main vault,
     `wiki_related` among compiled wiki notes (never raw sources). `related`
-    — the titles a note writes as `[[…]]` — is filled only when `dest_root`
-    (default: the main vault) is the main vault, since a wikilink cannot
+    — the titles a note writes as `[[…]]` — is filled only when `dest_root`,
+    the folder written into (default: the main vault), lies inside the main
+    vault and not in a wiki nested there, since a wikilink cannot
     cross vaults. Stored `related` titles are only lookup terms: they were
     once resolved without a vault filter."""
     from .classification import classify_snapshot
@@ -364,7 +365,12 @@ def note_context(
     except Exception:  # links are optional
         main_related, wiki_related = [], []
     dest = dest_root or main
-    into_main = main is not None and dest is not None and dest.resolve() == main.resolve()
+    into_main = (
+        main is not None
+        and dest is not None
+        and dest.resolve().is_relative_to(main.resolve())
+        and not is_wiki_target("", dest)  # a wiki nested inside the main vault
+    )
     related = [n["title"] for n in main_related] if into_main else []
     speakers = human_speakers(snapshot.get("speakers") or "")
     if not speakers:
@@ -976,7 +982,10 @@ def vault_send(
     from .reuse import reuse_channels_for_frontmatter
 
     reuse_channels = reuse_channels_for_frontmatter(storage, file_id)
-    ctx = note_context(storage, file_id, snapshot, dest_root=vault)
+    # The folder the note is written into — an absolute or `..` --dest can
+    # leave the vault, and `[[…]]` links only hold inside the main vault.
+    write_folder = overwrite.parent if overwrite is not None else send_destination(vault, dest)
+    ctx = note_context(storage, file_id, snapshot, dest_root=write_folder)
     if ctx["tags"]:
         tags = normalize_tags([*tags, *ctx["tags"]])[:20]
 

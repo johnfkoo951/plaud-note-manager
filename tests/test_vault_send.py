@@ -956,6 +956,25 @@ def test_note_context_writes_no_wikilinks_outside_the_main_vault(linked) -> None
     assert [n["title"] for n in ctx["main_related"]] == ["Obsidian"]  # still for cross links
 
 
+def test_a_send_outside_the_main_vault_gets_no_wikilinks(linked, tmp_path: Path) -> None:
+    # core-08 r1 #1: an absolute or `..` --dest writes into another vault, but
+    # the main vault's titles were still written there as `[[…]]`.
+    _write_integrated(linked["tmp"])
+    other = tmp_path / "Other"
+    other.mkdir()
+    for dest in (str(other / "Inbox"), "../Other/ParentInbox"):
+        result = vault_send(FILE_ID, storage=linked["storage"], dest=dest, on_duplicate="new")
+        path = Path(result.path).resolve()
+        assert result.status == "ok" and path.is_relative_to(other.resolve()), dest
+        text = path.read_text(encoding="utf-8")
+        assert "[[Obsidian]]" not in text, dest
+        assert "[LLM Wiki: LLM Wiki Pattern]" in text  # an addressed link is still fine
+    inside = vault_send(
+        FILE_ID, storage=linked["storage"], dest="60. Collections", on_duplicate="new"
+    )
+    assert "[[Obsidian]]" in Path(inside.path).read_text(encoding="utf-8")  # a main subfolder
+
+
 def test_related_links_refresh_the_index_and_survive_its_failure(sandbox, monkeypatch) -> None:
     calls: list[str] = []
 

@@ -391,7 +391,8 @@ def refresh_if_stale(
             ).fetchone()
             if run and run["root"] == str(root) and at - int(run["last_run"]) < max_age_s:
                 continue
-            out[name] = index_vault(name, vault_root=root.parent, conn=conn)
+            # Recorded before the walk: a walk that fails waits an hour too,
+            # instead of being retried by every send. Its rows are kept.
             conn.execute(
                 "INSERT INTO vault_index_runs (vault, root, last_run) VALUES (?, ?, ?) "
                 "ON CONFLICT(vault) DO UPDATE SET root = excluded.root, "
@@ -399,6 +400,7 @@ def refresh_if_stale(
                 (name, str(root), at),
             )
             conn.commit()
+            out[name] = index_vault(name, vault_root=root.parent, conn=conn)
     finally:
         conn.close()
     return out
@@ -558,10 +560,15 @@ def _first_match(
     *,
     min_confidence: float,
     exclude_types: Sequence[str],
+    root: Path | None = None,
 ) -> dict[str, str] | None:
     """The best existing note of `vault` for `term`: strongest match kind,
-    then the shortest rel_path, then alphabetical."""
+    then the shortest rel_path, then alphabetical. With `root` (the vault's
+    configured folder), a row counts only if it is the file at
+    `root/rel_path` — what a link to `vault` + `rel_path` opens — so rows
+    left from an earlier folder never become links."""
     esc = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    current = root.resolve() if root is not None else None
     for kind, confidence, condition in _MATCHES:
         if confidence < min_confidence:
             continue
@@ -571,8 +578,11 @@ def _first_match(
             (vault, term if kind == "title" else f'%"{esc}"%'),
         )
         for row in rows:
-            if row["type"] in exclude_types or not Path(row["path"]).is_file():
+            path = Path(row["path"])
+            if row["type"] in exclude_types or not path.is_file():
                 continue  # an excluded kind, or a note deleted since it was indexed
+            if current is not None and path.resolve() != (current / row["rel_path"]).resolve():
+                continue  # indexed under another folder of this vault's name
             return {
                 "title": str(row["title"]),
                 "rel_path": str(row["rel_path"] or ""),
@@ -595,7 +605,8 @@ def related_notes(
     """Resolve free-text terms (Plaud keywords, LLM key topics, speaker names)
     to existing notes of `vaults` (dirnames, tried in order; default: the
     configured main vault only), so a link never points into another vault
-    or at a deleted file.
+    or at a deleted file. For a configured vault, only rows of its current
+    folder count (see `_first_match`).
 
     Returns ``[{"title", "rel_path", "vault", "path", "kind"}]`` in term
     order, each note once. Match order: exact title (1.0) → alias (0.9) →
@@ -626,13 +637,19 @@ def related_notes(
         ).fetchone()
         if not has_table:
             return []
+        roots = dict(configured_vaults())
         found: list[dict[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for term in clean:
             hit = None
             for vault in vault_list:
                 hit = _first_match(
-                    conn, term, vault, min_confidence=min_confidence, exclude_types=exclude_types
+                    conn,
+                    term,
+                    vault,
+                    min_confidence=min_confidence,
+                    exclude_types=exclude_types,
+                    root=roots.get(vault),
                 )
                 if hit:
                     break
