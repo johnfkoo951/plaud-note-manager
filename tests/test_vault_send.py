@@ -705,6 +705,43 @@ def test_bytes_outside_plain_utf8_lines_mean_no_claim(sandbox, tmp_path: Path, r
     assert note.read_bytes() == raw
 
 
+def test_a_delimiter_cut_by_the_read_limit_is_no_delimiter(sandbox, tmp_path: Path) -> None:
+    # core-09 r5: the 64 KiB read ended right after the `---` that begins a
+    # longer line, which then passed for the closing line; B's identity and
+    # the real end of the block lay beyond the window.
+    prefix = b"---\nplaud_id: " + _A + b"\n#"
+    prefix += b"x" * (65533 - len(prefix) - 1) + b"\n"
+    raw = prefix + b"---not-a-delimiter: x\nplaud_id: " + _B + b"\n---\nForeign body\n"
+    assert len(raw) == 65595
+    note = _same_name_note(sandbox)
+    note.write_bytes(raw)
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A large block whose closing line is complete inside the window.
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n#" + b"x" * 60000 + b"\n---\n" + b"y" * 10000,
+            id="large-but-complete",
+        ),
+        # The file ends on the closing line itself (no newline after it).
+        pytest.param(b"---\nplaud_id: " + _A + b"\n---", id="ends-at-the-delimiter"),
+    ],
+)
+def test_a_complete_delimiter_line_still_closes_the_block(
+    sandbox, tmp_path: Path, raw: bytes
+) -> None:
+    note = _same_name_note(sandbox)
+    note.write_bytes(raw)
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"))
+    assert result.status == "duplicate"
+    assert [e["path"] for e in result.existing] == [str(note)]
+
+
 def _never_claimed(sandbox, tmp_path: Path, text: str) -> None:
     """Sending FILE_ID with `overwrite` and no reference row leaves `text` alone."""
     note = _same_name_note(sandbox)

@@ -611,6 +611,8 @@ def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
 
 _KEY_LINE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*(?: [A-Za-z0-9_-]+)*):(?: (.*))?")
 _ITEM_LINE = re.compile(r"  - (.*)")
+# How much of a note is read; its front matter must be closed within it.
+_HEAD_BYTES = 65536
 _NOT_PLAIN_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f\x85  ]")
 IDENTITY_KEYS = ("plaud_id", "source")
 # The value of a key that holds a list (block items or `[]`); equals no id.
@@ -676,12 +678,16 @@ def _front_matter_fields(path: Path) -> dict[str, list[str]] | None:
     described above."""
     try:
         with path.open("rb") as fh:
-            head = fh.read(65536)
+            head = fh.read(_HEAD_BYTES)
     except OSError:
         return None
     # Cut the block at the byte level, so nothing is decoded or normalised
     # before it is checked: the opening and closing lines are exactly `---`.
     raw_lines = head.split(b"\n")
+    if len(head) == _HEAD_BYTES:
+        # The read may have stopped inside the last line: only lines ended by
+        # a newline within the window are known, so the rest is not a line.
+        raw_lines.pop()
     if raw_lines[0] != b"---" or b"---" not in raw_lines[1:]:
         return None  # no block, or none that ends within what was read
     end = raw_lines.index(b"---", 1)
