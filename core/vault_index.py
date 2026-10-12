@@ -42,6 +42,12 @@ Output schema (created/upgraded by Storage):
         created_at INTEGER NOT NULL,
         PRIMARY KEY (file_id, vault_note_id, match_kind, keyword)
     )
+
+    vault_index_runs(              -- Python only; throttles refresh_if_stale
+        vault TEXT PRIMARY KEY,
+        root TEXT NOT NULL,          -- the vault folder it was walked from
+        last_run INTEGER NOT NULL
+    )
 """
 
 from __future__ import annotations
@@ -52,12 +58,14 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable, Sequence
 
 from . import app_config
 from .storage import DEFAULT_DB, Storage
 
 _NO_VAULT_MESSAGE = "set PLAUD_OBSIDIAN_VAULT to index vaults"
+# refresh_if_stale walks a vault again only after this long.
+REFRESH_MAX_AGE_S = 3600
 
 
 def default_vault_root() -> Path | None:
@@ -66,10 +74,35 @@ def default_vault_root() -> Path | None:
     return vault.parent if vault else None
 
 
+def configured_vaults() -> list[tuple[str, Path]]:
+    """`(dirname, folder)` of each configured vault that exists: the main
+    vault, then the wiki. Each is indexed from its own folder, so a wiki set
+    outside the main vault's parent is found too; a wiki that is the main
+    vault itself is listed once."""
+    from .vault_send import wiki_vault  # here: vault_send imports this module
+
+    out: list[tuple[str, Path]] = []
+    seen: set[Path] = set()
+    for root in (app_config.obsidian_vault(), wiki_vault()):
+        if root is None or not root.is_dir() or root.resolve() in seen:
+            continue
+        seen.add(root.resolve())
+        out.append((root.name, root))
+    return out
+
+
 def default_vaults() -> list[str]:
-    """Vault dirnames to index. Derived from the configured vault's name."""
-    vault = app_config.obsidian_vault()
-    return [vault.name] if vault else []
+    """Dirnames of the configured vaults (see `configured_vaults`)."""
+    return [name for name, _ in configured_vaults()]
+
+
+def _connect() -> sqlite3.Connection:
+    """The index DB with the vault tables (they need no Storage schema)."""
+    DEFAULT_DB.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DEFAULT_DB)
+    conn.row_factory = sqlite3.Row
+    ensure_schema(conn)
+    return conn
 
 
 _FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\s*\n?", re.DOTALL)
@@ -116,6 +149,12 @@ CREATE TABLE IF NOT EXISTS vault_links (
 );
 CREATE INDEX IF NOT EXISTS vault_links_file_idx ON vault_links(file_id);
 CREATE INDEX IF NOT EXISTS vault_links_vault_idx ON vault_links(vault_note_id);
+
+CREATE TABLE IF NOT EXISTS vault_index_runs (
+    vault TEXT PRIMARY KEY,
+    root TEXT NOT NULL,
+    last_run INTEGER NOT NULL
+);
 """
 
 
@@ -236,8 +275,7 @@ def index_vault(
         return 0, 0
     owns_conn = conn is None
     if owns_conn:
-        Storage()  # ensure base schema
-        conn = sqlite3.connect(DEFAULT_DB)
+        conn = _connect()
     assert conn is not None
     conn.row_factory = sqlite3.Row
     ensure_schema(conn)
@@ -260,7 +298,8 @@ def index_vault(
     touched = 0
     skipped = 0
     for path in root.rglob("*.md"):
-        if any(part.startswith(".") for part in path.parts):
+        # Relative to the root: a vault kept under a dot-folder is still walked.
+        if any(part.startswith(".") for part in path.relative_to(root).parts):
             continue
         try:
             mtime = path.stat().st_mtime
@@ -312,18 +351,56 @@ def index_vault(
 def index_all(
     vaults: Iterable[str] | None = None, *, full: bool = False
 ) -> dict[str, tuple[int, int]]:
-    vault_list = list(vaults) if vaults is not None else default_vaults()
-    if not vault_list:
+    """Index the configured vaults, each from its own folder — or the named
+    dirnames under the main vault's parent."""
+    if vaults is None:
+        pairs = [(name, root.parent) for name, root in configured_vaults()]
+    else:
+        parent = default_vault_root()
+        pairs = [(name, parent) for name in vaults]
+    if not pairs:
         print(_NO_VAULT_MESSAGE)
         return {}
-    Storage()
-    conn = sqlite3.connect(DEFAULT_DB)
-    conn.row_factory = sqlite3.Row
-    ensure_schema(conn)
+    conn = _connect()
     out: dict[str, tuple[int, int]] = {}
-    for vault in vault_list:
-        out[vault] = index_vault(vault, full=full, conn=conn)
-    conn.close()
+    try:
+        for name, parent in pairs:
+            out[name] = index_vault(name, vault_root=parent, full=full, conn=conn)
+    finally:
+        conn.close()
+    return out
+
+
+def refresh_if_stale(
+    *, max_age_s: int = REFRESH_MAX_AGE_S, now: Callable[[], float] = time.time
+) -> dict[str, tuple[int, int]]:
+    """Index each configured vault again when its last walk is older than
+    `max_age_s` or was made from another folder. The walk is incremental
+    (mtime), so only changed notes are read. Called where related links are
+    computed; callers catch its errors so indexing never fails a send."""
+    pairs = configured_vaults()
+    if not pairs:
+        return {}
+    conn = _connect()
+    out: dict[str, tuple[int, int]] = {}
+    try:
+        for name, root in pairs:
+            at = int(now())
+            run = conn.execute(
+                "SELECT root, last_run FROM vault_index_runs WHERE vault = ?", (name,)
+            ).fetchone()
+            if run and run["root"] == str(root) and at - int(run["last_run"]) < max_age_s:
+                continue
+            out[name] = index_vault(name, vault_root=root.parent, conn=conn)
+            conn.execute(
+                "INSERT INTO vault_index_runs (vault, root, last_run) VALUES (?, ?, ?) "
+                "ON CONFLICT(vault) DO UPDATE SET root = excluded.root, "
+                "last_run = excluded.last_run",
+                (name, str(root), at),
+            )
+            conn.commit()
+    finally:
+        conn.close()
     return out
 
 
@@ -466,26 +543,75 @@ def resolve_links(
     return counts
 
 
+# How a term may match a note, strongest first: (kind, confidence, condition).
+_MATCHES = (
+    ("title", 1.0, "title = ? COLLATE NOCASE"),
+    ("alias", 0.9, "aliases LIKE ? ESCAPE '\\'"),
+    ("tag", 0.7, "tags LIKE ? ESCAPE '\\'"),
+)
+
+
+def _first_match(
+    conn: sqlite3.Connection,
+    term: str,
+    vault: str,
+    *,
+    min_confidence: float,
+    exclude_types: Sequence[str],
+) -> dict[str, str] | None:
+    """The best existing note of `vault` for `term`: strongest match kind,
+    then the shortest rel_path, then alphabetical."""
+    esc = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    for kind, confidence, condition in _MATCHES:
+        if confidence < min_confidence:
+            continue
+        rows = conn.execute(
+            "SELECT title, rel_path, vault, path, type FROM vault_notes "
+            f"WHERE vault = ? AND {condition} ORDER BY length(rel_path), rel_path",
+            (vault, term if kind == "title" else f'%"{esc}"%'),
+        )
+        for row in rows:
+            if row["type"] in exclude_types or not Path(row["path"]).is_file():
+                continue  # an excluded kind, or a note deleted since it was indexed
+            return {
+                "title": str(row["title"]),
+                "rel_path": str(row["rel_path"] or ""),
+                "vault": str(row["vault"]),
+                "path": str(row["path"]),
+                "kind": kind,
+            }
+    return None
+
+
 def related_notes(
     terms: list[str],
     *,
+    vaults: Sequence[str] | None = None,
     conn: sqlite3.Connection | None = None,
     min_confidence: float = 0.9,
     limit: int = 8,
+    exclude_types: Sequence[str] = (),
 ) -> list[dict[str, str]]:
     """Resolve free-text terms (Plaud keywords, LLM key topics, speaker names)
-    to *existing* vault notes so frontmatter links never dangle.
+    to existing notes of `vaults` (dirnames, tried in order; default: the
+    configured main vault only), so a link never points into another vault
+    or at a deleted file.
 
-    Returns ``[{"title", "rel_path", "vault", "kind"}]`` in term order.
-    Match order: exact title (1.0) → alias (0.9) → tag (0.7); only matches at
-    or above `min_confidence` are returned.
+    Returns ``[{"title", "rel_path", "vault", "path", "kind"}]`` in term
+    order, each note once. Match order: exact title (1.0) → alias (0.9) →
+    tag (0.7); only matches at or above `min_confidence` are returned, so tag
+    matches stay out by default on purpose (PLAN-v0.8 §5: too noisy to link).
     """
+    if vaults is None:
+        main = app_config.obsidian_vault()
+        vaults = [main.name] if main else []
+    vault_list = [v for v in vaults if v]
     clean = []
     for term in terms:
         t = str(term or "").strip()
         if len(t) >= 2 and t not in clean:
             clean.append(t)
-    if not clean:
+    if not clean or not vault_list:
         return []
     owns_conn = conn is None
     if owns_conn:
@@ -500,42 +626,19 @@ def related_notes(
         ).fetchone()
         if not has_table:
             return []
-        cols = "title, rel_path, vault"
         found: list[dict[str, str]] = []
-        seen: set[str] = set()
+        seen: set[tuple[str, str]] = set()
         for term in clean:
             hit = None
-            row = conn.execute(
-                f"SELECT {cols} FROM vault_notes WHERE title = ? COLLATE NOCASE LIMIT 1", (term,)
-            ).fetchone()
-            if row:
-                hit = (row, 1.0, "title")
-            else:
-                esc = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-                like_term = f'%"{esc}"%'
-                row = conn.execute(
-                    f"SELECT {cols} FROM vault_notes WHERE aliases LIKE ? ESCAPE '\\' LIMIT 1",
-                    (like_term,),
-                ).fetchone()
-                if row:
-                    hit = (row, 0.9, "alias")
-                elif min_confidence <= 0.7:
-                    row = conn.execute(
-                        f"SELECT {cols} FROM vault_notes WHERE tags LIKE ? ESCAPE '\\' LIMIT 1",
-                        (like_term,),
-                    ).fetchone()
-                    if row:
-                        hit = (row, 0.7, "tag")
-            if hit and hit[1] >= min_confidence and hit[0]["title"] not in seen:
-                seen.add(hit[0]["title"])
-                found.append(
-                    {
-                        "title": str(hit[0]["title"]),
-                        "rel_path": str(hit[0]["rel_path"] or ""),
-                        "vault": str(hit[0]["vault"] or ""),
-                        "kind": hit[2],
-                    }
+            for vault in vault_list:
+                hit = _first_match(
+                    conn, term, vault, min_confidence=min_confidence, exclude_types=exclude_types
                 )
+                if hit:
+                    break
+            if hit and (hit["vault"], hit["title"]) not in seen:
+                seen.add((hit["vault"], hit["title"]))
+                found.append(hit)
             if len(found) >= limit:
                 break
         return found
@@ -547,12 +650,20 @@ def related_notes(
 def related_wikilinks(
     terms: list[str],
     *,
+    vault: str | None = None,
     conn: sqlite3.Connection | None = None,
     min_confidence: float = 0.9,
     limit: int = 8,
 ) -> list[str]:
-    """Titles of existing vault notes matching `terms` (see related_notes)."""
+    """Titles for `[[…]]` links: notes of one vault only (default: the main
+    vault), since a wikilink cannot cross vaults. See related_notes."""
     return [
         n["title"]
-        for n in related_notes(terms, conn=conn, min_confidence=min_confidence, limit=limit)
+        for n in related_notes(
+            terms,
+            vaults=[vault] if vault else None,
+            conn=conn,
+            min_confidence=min_confidence,
+            limit=limit,
+        )
     ]

@@ -96,6 +96,62 @@ def test_wiki_target_uses_advanced_uri_instead_of_wikilinks() -> None:
     assert "source-vault: CMDSPACE_Local_MBP" in text
     assert "related:" not in text.replace("mainVaultRelated:", "")
     assert (
-        'mainVaultRelated:\n  - "[Main: 홍길동](obsidian://advanced-uri?vault=CMDSPACE_Local_MBP'
-        '&filepath=60.%20Collections/61.%20People/%ED%99%8D%EA%B8%B8%EB%8F%99.md)"'
+        'mainVaultRelated:\n  - "[Mothership: 홍길동](obsidian://advanced-uri'
+        "?vault=CMDSPACE_Local_MBP"
+        '&filepath=60.%20Collections%2F61.%20People%2F%ED%99%8D%EA%B8%B8%EB%8F%99.md)"'
     ) in text
+
+
+def test_cross_vault_link_format() -> None:
+    from core.frontmatter import MAIN_VAULT_LABEL, WIKI_VAULT_LABEL, cross_vault_link
+
+    assert (MAIN_VAULT_LABEL, WIKI_VAULT_LABEL) == ("Mothership: ", "LLM Wiki: ")
+    assert cross_vault_link(
+        "LLM Wiki: LLM Wiki Pattern", "CMDS_LLM_Wiki", "20. Wiki/21. Concepts/LLM Wiki Pattern"
+    ) == (
+        "[LLM Wiki: LLM Wiki Pattern](obsidian://advanced-uri?vault=CMDS_LLM_Wiki"
+        "&filepath=20.%20Wiki%2F21.%20Concepts%2FLLM%20Wiki%20Pattern.md)"
+    )
+    # A vault name with a space, and a path that already ends in .md.
+    assert cross_vault_link("x", "My Vault", "a/b.md") == (
+        "[x](obsidian://advanced-uri?vault=My%20Vault&filepath=a%2Fb.md)"
+    )
+
+
+def test_wiki_vault_related_renders_advanced_uri_never_wikilinks() -> None:
+    fm = CmdsFrontmatter(
+        type="note",
+        description="x",
+        related=["Obsidian"],
+        wiki_vault_related=[
+            {
+                "title": "LLM Wiki Pattern",
+                "rel_path": "20. Wiki/21. Concepts/LLM Wiki Pattern.md",
+                "vault": "CMDS_LLM_Wiki",
+            },
+            {"title": "no path", "vault": "CMDS_LLM_Wiki"},  # incomplete: skipped
+        ],
+    )
+    text = fm.render()
+    assert (
+        'related:\n  - "[[Obsidian]]"\nwikiVaultRelated:\n'
+        '  - "[LLM Wiki: LLM Wiki Pattern](obsidian://advanced-uri?vault=CMDS_LLM_Wiki'
+        '&filepath=20.%20Wiki%2F21.%20Concepts%2FLLM%20Wiki%20Pattern.md)"\n'
+    ) in text
+    assert "[[LLM Wiki Pattern]]" not in text and "no path" not in text
+
+
+def test_main_vault_related_drops_entries_from_other_vaults() -> None:
+    fm = CmdsFrontmatter(
+        type="note",
+        description="x",
+        source_vault="Main",
+        main_vault_related=[
+            {"title": "Here", "rel_path": "a/Here.md", "vault": "Main"},
+            {"title": "Elsewhere", "rel_path": "w/Elsewhere.md", "vault": "CMDS_LLM_Wiki"},
+            {"title": "Unlabelled", "rel_path": "a/Unlabelled.md"},  # counts as Main
+        ],
+    )
+    text = fm.render()
+    assert "Mothership: Here" in text and "Mothership: Unlabelled" in text
+    assert "Elsewhere" not in text

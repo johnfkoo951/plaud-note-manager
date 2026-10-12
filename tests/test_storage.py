@@ -143,7 +143,7 @@ def test_regenerating_metadata_keeps_completed_lifecycle(tmp_path, monkeypatch) 
     )
     storage.upsert_note_metadata(file_id="f", status="done", usage_status="archived", now=1)
     monkeypatch.setattr(metadata, "integrated_dir", lambda _: tmp_path)
-    monkeypatch.setattr(vault_index, "related_wikilinks", lambda _: [])
+    monkeypatch.setattr(vault_index, "related_wikilinks", lambda *_a, **_k: [])
     result = metadata.generate_note_metadata(storage, "f", vault_path=tmp_path, use_ai=False)
     assert result["status"] == "done" and result["usage_status"] == "archived"
     row = storage.get_note_metadata("f")

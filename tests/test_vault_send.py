@@ -17,6 +17,7 @@ import core.vault_send as vault_send_mod
 from core.metadata import build_recording_snapshot
 from core.models import FileContent, PlaudFile, TranscriptSegment
 from core.storage import Storage
+from core.vault_index import related_notes as _real_related_notes
 from core.vault_send import (
     ResolvedContent,
     build_note_markdown,
@@ -856,6 +857,79 @@ def test_a_genuine_same_recording_note_is_still_found(sandbox, tmp_path: Path, t
     result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"))
     assert result.status == "duplicate"
     assert [e["path"] for e in result.existing] == [str(note)]
+
+
+# ----- related links stay inside the vault they point into ----------------
+
+
+@pytest.fixture()
+def linked(sandbox, monkeypatch: pytest.MonkeyPatch, index_note):
+    """The sandbox with the real related-note lookup and a wiki next to it."""
+    monkeypatch.setattr(vault_index_mod, "related_notes", _real_related_notes)
+    wiki = sandbox["tmp"] / "CMDS_LLM_Wiki"
+    wiki.mkdir()
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(wiki))
+    st = sandbox["storage"]
+    st.upsert_file(PlaudFile(id=FILE_ID, filename="회의"), now=1)
+    st.save_content(
+        FileContent(
+            file_id=FILE_ID,
+            title="회의",
+            keywords=["Obsidian", "LLM Wiki Pattern", "Talk"],
+            transcript=[TranscriptSegment(start_time=0, end_time=1, speaker="A", content="x")],
+        ),
+        now=1,
+    )
+    index_note(sandbox["vault"], "Tools/Obsidian.md")
+    index_note(wiki, "20. Wiki/21. Concepts/LLM Wiki Pattern.md", note_type="concept")
+    index_note(wiki, "10. Raw Sources/Talk.md", note_type="raw-source")
+    return {**sandbox, "wiki": wiki}
+
+
+def test_a_main_send_links_wiki_pages_by_advanced_uri_only(linked) -> None:
+    _write_integrated(linked["tmp"])
+    text = Path(vault_send(FILE_ID, storage=linked["storage"]).path).read_text(encoding="utf-8")
+    assert 'related:\n  - "[[Obsidian]]"\nwikiVaultRelated:\n' in text
+    link = (
+        "[LLM Wiki: LLM Wiki Pattern](obsidian://advanced-uri?vault=CMDS_LLM_Wiki"
+        "&filepath=20.%20Wiki%2F21.%20Concepts%2FLLM%20Wiki%20Pattern.md)"
+    )
+    assert f'  - "{link}"' in text  # front matter
+    assert f"- {link}" in text  # the body's 관련 노트
+    assert "[[LLM Wiki Pattern]]" not in text and "[[Talk]]" not in text
+    assert "LLM Wiki: Talk" not in text  # raw sources are never linked
+
+
+def test_note_context_does_not_reuse_stored_titles_from_other_vaults(linked, index_note) -> None:
+    st = linked["storage"]
+    index_note(linked["tmp"] / "GOBI", "GobiOnly.md")
+    st.upsert_note_metadata(file_id=FILE_ID, metadata={"related": ["GobiOnly", "Obsidian"]}, now=1)
+    ctx = note_context(st, FILE_ID, build_recording_snapshot(st, FILE_ID))
+    assert ctx["related"] == ["Obsidian"]
+    assert [n["vault"] for n in ctx["main_related"]] == ["vault"]
+    assert [n["title"] for n in ctx["wiki_related"]] == ["LLM Wiki Pattern"]
+
+
+def test_note_context_writes_no_wikilinks_outside_the_main_vault(linked) -> None:
+    st = linked["storage"]
+    other = linked["tmp"] / "Other"
+    other.mkdir()
+    ctx = note_context(st, FILE_ID, build_recording_snapshot(st, FILE_ID), dest_root=other)
+    assert ctx["related"] == []
+    assert [n["title"] for n in ctx["main_related"]] == ["Obsidian"]  # still for cross links
+
+
+def test_related_links_refresh_the_index_and_survive_its_failure(sandbox, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def broken(**_k):
+        calls.append("refresh")
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(vault_index_mod, "refresh_if_stale", broken)
+    _write_integrated(sandbox["tmp"])
+    assert vault_send(FILE_ID, storage=sandbox["storage"]).status == "ok"
+    assert calls == ["refresh"]
 
 
 def test_the_duplicate_check_precedes_the_model_call(sandbox, monkeypatch) -> None:

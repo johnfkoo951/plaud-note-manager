@@ -86,10 +86,10 @@ def build_transcript_note(
     tags = note_tags(snapshot, "transcript")
     reuse_channels = reuse_channels_for_frontmatter(storage, file_id)
 
-    from .frontmatter import CmdsFrontmatter, iso_minute, model_label
+    from .frontmatter import CmdsFrontmatter, iso_minute, model_label, wiki_vault_links
     from .vault_send import note_context
 
-    ctx = note_context(storage, file_id, snapshot)
+    ctx = note_context(storage, file_id, snapshot, dest_root=app_config.obsidian_vault())
     if ctx["tags"]:
         from .tags import normalize_tags
 
@@ -117,6 +117,7 @@ def build_transcript_note(
         speakers=speakers,
         keywords=ctx["keywords"],
         related=ctx["related"],
+        wiki_vault_related=ctx["wiki_related"],
         reuse_channels=reuse_channels,
     )
     lines = fm.lines()
@@ -143,11 +144,13 @@ def build_transcript_note(
     lines.append("## 최종 전사본")
     lines.append("")
     lines.append(transcript)
-    if ctx["related"]:
+    wiki_links = wiki_vault_links(ctx["wiki_related"])
+    if ctx["related"] or wiki_links:
         lines.append("")
         lines.append("## 관련 노트")
         lines.append("")
         lines.extend(f"- [[{r}]]" for r in ctx["related"])
+        lines.extend(f"- {link}" for link in wiki_links)
     lines.append("")
     return "\n".join(lines), date, title
 

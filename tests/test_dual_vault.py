@@ -9,6 +9,7 @@ import pytest
 from core import dual_vault as dv
 from core.models import FileContent, PlaudFile, SummaryBlock, TranscriptSegment
 from core.storage import Storage
+from core.vault_index import related_notes as _real_related_notes  # before fixtures stub it
 
 NOW = int(time.time())
 
@@ -75,6 +76,24 @@ def test_lands_in_plaud_lane_with_conventions(env) -> None:
     # note_references links the vault file back to the recording.
     refs = storage.list_note_references("f1")
     assert any(r["kind"] == "dual-transcript" for r in refs)
+
+
+def test_transcript_note_never_wikilinks_wiki_pages(env, monkeypatch, tmp_path, index_note) -> None:
+    from core import vault_index
+
+    storage, vault = env
+    monkeypatch.setattr(vault_index, "related_notes", _real_related_notes)
+    wiki = tmp_path / "CMDS_LLM_Wiki"
+    wiki.mkdir()
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(wiki))
+    keyword = json.loads(storage.get_content_row("f1")["keywords"])[0]
+    index_note(vault, f"Life/{keyword}.md")
+    index_note(wiki, f"20. Wiki/{keyword}.md", note_type="concept")
+    result = dv.send_dual_to_vault(storage, "f1", model="gpt-5.5")
+    text = Path(result.path).read_text(encoding="utf-8")
+    assert f'related:\n  - "[[{keyword}]]"\nwikiVaultRelated:\n' in text
+    assert f"[LLM Wiki: {keyword}](obsidian://advanced-uri?vault=CMDS_LLM_Wiki" in text
+    assert text.count(f"[[{keyword}]]") == 2  # front matter + body, both the main-vault note
 
 
 def _unmapped(storage: Storage, plaud_speakers: list[str]) -> None:

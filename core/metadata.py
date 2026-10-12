@@ -114,10 +114,15 @@ def generate_note_metadata(
         *human_speakers(snapshot.get("speakers") or ""),
     ]
     merged["link_candidates"] = list(dict.fromkeys(str(t).strip() for t in link_terms if t))[:24]
-    try:
-        from .vault_index import related_wikilinks
+    from . import vault_index
 
-        merged["related"] = related_wikilinks(merged["link_candidates"])
+    try:
+        vault_index.refresh_if_stale()
+    except Exception:  # indexing never fails metadata generation
+        pass
+    try:
+        # Main-vault titles only: these become `[[…]]` links in main notes.
+        merged["related"] = vault_index.related_wikilinks(merged["link_candidates"])
     except Exception:  # vault index absent or unreadable — links are optional
         merged["related"] = []
 

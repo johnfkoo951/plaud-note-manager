@@ -11,16 +11,26 @@ Two halves:
 """
 
 import json
+import sqlite3
 import time
+from pathlib import Path
+
+import pytest
 
 import core.vault_index as vault_index
 from core.vault_index import (
     VaultNote,
     _parse_frontmatter,
     _read_note,
+    configured_vaults,
     ensure_schema,
+    index_all,
+    index_vault,
+    related_notes,
+    related_wikilinks,
     resolve_links,
 )
+from core.vault_index import refresh_if_stale as _real_refresh  # conftest stubs the module's
 
 
 # --------------------------------------------------------------------------
@@ -327,3 +337,232 @@ def test_resolve_links_like_metachar_underscore_does_not_spuriously_match(
         assert unrelated_id not in ids
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------
+# related_notes — one vault at a time, files that exist, a stable order
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def vaults(tmp_path, monkeypatch):
+    """An index DB on tmp and two real vault folders; main is configured."""
+    conn = _setup_db(tmp_path, monkeypatch)
+    main = tmp_path / "vaults" / "Main"
+    wiki = tmp_path / "vaults" / "CMDS_LLM_Wiki"
+    for root in (main, wiki):
+        root.mkdir(parents=True)
+    monkeypatch.setattr(vault_index.app_config, "obsidian_vault", lambda: main)
+    yield {"conn": conn, "main": main, "wiki": wiki, "tmp": tmp_path}
+    conn.close()
+
+
+def _indexed(conn, root: Path, rel: str, *, aliases=(), tags=(), note_type=None, exists=True):
+    """Index `root/rel` (creating the file unless `exists` is False)."""
+    path = root / rel
+    if exists:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    conn.execute(
+        "INSERT INTO vault_notes (vault, path, rel_path, title, aliases, tags, description,"
+        " type, mtime, indexed_at) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 0, 0)",
+        (
+            root.name,
+            str(path),
+            rel,
+            Path(rel).stem,
+            json.dumps(list(aliases)),
+            json.dumps(list(tags)),
+            note_type,
+        ),
+    )
+    conn.commit()
+    return path
+
+
+def test_related_notes_only_returns_notes_from_the_requested_vault(vaults) -> None:
+    conn = vaults["conn"]
+    _indexed(conn, vaults["main"], "Tools/Obsidian.md")
+    _indexed(conn, vaults["wiki"], "20. Wiki/Obsidian.md")
+    in_wiki = related_notes(["Obsidian"], vaults=["CMDS_LLM_Wiki"], conn=conn)
+    in_main = related_notes(["Obsidian"], vaults=["Main"], conn=conn)
+    assert [(n["vault"], n["rel_path"]) for n in in_wiki] == [
+        ("CMDS_LLM_Wiki", "20. Wiki/Obsidian.md")
+    ]
+    assert [(n["vault"], n["rel_path"]) for n in in_main] == [("Main", "Tools/Obsidian.md")]
+    assert in_main[0]["path"] == str(vaults["main"] / "Tools/Obsidian.md")
+
+
+def test_related_notes_defaults_to_the_configured_main_vault(vaults, monkeypatch) -> None:
+    conn = vaults["conn"]
+    _indexed(conn, vaults["tmp"] / "vaults" / "GOBI", "GobiOnly.md")
+    _indexed(conn, vaults["main"], "Obsidian.md")
+    assert [n["title"] for n in related_notes(["GobiOnly", "Obsidian"], conn=conn)] == ["Obsidian"]
+    monkeypatch.setattr(vault_index.app_config, "obsidian_vault", lambda: None)
+    assert related_notes(["Obsidian"], conn=conn) == []
+
+
+def test_related_wikilinks_never_returns_another_vaults_title(vaults) -> None:
+    _indexed(vaults["conn"], vaults["wiki"], "Wiki Only.md")
+    assert related_wikilinks(["Wiki Only"], conn=vaults["conn"]) == []
+    assert related_wikilinks(["Wiki Only"], vault="CMDS_LLM_Wiki", conn=vaults["conn"]) == [
+        "Wiki Only"
+    ]
+
+
+def test_related_notes_skips_rows_whose_file_is_gone(vaults) -> None:
+    conn = vaults["conn"]
+    _indexed(conn, vaults["main"], "a/Dup.md", exists=False)  # shorter, but deleted
+    _indexed(conn, vaults["main"], "bb/Dup.md")
+    assert [n["rel_path"] for n in related_notes(["Dup"], conn=conn)] == ["bb/Dup.md"]
+    _indexed(conn, vaults["main"], "Gone.md", exists=False)
+    assert related_notes(["Gone"], conn=conn) == []
+
+
+def test_tag_matches_stay_out_of_related_by_default(vaults) -> None:
+    conn = vaults["conn"]
+    _indexed(conn, vaults["main"], "Other.md", tags=["Tagged"])
+    assert related_notes(["Tagged"], conn=conn) == []
+    loose = related_notes(["Tagged"], conn=conn, min_confidence=0.7)
+    assert [(n["title"], n["kind"]) for n in loose] == [("Other", "tag")]
+
+
+def test_same_title_resolution_is_deterministic(vaults) -> None:
+    conn = vaults["conn"]
+    _indexed(conn, vaults["main"], "zz/deep/path/Same.md")
+    _indexed(conn, vaults["main"], "b/Same.md")
+    _indexed(conn, vaults["main"], "a/Same.md")
+    assert [n["rel_path"] for n in related_notes(["Same"], conn=conn)] == ["a/Same.md"]
+
+
+def test_related_notes_can_leave_out_raw_sources(vaults) -> None:
+    conn = vaults["conn"]
+    _indexed(conn, vaults["wiki"], "10. Raw Sources/Talk.md", note_type="raw-source")
+    _indexed(conn, vaults["wiki"], "20. Wiki/Concept.md", note_type="concept")
+    found = related_notes(
+        ["Talk", "Concept"], vaults=["CMDS_LLM_Wiki"], conn=conn, exclude_types=("raw-source",)
+    )
+    assert [n["title"] for n in found] == ["Concept"]
+
+
+def test_related_notes_lists_a_note_once(vaults) -> None:
+    conn = vaults["conn"]
+    _indexed(conn, vaults["main"], "Obsidian.md", aliases=["옵시디언"])
+    found = related_notes(["Obsidian", "옵시디언"], conn=conn)
+    assert [(n["title"], n["kind"]) for n in found] == [("Obsidian", "title")]
+
+
+# --------------------------------------------------------------------------
+# Indexing each configured vault from its own root, refreshed at most hourly
+# --------------------------------------------------------------------------
+
+
+def test_configured_vaults_uses_the_wiki_vaults_own_root(tmp_path, monkeypatch) -> None:
+    main = tmp_path / "a" / "Main"
+    wiki = tmp_path / "b" / "CMDS_LLM_Wiki"
+    for root in (main, wiki):
+        root.mkdir(parents=True)
+    monkeypatch.setattr(vault_index.app_config, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setattr(vault_index.app_config, "obsidian_vault", lambda: main)
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(wiki))
+    assert configured_vaults() == [("Main", main), ("CMDS_LLM_Wiki", wiki.resolve())]
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(main))
+    assert configured_vaults() == [("Main", main)]
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(tmp_path / "missing"))
+    assert configured_vaults() == [("Main", main)]
+
+
+def test_index_all_indexes_main_and_wiki_from_their_roots(tmp_path, monkeypatch) -> None:
+    _setup_db(tmp_path, monkeypatch).close()
+    main = tmp_path / "a" / "Main"
+    wiki = tmp_path / "b" / "CMDS_LLM_Wiki"
+    for root, name in ((main, "m.md"), (wiki, "w.md")):
+        root.mkdir(parents=True)
+        (root / name).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        vault_index, "configured_vaults", lambda: [("Main", main), (wiki.name, wiki)]
+    )
+    assert index_all() == {"Main": (1, 0), "CMDS_LLM_Wiki": (1, 0)}
+    with sqlite3.connect(tmp_path / "plaud.db") as db:
+        rows = sorted(db.execute("SELECT vault, path FROM vault_notes").fetchall())
+    assert rows == [("CMDS_LLM_Wiki", str(wiki / "w.md")), ("Main", str(main / "m.md"))]
+
+
+def test_index_vault_hidden_check_is_relative_to_the_root(tmp_path, monkeypatch) -> None:
+    conn = _setup_db(tmp_path, monkeypatch)
+    try:
+        root = tmp_path / ".vaults" / "Main"
+        (root / ".obsidian").mkdir(parents=True)
+        (root / "note.md").write_text("x", encoding="utf-8")
+        (root / ".obsidian" / "x.md").write_text("x", encoding="utf-8")
+        assert index_vault("Main", vault_root=root.parent, conn=conn) == (1, 0)
+        paths = [r["path"] for r in conn.execute("SELECT path FROM vault_notes")]
+        assert paths == [str(root / "note.md")]
+    finally:
+        conn.close()
+
+
+def test_cli_vault_index_walks_each_vault_from_its_own_root(tmp_path, monkeypatch) -> None:
+    from typer.testing import CliRunner
+
+    import cli.main as cli
+
+    _setup_db(tmp_path, monkeypatch).close()
+    main = tmp_path / "a" / "Main"
+    wiki = tmp_path / "b" / "CMDS_LLM_Wiki"
+    for root, name in ((main, "m.md"), (wiki, "w.md")):
+        root.mkdir(parents=True)
+        (root / name).write_text("x", encoding="utf-8")
+    monkeypatch.setattr(vault_index.app_config, "CONFIG_FILE", tmp_path / "config.json")
+    monkeypatch.setenv("PLAUD_OBSIDIAN_VAULT", str(main))
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(wiki))
+    every = CliRunner().invoke(cli.app, ["vault-index"])
+    assert every.exit_code == 0, every.output
+    assert str(main.resolve()) in every.output and str(wiki.resolve()) in every.output
+    assert _note_count(tmp_path / "plaud.db") == 2
+
+    (wiki / "w2.md").write_text("x", encoding="utf-8")
+    only_wiki = CliRunner().invoke(cli.app, ["vault-index", "--vault", "wiki"])
+    assert only_wiki.exit_code == 0 and "CMDS_LLM_Wiki" in only_wiki.output
+    assert _note_count(tmp_path / "plaud.db") == 3
+
+    monkeypatch.delenv("PLAUD_WIKI_VAULT")
+    missing = CliRunner().invoke(cli.app, ["vault-index", "--vault", "wiki"])
+    assert missing.exit_code == 1 and "vault not found" in missing.output
+
+
+def _note_count(db: Path) -> int:
+    with sqlite3.connect(db) as conn:
+        return conn.execute("SELECT COUNT(*) FROM vault_notes").fetchone()[0]
+
+
+def test_refresh_if_stale_indexes_at_most_once_an_hour(tmp_path, monkeypatch) -> None:
+    _setup_db(tmp_path, monkeypatch).close()
+    main = tmp_path / "Main"
+    main.mkdir()
+    (main / "one.md").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(vault_index, "configured_vaults", lambda: [("Main", main)])
+    clock = [1_000_000.0]
+    _real_refresh(now=lambda: clock[0])
+    assert _note_count(tmp_path / "plaud.db") == 1
+    (main / "two.md").write_text("x", encoding="utf-8")
+    clock[0] += 3599
+    _real_refresh(now=lambda: clock[0])
+    assert _note_count(tmp_path / "plaud.db") == 1  # within the hour: not walked again
+    clock[0] += 2
+    _real_refresh(now=lambda: clock[0])
+    assert _note_count(tmp_path / "plaud.db") == 2
+
+
+def test_refresh_if_stale_reindexes_a_vault_whose_root_moved(tmp_path, monkeypatch) -> None:
+    _setup_db(tmp_path, monkeypatch).close()
+    old, new = tmp_path / "old" / "Main", tmp_path / "new" / "Main"
+    for root in (old, new):
+        root.mkdir(parents=True)
+    (new / "moved.md").write_text("x", encoding="utf-8")
+    roots = [old]
+    monkeypatch.setattr(vault_index, "configured_vaults", lambda: [("Main", roots[0])])
+    _real_refresh(now=lambda: 1_000_000.0)
+    roots[0] = new
+    _real_refresh(now=lambda: 1_000_010.0)
+    assert _note_count(tmp_path / "plaud.db") == 1

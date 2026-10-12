@@ -161,6 +161,21 @@ def test_cross_vault_links_use_advanced_uri_never_wikilinks() -> None:
     assert "[[" not in link
 
 
+def test_main_vault_related_skips_non_main_entries() -> None:
+    lines = _fm(
+        source_vault="CMDSPACE_Local_MBP",
+        main_vault_related=[
+            {"title": "Pipeline", "rel_path": "30. Notes/Pipeline", "vault": "CMDSPACE_Local_MBP"},
+            {"title": "Concept", "rel_path": "20. Wiki/Concept", "vault": "CMDS_LLM_Wiki"},
+        ],
+    ).lines()
+    links = [ln for ln in lines if "advanced-uri" in ln]
+    assert links == [
+        '  - "[Mothership: Pipeline](obsidian://advanced-uri?vault=CMDSPACE_Local_MBP'
+        '&filepath=30.%20Notes%2FPipeline.md)"'
+    ]
+
+
 def test_main_vault_related_needs_a_source_vault_to_be_addressable() -> None:
     lines = _fm(main_vault_related=[{"title": "Pipeline", "rel_path": "x/Pipeline"}]).lines()
     assert not any("mainVaultRelated" in ln for ln in lines)

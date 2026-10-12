@@ -268,7 +268,7 @@ def compose_to_wiki(
     except Exception as exc:
         return ComposeResult("model_failed", str(exc), vault=str(vault), template=template)
 
-    ctx = note_context(storage, file_id, snapshot)
+    ctx = note_context(storage, file_id, snapshot, dest_root=vault)
     main_vault = app_config.obsidian_vault()
     fm_model, fm_effort = model_fields(model)
 
@@ -286,7 +286,7 @@ def compose_to_wiki(
         date_ingested=iso_minute(),
         source_vault=main_vault.name if main_vault else "",
         main_vault_cmds=ctx["cmds"],
-        main_vault_related=ctx["related_paths"],
+        main_vault_related=ctx["main_related"][:5],  # the wiki asks for 2-5 links
     )
 
     try:

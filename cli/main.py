@@ -277,19 +277,39 @@ def deep_cmd(
 
 @safe_command(name="vault-index")
 def vault_index_cmd(
-    vault: str = typer.Option("", help="single vault dirname; default = all configured"),
+    vault: str = typer.Option(
+        "",
+        help="main | wiki | a vault folder path | a dirname next to the main vault; "
+        "default = every configured vault",
+    ),
     full: bool = typer.Option(False, "--full", help="reindex even unchanged files"),
 ) -> None:
     """Walk Obsidian vault(s) and refresh vault_notes table."""
-    from core.vault_index import index_all, index_vault
+    from core.vault_index import configured_vaults, index_vault
+    from core.vault_send import resolve_vault
 
     if vault:
-        touched, skipped = index_vault(vault, full=full)
-        console.print(f"[green]{vault}[/green]: touched={touched} skipped={skipped}")
+        root = resolve_vault(vault)
+        if root is None and vault not in ("main", "wiki"):
+            # A bare dirname next to the main vault, as before.
+            touched, skipped = index_vault(vault, full=full)
+            console.print(f"[green]{escape(vault)}[/green]: touched={touched} skipped={skipped}")
+            return
+        if root is None or not root.is_dir():
+            console.print(f"[red]vault not found[/red]: {escape(vault)}")
+            raise typer.Exit(1)
+        pairs = [(root.name, root)]
     else:
-        results = index_all(full=full)
-        for v, (t, s) in results.items():
-            console.print(f"  {v:30s} touched={t:5d} skipped={s:5d}")
+        pairs = configured_vaults()
+        if not pairs:
+            console.print("set PLAUD_OBSIDIAN_VAULT to index vaults")
+            return
+    for name, root in pairs:
+        touched, skipped = index_vault(name, vault_root=root.parent, full=full)
+        console.print(
+            f"  {escape(name):30s} touched={touched:5d} skipped={skipped:5d}  {escape(str(root))}",
+            soft_wrap=True,
+        )
 
 
 @safe_command(name="vault-link")

@@ -45,6 +45,44 @@ def _no_real_models(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolated_vault_index(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """The vault index never opens data/plaud.db, and never walks a vault by
+    itself: refresh_if_stale indexes every configured vault, which outside a
+    test's own setup would be the developer's real one. Tests that exercise
+    either set them up explicitly."""
+    import core.vault_index as vault_index
+
+    monkeypatch.setattr(vault_index, "DEFAULT_DB", tmp_path / "vault-index.db")
+    monkeypatch.setattr(vault_index, "refresh_if_stale", lambda **_k: None)
+
+
+@pytest.fixture()
+def index_note():
+    """Write `root/rel` and index it, as vault `root.name`, in the test's
+    own (tmp) vault index."""
+    import core.vault_index as vault_index
+
+    def add(root, rel: str, *, note_type: str | None = None):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+        conn = vault_index._connect()
+        try:
+            conn.execute(
+                "INSERT INTO vault_notes (vault, path, rel_path, title, aliases, tags,"
+                " description, type, mtime, indexed_at)"
+                " VALUES (?, ?, ?, ?, '[]', '[]', NULL, ?, 0, 0)",
+                (root.name, str(path), rel, path.stem, note_type),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return path
+
+    return add
+
+
+@pytest.fixture(autouse=True)
 def _shipped_taxonomy(monkeypatch: pytest.MonkeyPatch) -> None:
     """Classify against the shipped DEFAULT_TAXONOMY, never the developer's
     gitignored data/classification.json (otherwise test outcomes depend on

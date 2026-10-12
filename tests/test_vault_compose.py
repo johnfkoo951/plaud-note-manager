@@ -17,6 +17,7 @@ import pytest
 from core import vault_compose as vc
 from core.models import FileContent, PlaudFile, TranscriptSegment
 from core.storage import Storage
+from core.vault_index import related_notes as _real_related_notes
 
 NOW = int(time.time())
 
@@ -564,6 +565,29 @@ def test_a_raw_source_owned_by_another_recording_is_never_this_ones(
     again = _wiki(_seeded_storage(tmp_path / "fresh.db"))
     assert (again.status, again.action, again.existing) == ("ok", "created", [])
     assert first.read_text(encoding="utf-8") == foreign
+
+
+# ----- cross-vault links ---------------------------------------------------
+
+
+def test_raw_source_main_vault_related_lists_only_main_vault_notes(
+    storage, vaults, recording_model, monkeypatch, index_note
+) -> None:
+    from core import vault_index
+
+    monkeypatch.setattr(vault_index, "related_notes", _real_related_notes)
+    titles = [f"Topic {n}" for n in range(7)]
+    for title in titles:
+        index_note(vaults["main"], f"30. Notes/{title}.md")
+    index_note(vaults["wiki"], "20. Wiki/Topic 0.md", note_type="concept")
+    storage.upsert_note_metadata(file_id="f1", metadata={"link_candidates": titles}, now=NOW)
+    text = Path(_wiki(storage).path).read_text(encoding="utf-8")
+    block = text.split("mainVaultRelated:\n", 1)[1].split("\n---", 1)[0]
+    links = [ln for ln in block.splitlines() if ln.startswith("  - ")]
+    assert 1 <= len(links) <= 5
+    assert all("Mothership: Topic" in ln for ln in links)
+    assert all("vault=CMDSPACE_Local_MBP&filepath=30.%20Notes%2FTopic" in ln for ln in links)
+    assert "vault=CMDS_LLM_Wiki" not in text and "[[Topic" not in text
 
 
 # ----- integrate()'s placeholder is not a transcript ----------------------

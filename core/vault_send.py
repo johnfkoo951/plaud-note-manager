@@ -303,12 +303,21 @@ def note_tags(snapshot: dict, note_type: str) -> list[str]:
     return normalize_tags(seed)[:12]
 
 
-def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
+def note_context(
+    storage: Storage, file_id: str, snapshot: dict, *, dest_root: Path | None = None
+) -> dict:
     """CMDS/index/keywords/related/speakers for a note, from stored metadata
     when present, else from the deterministic classifier.
 
     `speakers` are whole real names (`human_speakers`): never split on
-    whitespace, no diarizer placeholders, NFC, deduplicated."""
+    whitespace, no diarizer placeholders, NFC, deduplicated.
+
+    Related notes are looked up per vault: `main_related` in the main vault,
+    `wiki_related` among compiled wiki notes (never raw sources). `related`
+    — the titles a note writes as `[[…]]` — is filled only when `dest_root`
+    (default: the main vault) is the main vault, since a wikilink cannot
+    cross vaults. Stored `related` titles are only lookup terms: they were
+    once resolved without a vault filter."""
     from .classification import classify_snapshot
 
     existing = storage.get_note_metadata(file_id)
@@ -324,16 +333,39 @@ def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
     cmds = str(meta.get("cmds") or cls.cmds or "")
     index = str(meta.get("index") or cls.index or "")
     keywords = [str(k) for k in (snapshot.get("keywords") or [])][:12]
-    related = [str(r) for r in (meta.get("related") or [])]
-    related_paths: list[dict[str, str]] = []
-    try:
-        from .vault_index import related_notes
+    terms = list(
+        dict.fromkeys(
+            str(t)
+            for t in (
+                *keywords,
+                *as_list(meta.get("key_topics")),
+                *as_list(meta.get("link_candidates")),
+                *as_list(meta.get("related")),
+            )
+            if t
+        )
+    )
+    main, wiki = app_config.obsidian_vault(), wiki_vault()
+    main_related: list[dict[str, str]] = []
+    wiki_related: list[dict[str, str]] = []
+    from . import vault_index
 
-        related_paths = related_notes([*keywords, *as_list(meta.get("key_topics")), *related])
-        if not related:
-            related = [n["title"] for n in related_paths]
-    except Exception:
-        related_paths = []
+    try:
+        vault_index.refresh_if_stale()
+    except Exception:  # indexing never fails a send
+        pass
+    try:
+        if main is not None:
+            main_related = vault_index.related_notes(terms, vaults=[main.name])
+        if wiki is not None:
+            wiki_related = vault_index.related_notes(
+                terms, vaults=[wiki.name], limit=5, exclude_types=("raw-source",)
+            )
+    except Exception:  # links are optional
+        main_related, wiki_related = [], []
+    dest = dest_root or main
+    into_main = main is not None and dest is not None and dest.resolve() == main.resolve()
+    related = [n["title"] for n in main_related] if into_main else []
     speakers = human_speakers(snapshot.get("speakers") or "")
     if not speakers:
         try:
@@ -348,7 +380,9 @@ def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
         "index": index,
         "keywords": keywords,
         "related": related,
-        "related_paths": related_paths,
+        "main_related": main_related,
+        "wiki_related": wiki_related,
+        "related_paths": main_related,  # the old name, kept for callers
         "speakers": speakers,
         "aliases": aliases,
         "tags": [str(t) for t in as_list(meta.get("tags"))],
@@ -383,12 +417,13 @@ def build_note_markdown(
     model: str = "",
     aliases: list[str] | None = None,
     date_created: str = "",
+    wiki_vault_related: list[dict[str, str]] | None = None,
 ) -> str:
     """Deterministic CMDS-style note (direct mode). Frontmatter follows the
     vault's frontmatter-standard (7 required fields + CMDS/index + Plaud lane
     extras) via `core.frontmatter.CmdsFrontmatter`. `date_created` keeps an
     overwritten note's original creation time."""
-    from .frontmatter import CmdsFrontmatter, iso_minute, model_label
+    from .frontmatter import CmdsFrontmatter, iso_minute, model_label, wiki_vault_links
 
     now = now or datetime.now()
     kind_label = f"{resolved.kind} ({resolved.label})" if resolved.label else resolved.kind
@@ -410,6 +445,7 @@ def build_note_markdown(
         speakers=list(speakers or []),
         keywords=list(keywords or []),
         related=list(related or []),
+        wiki_vault_related=list(wiki_vault_related or []),
         reuse_channels=list(reuse_channels or []),
         extra={"content_kind": kind_label},
     )
@@ -428,11 +464,13 @@ def build_note_markdown(
             lines.append("## Transcript")
             lines.append("")
         lines.append(resolved.transcript)
-    if related:
+    wiki_links = wiki_vault_links(list(wiki_vault_related or []))
+    if related or wiki_links:
         lines.append("")
         lines.append("## 관련 노트")
         lines.append("")
-        lines.extend(f"- [[{r}]]" for r in related)
+        lines.extend(f"- [[{r}]]" for r in related or [])
+        lines.extend(f"- {link}" for link in wiki_links)
     lines.append("")
     return "\n".join(lines)
 
@@ -536,6 +574,7 @@ def _ctx_kwargs(ctx: dict) -> dict:
         "keywords": ctx.get("keywords") or [],
         "related": ctx.get("related") or [],
         "aliases": ctx.get("aliases") or [],
+        "wiki_vault_related": ctx.get("wiki_related") or [],
     }
 
 
@@ -931,7 +970,7 @@ def vault_send(
     from .reuse import reuse_channels_for_frontmatter
 
     reuse_channels = reuse_channels_for_frontmatter(storage, file_id)
-    ctx = note_context(storage, file_id, snapshot)
+    ctx = note_context(storage, file_id, snapshot, dest_root=vault)
     if ctx["tags"]:
         tags = normalize_tags([*tags, *ctx["tags"]])[:20]
 
