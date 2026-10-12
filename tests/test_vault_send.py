@@ -667,6 +667,43 @@ def test_a_stale_reference_row_never_claims_another_recordings_note(sandbox, pol
     assert b_note.read_text(encoding="utf-8") == b_text
 
 
+_A, _B = FILE_ID.encode(), FOREIGN_ID.encode()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # core-09 r4: a lone CR is a YAML line break, so B's identity hides
+        # behind what looked like one comment line.
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n# comment\rplaud_id: " + _B + b"\n---\nForeign body\n",
+            id="r4-lone-cr",
+        ),
+        # core-09 r4: decoding with errors="ignore" deleted the byte that kept
+        # this from being A's id.
+        pytest.param(b"---\nplaud_id: abc123\xffdef456\n---\nForeign body\n", id="r4-invalid-utf8"),
+        pytest.param(b"---\r\nplaud_id: " + _A + b"\r\n---\r\nbody\r\n", id="crlf"),
+        pytest.param(b"---\nplaud_id: " + _A + b"\ntitle: a\x00b\n---\n", id="nul"),
+        pytest.param(b"---\nplaud_id: " + _A + b"\ntitle: a\x0bb\n---\n", id="vertical-tab"),
+        pytest.param(b"---\nplaud_id: " + _A + b"\ntitle: a\x7fb\n---\n", id="del"),
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n# c\xc2\x85plaud_id: " + _B + b"\n---\n", id="nel"
+        ),
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n# c\xe2\x80\xa8plaud_id: " + _B + b"\n---\n",
+            id="line-separator",
+        ),
+        pytest.param(b"\xef\xbb\xbf---\nplaud_id: " + _A + b"\n---\n", id="bom"),
+    ],
+)
+def test_bytes_outside_plain_utf8_lines_mean_no_claim(sandbox, tmp_path: Path, raw: bytes) -> None:
+    note = _same_name_note(sandbox)
+    note.write_bytes(raw)
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_bytes() == raw
+
+
 def _never_claimed(sandbox, tmp_path: Path, text: str) -> None:
     """Sending FILE_ID with `overwrite` and no reference row leaves `text` alone."""
     note = _same_name_note(sandbox)
@@ -802,8 +839,8 @@ def test_the_apps_own_note_format_is_still_found(sandbox, tmp_path: Path) -> Non
     [
         f'---\nplaud_id: "{FILE_ID}"\n---\n',
         f"---\nplaud_id: '{FILE_ID}'  \n---\n",
-        f"---\r\ntitle: x\r\nplaud_id: {FILE_ID}\r\n---\r\nbody\r\n",
         f"---\nplaud_id: {FILE_ID} # sent from the laptop\n---\n",
+        f'---\ntitle: "주간 회의 · 2026"\nplaud_id: {FILE_ID}\n---\n',  # UTF-8 beyond ASCII
         # core-09 r1 #2: a quoted id followed by a comment.
         f'---\nplaud_id: "{FILE_ID}" # correct owner\n---\nOriginal\n',
         f"---\nplaud_id: '{FILE_ID}'  # after two spaces\n---\n",

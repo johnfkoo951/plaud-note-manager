@@ -563,12 +563,16 @@ def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
 #   2. `  - scalar`, exactly two spaces, under a `key:` with no value;
 #   3. `#comment` at column 0;
 #   4. blank.
-# Any other line, a tab anywhere, or an identity key (`plaud_id`, `source`)
-# that appears twice means the note makes no ownership claim. A missed match
-# only costs a numbered new note; a wrong one could overwrite another's note.
+# Before any of that, the block's bytes must decode as UTF-8 and hold no
+# control character but LF — no CR (so no CRLF), no tab — and no other line
+# break YAML may honour (NEL, U+2028, U+2029). Any other line, any such
+# character, or an identity key (`plaud_id`, `source`) that appears twice
+# means the note makes no ownership claim. A missed match only costs a
+# numbered new note; a wrong one could overwrite another recording's note.
 
 _KEY_LINE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*(?: [A-Za-z0-9_-]+)*):(?: (.*))?")
 _ITEM_LINE = re.compile(r"  - (.*)")
+_NOT_PLAIN_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f\x85  ]")
 IDENTITY_KEYS = ("plaud_id", "source")
 # The value of a key that holds a list (block items or `[]`); equals no id.
 _LIST = "\x00"
@@ -633,27 +637,32 @@ def _front_matter_fields(path: Path) -> dict[str, list[str]] | None:
     described above."""
     try:
         with path.open("rb") as fh:
-            head = fh.read(65536).decode("utf-8", errors="ignore")
+            head = fh.read(65536)
     except OSError:
         return None
-    lines = head.replace("\r\n", "\n").split("\n")
-    if lines[0] != "---":
+    # Cut the block at the byte level, so nothing is decoded or normalised
+    # before it is checked: the opening and closing lines are exactly `---`.
+    raw_lines = head.split(b"\n")
+    if raw_lines[0] != b"---" or b"---" not in raw_lines[1:]:
+        return None  # no block, or none that ends within what was read
+    end = raw_lines.index(b"---", 1)
+    try:
+        block = b"\n".join(raw_lines[1:end]).decode("utf-8")  # strict: no byte dropped
+    except UnicodeDecodeError:
+        return None
+    if _NOT_PLAIN_TEXT.search(block):
         return None
     try:
-        return _read_mapping(lines[1:])
+        return _read_mapping(block.split("\n"))
     except _Unsupported:
         return None
 
 
 def _read_mapping(lines: list[str]) -> dict[str, list[str]]:
-    """`_front_matter_fields` over the lines after the opening `---`."""
+    """`_front_matter_fields` over the lines between the `---` lines."""
     fields: dict[str, list[str]] = {}
     list_key: str | None = None  # a `key:` with no value, whose items may follow
     for line in lines:
-        if line == "---":
-            return fields
-        if "\t" in line:
-            raise _Unsupported
         if not line.strip(" "):  # 4. blank
             continue
         if line.startswith("#"):  # 3. a comment at column 0
@@ -679,7 +688,7 @@ def _read_mapping(lines: list[str]) -> dict[str, list[str]]:
         else:
             value = _read_scalar(value_text)
         fields.setdefault(key, []).append(value)
-    raise _Unsupported  # unterminated within what was read
+    return fields
 
 
 def _plaud_url_id(values: list[str]) -> str:
