@@ -143,7 +143,7 @@ def test_regenerating_metadata_keeps_completed_lifecycle(tmp_path, monkeypatch) 
     )
     storage.upsert_note_metadata(file_id="f", status="done", usage_status="archived", now=1)
     monkeypatch.setattr(metadata, "integrated_dir", lambda _: tmp_path)
-    monkeypatch.setattr(vault_index, "related_wikilinks", lambda _: [])
+    monkeypatch.setattr(vault_index, "related_wikilinks", lambda *_a, **_k: [])
     result = metadata.generate_note_metadata(storage, "f", vault_path=tmp_path, use_ai=False)
     assert result["status"] == "done" and result["usage_status"] == "archived"
     row = storage.get_note_metadata("f")
@@ -162,6 +162,24 @@ def test_list_note_references_filters_by_kind(tmp_path) -> None:
         "b.md",
         "a.md",
     ]
+
+
+def test_a_draft_reference_never_relabels_a_more_specific_kind(tmp_path) -> None:
+    storage = Storage(tmp_path / "plaud.db")
+    sent = tmp_path / "a.md"
+    storage.upsert_note_reference(file_id="f", path=sent, kind="vault-send", title="sent", now=1)
+    storage.upsert_note_reference(file_id="f", path=sent, kind="draft", title="draft", now=2)
+    row = storage.list_note_references("f")[0]
+    assert (row["kind"], row["title"], row["updated_at"]) == ("vault-send", "sent", 1)
+
+    draft = tmp_path / "b.md"
+    storage.upsert_note_reference(file_id="f", path=draft, kind="draft", now=3)
+    storage.upsert_note_reference(file_id="f", path=draft, kind="draft", title="t", now=4)
+    row = storage.list_note_references("f", kind="draft")[0]
+    assert (row["title"], row["updated_at"]) == ("t", 4)  # a draft row still updates
+    storage.upsert_note_reference(file_id="f", path=draft, kind="vault-send", now=5)
+    kinds = {Path(r["path"]).name: r["kind"] for r in storage.list_note_references("f")}
+    assert kinds == {"a.md": "vault-send", "b.md": "vault-send"}
 
 
 def test_link_candidates_keep_whole_speaker_names(tmp_path, monkeypatch) -> None:

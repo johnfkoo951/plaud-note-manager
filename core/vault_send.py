@@ -21,6 +21,7 @@ own summary.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ from .metadata import (
     strip_frontmatter,
     strip_markdown_fence,
 )
+from .integrate import NO_TRANSCRIPT
 from .paths import integrated_dir, summaries_dir, summary_path
 from .paths import _safe as safe_component
 from .storage import Storage
@@ -69,6 +71,12 @@ class ResolvedContent:
 #: What a send does when this app already wrote a note for the recording in
 #: the vault: ask (report it, write nothing) | skip | overwrite | new.
 ON_DUPLICATE = ("ask", "skip", "overwrite", "new")
+
+#: The note-reference kind of a wiki raw source, which identifies itself by
+#: its `source:` link rather than `plaud_id:`.
+WIKI_RAW_SOURCE_KIND = "wiki-raw-source"
+#: The Plaud link a raw source carries as `source`; the rest is the recording id.
+PLAUD_FILE_URL = "https://web.plaud.ai/file/"
 
 
 @dataclass(slots=True)
@@ -193,11 +201,16 @@ def pick_integrated(file_id: str, *, model: str = "", template: str = "") -> Res
     if not summary:
         return None
     transcript_path = chosen.with_name(chosen.name.replace(".summary.md", ".transcript.md"))
+    transcript = _read(transcript_path if transcript_path.exists() else None)
+    if transcript == NO_TRANSCRIPT:
+        # integrate()'s stand-in for a reply with no transcript section: no
+        # transcript at all, so a raw source falls back to the CMDS / Plaud one.
+        transcript = ""
     return ResolvedContent(
         kind="integrated",
         label=chosen.name.removesuffix(".summary.md"),
         summary=summary,
-        transcript=_read(transcript_path if transcript_path.exists() else None),
+        transcript=transcript,
         source_path=str(chosen),
     )
 
@@ -290,12 +303,22 @@ def note_tags(snapshot: dict, note_type: str) -> list[str]:
     return normalize_tags(seed)[:12]
 
 
-def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
+def note_context(
+    storage: Storage, file_id: str, snapshot: dict, *, dest_root: Path | None = None
+) -> dict:
     """CMDS/index/keywords/related/speakers for a note, from stored metadata
     when present, else from the deterministic classifier.
 
     `speakers` are whole real names (`human_speakers`): never split on
-    whitespace, no diarizer placeholders, NFC, deduplicated."""
+    whitespace, no diarizer placeholders, NFC, deduplicated.
+
+    Related notes are looked up per vault: `main_related` in the main vault,
+    `wiki_related` among compiled wiki notes (never raw sources). `related`
+    — the titles a note writes as `[[…]]` — is filled only when `dest_root`,
+    the folder written into (default: the main vault), lies inside the main
+    vault and not in a wiki nested there, since a wikilink cannot
+    cross vaults. Stored `related` titles are only lookup terms: they were
+    once resolved without a vault filter."""
     from .classification import classify_snapshot
 
     existing = storage.get_note_metadata(file_id)
@@ -311,16 +334,44 @@ def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
     cmds = str(meta.get("cmds") or cls.cmds or "")
     index = str(meta.get("index") or cls.index or "")
     keywords = [str(k) for k in (snapshot.get("keywords") or [])][:12]
-    related = [str(r) for r in (meta.get("related") or [])]
-    related_paths: list[dict[str, str]] = []
-    try:
-        from .vault_index import related_notes
+    terms = list(
+        dict.fromkeys(
+            str(t)
+            for t in (
+                *keywords,
+                *as_list(meta.get("key_topics")),
+                *as_list(meta.get("link_candidates")),
+                *as_list(meta.get("related")),
+            )
+            if t
+        )
+    )
+    main, wiki = app_config.obsidian_vault(), wiki_vault()
+    main_related: list[dict[str, str]] = []
+    wiki_related: list[dict[str, str]] = []
+    from . import vault_index
 
-        related_paths = related_notes([*keywords, *as_list(meta.get("key_topics")), *related])
-        if not related:
-            related = [n["title"] for n in related_paths]
-    except Exception:
-        related_paths = []
+    try:
+        vault_index.refresh_if_stale()
+    except Exception:  # indexing never fails a send
+        pass
+    try:
+        if main is not None:
+            main_related = vault_index.related_notes(terms, vaults=[main.name])
+        if wiki is not None:
+            wiki_related = vault_index.related_notes(
+                terms, vaults=[wiki.name], limit=5, exclude_types=("raw-source",)
+            )
+    except Exception:  # links are optional
+        main_related, wiki_related = [], []
+    dest = dest_root or main
+    into_main = (
+        main is not None
+        and dest is not None
+        and dest.resolve().is_relative_to(main.resolve())
+        and not is_wiki_target("", dest)  # a wiki nested inside the main vault
+    )
+    related = [n["title"] for n in main_related] if into_main else []
     speakers = human_speakers(snapshot.get("speakers") or "")
     if not speakers:
         try:
@@ -335,7 +386,9 @@ def note_context(storage: Storage, file_id: str, snapshot: dict) -> dict:
         "index": index,
         "keywords": keywords,
         "related": related,
-        "related_paths": related_paths,
+        "main_related": main_related,
+        "wiki_related": wiki_related,
+        "related_paths": main_related,  # the old name, kept for callers
         "speakers": speakers,
         "aliases": aliases,
         "tags": [str(t) for t in as_list(meta.get("tags"))],
@@ -370,12 +423,13 @@ def build_note_markdown(
     model: str = "",
     aliases: list[str] | None = None,
     date_created: str = "",
+    wiki_vault_related: list[dict[str, str]] | None = None,
 ) -> str:
     """Deterministic CMDS-style note (direct mode). Frontmatter follows the
     vault's frontmatter-standard (7 required fields + CMDS/index + Plaud lane
     extras) via `core.frontmatter.CmdsFrontmatter`. `date_created` keeps an
     overwritten note's original creation time."""
-    from .frontmatter import CmdsFrontmatter, iso_minute, model_label
+    from .frontmatter import CmdsFrontmatter, iso_minute, model_label, wiki_vault_links
 
     now = now or datetime.now()
     kind_label = f"{resolved.kind} ({resolved.label})" if resolved.label else resolved.kind
@@ -397,6 +451,7 @@ def build_note_markdown(
         speakers=list(speakers or []),
         keywords=list(keywords or []),
         related=list(related or []),
+        wiki_vault_related=list(wiki_vault_related or []),
         reuse_channels=list(reuse_channels or []),
         extra={"content_kind": kind_label},
     )
@@ -415,11 +470,13 @@ def build_note_markdown(
             lines.append("## Transcript")
             lines.append("")
         lines.append(resolved.transcript)
-    if related:
+    wiki_links = wiki_vault_links(list(wiki_vault_related or []))
+    if related or wiki_links:
         lines.append("")
         lines.append("## 관련 노트")
         lines.append("")
-        lines.extend(f"- [[{r}]]" for r in related)
+        lines.extend(f"- [[{r}]]" for r in related or [])
+        lines.extend(f"- {link}" for link in wiki_links)
     lines.append("")
     return "\n".join(lines)
 
@@ -523,6 +580,7 @@ def _ctx_kwargs(ctx: dict) -> dict:
         "keywords": ctx.get("keywords") or [],
         "related": ctx.get("related") or [],
         "aliases": ctx.get("aliases") or [],
+        "wiki_vault_related": ctx.get("wiki_related") or [],
     }
 
 
@@ -541,18 +599,174 @@ def unique_note_path(folder: Path, date_compact: str, title: str) -> Path:
     return path
 
 
-def _front_matter_names(path: Path, file_id: str) -> bool:
-    """Whether the note's leading front matter block mentions `file_id` —
-    `plaud_id:` on main notes, the `source:` URL on wiki raw sources."""
+# The identity check reads front matter by a strict line grammar — exactly
+# the shapes this app writes. Every line of the block must be one of:
+#   1. `key: value` or `key:` at column 0: the key is ASCII words (letters,
+#      digits, `_`, `-`) joined by single spaces (`date created`), the value
+#      a single-line plain scalar, a quoted scalar closed on the same line,
+#      or the literal empty list `[]`;
+#   2. `  - scalar`, exactly two spaces, under a `key:` with no value;
+#   3. `#comment` at column 0;
+#   4. blank.
+# Before any of that, the block's bytes must decode as UTF-8 and hold no
+# control character but LF — no CR (so no CRLF), no tab — and no other line
+# break YAML may honour (NEL, U+2028, U+2029). Any other line, any such
+# character, or an identity key (`plaud_id`, `source`) that appears twice
+# means the note makes no ownership claim. A missed match only costs a
+# numbered new note; a wrong one could overwrite another recording's note.
+
+_KEY_LINE = re.compile(r"([A-Za-z_][A-Za-z0-9_-]*(?: [A-Za-z0-9_-]+)*):(?: (.*))?")
+_ITEM_LINE = re.compile(r"  - (.*)")
+# How much of a note is read; its front matter must be closed within it.
+_HEAD_BYTES = 65536
+_NOT_PLAIN_TEXT = re.compile("[\x00-\x09\x0b-\x1f\x7f\x85  ]")
+IDENTITY_KEYS = ("plaud_id", "source")
+# The value of a key that holds a list (block items or `[]`); equals no id.
+_LIST = "\x00"
+# The escapes a double-quoted scalar may use; any other means no claim.
+_ESCAPES = {'"': '"', "\\": "\\", "/": "/", "n": "\n", "t": "\t", "r": "\r", " ": " "}
+# A plain value may not start with these: each opens another construct.
+_INDICATORS = "[]{}&*!|>%@`,#'\""
+
+
+class _Unsupported(ValueError):
+    """Front matter outside the subset the identity check reads."""
+
+
+def _read_quoted(text: str) -> tuple[str, str]:
+    """The quoted scalar opening `text`, decoded, and the rest of the line.
+    It must close on this line."""
+    quote = text[0]
+    out: list[str] = []
+    j = 1
+    while j < len(text):
+        ch = text[j]
+        if quote == '"' and ch == "\\":
+            escaped = _ESCAPES.get(text[j + 1 : j + 2])
+            if escaped is None:
+                raise _Unsupported
+            out.append(escaped)
+            j += 2
+        elif ch == quote and quote == "'" and text[j + 1 : j + 2] == "'":
+            out.append("'")
+            j += 2
+        elif ch == quote:
+            return "".join(out), text[j + 1 :]
+        else:
+            out.append(ch)
+            j += 1
+    raise _Unsupported  # it runs onto the next line, or never closes
+
+
+def _read_scalar(text: str) -> str:
+    """One single-line scalar, plain or quoted, with an optional ` #comment`,
+    as YAML reads it. `text` holds no tab (see `_read_mapping`)."""
+    text = text.lstrip(" ")
+    if text[:1] in ('"', "'"):
+        value, after = _read_quoted(text)
+        rest = after.lstrip(" ")
+        if rest and not (rest.startswith("#") and rest != after):
+            raise _Unsupported  # only a blank-separated comment may follow
+        return value
+    cut = text.find(" #")
+    value = (text[:cut] if cut != -1 else text).rstrip(" ")
+    if not value or value[0] in _INDICATORS or value[:2].rstrip() in ("-", "?", ":"):
+        raise _Unsupported
+    if ": " in value or value.endswith(":"):
+        raise _Unsupported  # a mapping, not a scalar
+    return value
+
+
+def _front_matter_fields(path: Path) -> dict[str, list[str]] | None:
+    """The `key: value` pairs of the note's leading front matter, every value
+    of a repeated key kept, `_LIST` for a list. None when there is no complete
+    block at the very top of the file, or any line of it breaks the grammar
+    described above."""
     try:
         with path.open("rb") as fh:
-            head = fh.read(4096).decode("utf-8", errors="ignore")
+            head = fh.read(_HEAD_BYTES)
     except OSError:
-        return False
-    if not head.startswith("---"):
-        return False
-    end = head.find("\n---", 3)
-    return file_id in (head[3:end] if end != -1 else head)
+        return None
+    # Cut the block at the byte level, so nothing is decoded or normalised
+    # before it is checked: the opening and closing lines are exactly `---`.
+    raw_lines = head.split(b"\n")
+    if len(head) == _HEAD_BYTES:
+        # The read may have stopped inside the last line: only lines ended by
+        # a newline within the window are known, so the rest is not a line.
+        raw_lines.pop()
+    if raw_lines[0] != b"---" or b"---" not in raw_lines[1:]:
+        return None  # no block, or none that ends within what was read
+    end = raw_lines.index(b"---", 1)
+    try:
+        block = b"\n".join(raw_lines[1:end]).decode("utf-8")  # strict: no byte dropped
+    except UnicodeDecodeError:
+        return None
+    if _NOT_PLAIN_TEXT.search(block):
+        return None
+    try:
+        return _read_mapping(block.split("\n"))
+    except _Unsupported:
+        return None
+
+
+def _read_mapping(lines: list[str]) -> dict[str, list[str]]:
+    """`_front_matter_fields` over the lines between the `---` lines."""
+    fields: dict[str, list[str]] = {}
+    list_key: str | None = None  # a `key:` with no value, whose items may follow
+    for line in lines:
+        if not line.strip(" "):  # 4. blank
+            continue
+        if line.startswith("#"):  # 3. a comment at column 0
+            continue
+        item = _ITEM_LINE.fullmatch(line)
+        if item:  # 2. `  - scalar` under a key with no value
+            if list_key is None:
+                raise _Unsupported
+            _read_scalar(item.group(1))
+            fields[list_key][-1] = _LIST
+            continue
+        pair = _KEY_LINE.fullmatch(line)
+        if not pair:  # 1. `key: value` — or a line this grammar does not know
+            raise _Unsupported
+        key, value_text = pair.group(1), (pair.group(2) or "").strip(" ")
+        if key in IDENTITY_KEYS and key in fields:
+            raise _Unsupported  # an identity given twice is no identity
+        list_key = None
+        if not value_text:
+            value, list_key = "", key  # null, or the head of a block list
+        elif value_text == "[]":
+            value = _LIST  # the empty list this app writes for no aliases/tags
+        else:
+            value = _read_scalar(value_text)
+        fields.setdefault(key, []).append(value)
+    return fields
+
+
+def _plaud_url_id(values: list[str]) -> str:
+    """The recording id of a single canonical `PLAUD_FILE_URL<id>` value."""
+    if len(set(values)) != 1 or not values[0].startswith(PLAUD_FILE_URL):
+        return ""
+    rest = values[0][len(PLAUD_FILE_URL) :]
+    return rest if rest and all(c.isalnum() or c in "-_" for c in rest) else ""
+
+
+def _note_owner(path: Path, kind: str) -> str:
+    """The recording a note says it belongs to, or "" unless it says so
+    unambiguously in its own identity field: `plaud_id` on a main note, the
+    canonical Plaud `source` link on a wiki raw source. Any `plaud_id` that
+    names a different recording disqualifies the note, so a note for another
+    recording is never claimed through a field that merely mentions this one."""
+    fields = _front_matter_fields(path)
+    if fields is None:
+        return ""
+    plaud_ids = set(fields.get("plaud_id", [])) - {""}
+    if kind == WIKI_RAW_SOURCE_KIND:
+        owner = _plaud_url_id(fields.get("source", []))
+    else:
+        owner = next(iter(plaud_ids)) if len(plaud_ids) == 1 else ""
+    if not owner or owner == _LIST or plaud_ids - {owner}:
+        return ""
+    return owner
 
 
 def existing_notes(
@@ -565,15 +779,27 @@ def existing_notes(
 ) -> list[dict]:
     """Notes of `kind` this app already wrote for `file_id` that still exist
     inside `vault` (any folder), newest first. `same_name` adds a note at that
-    path whose front matter names the recording even without a reference row
-    — written on another machine, before references existed, or by Claude."""
+    path whose own identity is the recording even without a reference row —
+    written on another machine, before references existed, or by Claude.
+
+    Every candidate, a reference row's path included, must still name the
+    recording by its own identity (`_note_owner`): a note moved away can leave
+    its row pointing at a path another recording's same-named note now holds.
+    """
+    if not file_id:
+        return []
     root = vault.resolve()
     seen: set[Path] = set()
     out: list[dict] = []
     for row in storage.list_note_references(file_id, kind=kind):
         path = Path(row["path"])
         resolved = path.resolve()
-        if resolved in seen or not path.is_file() or not resolved.is_relative_to(root):
+        if (
+            resolved in seen
+            or not path.is_file()
+            or not resolved.is_relative_to(root)
+            or _note_owner(path, kind) != file_id
+        ):
             continue
         seen.add(resolved)
         updated_at = int(row["updated_at"] or 0)
@@ -591,7 +817,7 @@ def existing_notes(
         and same_name.is_file()
         and same_name.resolve() not in seen
         and same_name.resolve().is_relative_to(root)
-        and _front_matter_names(same_name, file_id)
+        and _note_owner(same_name, kind) == file_id
     ):
         out.append(
             {
@@ -756,7 +982,10 @@ def vault_send(
     from .reuse import reuse_channels_for_frontmatter
 
     reuse_channels = reuse_channels_for_frontmatter(storage, file_id)
-    ctx = note_context(storage, file_id, snapshot)
+    # The folder the note is written into — an absolute or `..` --dest can
+    # leave the vault, and `[[…]]` links only hold inside the main vault.
+    write_folder = overwrite.parent if overwrite is not None else send_destination(vault, dest)
+    ctx = note_context(storage, file_id, snapshot, dest_root=write_folder)
     if ctx["tags"]:
         tags = normalize_tags([*tags, *ctx["tags"]])[:20]
 

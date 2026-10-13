@@ -25,9 +25,9 @@ from dataclasses import dataclass, field
 
 from . import app_config
 from .frontmatter import (
-    advanced_uri_link,
     clean_tags,
     iso_minute,
+    main_vault_links,
     model_label,
     wikilink,
     yaml_quote,
@@ -140,15 +140,14 @@ class WikiRawSourceFrontmatter:
             out.append(f"source-vault: {self.source_vault}")
         if self.main_vault_cmds:
             out.append(f"mainVaultCmds: {wikilink(self.main_vault_cmds)}")
-        if self.source_vault and self.main_vault_related:
+        main_links = (
+            main_vault_links(self.main_vault_related, self.source_vault)
+            if self.source_vault
+            else []
+        )
+        if main_links:
             out.append("mainVaultRelated:")
-            for rel in self.main_vault_related:
-                title = rel.get("title") or ""
-                path = rel.get("rel_path") or ""
-                if not title or not path:
-                    continue
-                link = advanced_uri_link(f"Main: {title}", self.source_vault, path)
-                out.append(f"  - {yaml_quote(link)}")
+            out.extend(f"  - {yaml_quote(link)}" for link in main_links)
 
         for key, value in self.extra.items():
             out.append(f"{key}: {value}")

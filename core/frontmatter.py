@@ -45,11 +45,44 @@ def iso_minute(dt: datetime | None = None) -> str:
     return (dt or datetime.now()).strftime(ISO_MINUTE)
 
 
-def advanced_uri_link(label: str, vault_name: str, rel_path: str) -> str:
-    """Cross-vault link per the vault's wikilink-rules §6: `[[…]]` cannot cross
-    vault boundaries, so use an Advanced URI markdown link instead."""
+# Cross-vault links (the vault's wikilink-rules §6): `[[…]]` cannot cross a
+# vault boundary, so another vault's note is linked through Advanced URI, with
+# the vault and the whole file path percent-encoded (`/` too, as `%2F`). The
+# link format is spelled out only here.
+ADVANCED_URI = "obsidian://advanced-uri?vault={vault}&filepath={filepath}"
+MAIN_VAULT_LABEL = "Mothership: "  # a main-vault note, linked from the wiki
+WIKI_VAULT_LABEL = "LLM Wiki: "  # a wiki note, linked from the main vault
+
+
+def cross_vault_link(label: str, vault_name: str, rel_path: str) -> str:
+    """`[label](obsidian://advanced-uri?vault=…&filepath=….md)`."""
     path = rel_path if rel_path.endswith(".md") else f"{rel_path}.md"
-    return f"[{label}](obsidian://advanced-uri?vault={quote(vault_name)}&filepath={quote(path)})"
+    uri = ADVANCED_URI.format(vault=quote(vault_name, safe=""), filepath=quote(path, safe=""))
+    return f"[{label}]({uri})"
+
+
+def advanced_uri_link(label: str, vault_name: str, rel_path: str) -> str:
+    """Kept for callers of the old name; see `cross_vault_link`."""
+    return cross_vault_link(label, vault_name, rel_path)
+
+
+def wiki_vault_links(entries: list[dict[str, str]]) -> list[str]:
+    """Links to wiki notes (`title`, `rel_path`, `vault` each required)."""
+    return [
+        cross_vault_link(WIKI_VAULT_LABEL + e["title"], e["vault"], e["rel_path"])
+        for e in entries
+        if e.get("title") and e.get("rel_path") and e.get("vault")
+    ]
+
+
+def main_vault_links(entries: list[dict[str, str]], source_vault: str) -> list[str]:
+    """Links to notes of `source_vault` only; an entry naming another vault
+    (`vault`, default `source_vault`) would be addressed in the wrong one."""
+    return [
+        cross_vault_link(MAIN_VAULT_LABEL + e["title"], source_vault, e["rel_path"])
+        for e in entries
+        if e.get("title") and e.get("rel_path") and (e.get("vault") or source_vault) == source_vault
+    ]
 
 
 def clean_tags(tags: list[str]) -> list[str]:
@@ -89,6 +122,8 @@ class CmdsFrontmatter:
     attendees: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
     related: list[str] = field(default_factory=list)
+    # A main-vault note links wiki notes (title/rel_path/vault) by Advanced URI.
+    wiki_vault_related: list[dict[str, str]] = field(default_factory=list)
     reuse_channels: list[str] = field(default_factory=list)
     # Cross-vault: when the note lands in the wiki vault, main-vault notes are
     # referenced via `mainVaultRelated:` advanced-uri links, never `[[…]]`.
@@ -139,18 +174,20 @@ class CmdsFrontmatter:
         if self.related:
             out.append("related:")
             out.extend(f"  - {wikilink(r)}" for r in self.related)
+        wiki_links = [] if self.source_vault else wiki_vault_links(self.wiki_vault_related)
+        if wiki_links:
+            out.append("wikiVaultRelated:")
+            out.extend(f"  - {yaml_quote(link)}" for link in wiki_links)
         if self.source_vault:
             out.append(f"source-vault: {self.source_vault}")
-        if self.main_vault_related and self.source_vault:
+        main_links = (
+            main_vault_links(self.main_vault_related, self.source_vault)
+            if self.source_vault
+            else []
+        )
+        if main_links:
             out.append("mainVaultRelated:")
-            for note in self.main_vault_related:
-                label = f"Main: {note.get('title', '')}"
-                out.append(
-                    "  - "
-                    + yaml_quote(
-                        advanced_uri_link(label, self.source_vault, note.get("rel_path", ""))
-                    )
-                )
+            out.extend(f"  - {yaml_quote(link)}" for link in main_links)
         if self.reuse_channels:
             # `channel:status` pairs so Obsidian Bases can filter reuse material.
             out.append("reuse-channels:")

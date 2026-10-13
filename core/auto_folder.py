@@ -32,6 +32,7 @@ from .classification import (
     rule_cmds,
     taxonomy,
 )
+from .summarize import ProviderBreaker, failure_reason, is_provider_failure
 from .tags import normalize_tags
 from .templates import load_template
 
@@ -43,6 +44,9 @@ class AssistedClassification:
     llm_tags: list[str] = field(default_factory=list)
     llm_keywords: list[str] = field(default_factory=list)
     llm_error: str = ""
+    # What the LLM step did: off (not needed), ok, rejected (answered with no
+    # usable folder), failed, unavailable (gate miss), skipped (breaker open).
+    llm_status: str = "off"
 
 
 def needs_llm(classification: RecordingClassification, threshold: float) -> bool:
@@ -95,13 +99,24 @@ def classify_with_assist(
     use_llm: bool | None = None,
     run_model=None,
     model_available=None,
+    breaker: ProviderBreaker | None = None,
 ) -> AssistedClassification:
-    """Rules first; LLM arbitration only for weak verdicts."""
+    """Rules first; LLM arbitration only for weak verdicts.
+
+    `breaker` is shared across one run: after a provider failure, later weak
+    verdicts keep the rule result without calling the model again.
+    """
     rule_result = classify_snapshot(snapshot)
     threshold = app_config.classify_llm_threshold() if threshold is None else threshold
     use_llm = app_config.classify_llm_assist() if use_llm is None else use_llm
     if not use_llm or not needs_llm(rule_result, threshold):
         return AssistedClassification(rule_result)
+    if breaker is not None and breaker.tripped:
+        return AssistedClassification(
+            rule_result,
+            llm_status="skipped",
+            llm_error=f"not attempted, earlier call failed: {breaker.reason}",
+        )
 
     if run_model is None or model_available is None:
         from . import summarize
@@ -110,7 +125,9 @@ def classify_with_assist(
         model_available = model_available or summarize.model_available
     model = model or app_config.classify_model()
     if not model_available(model):
-        return AssistedClassification(rule_result, llm_error=f"{model} unavailable")
+        return AssistedClassification(
+            rule_result, llm_status="unavailable", llm_error=f"{model} unavailable"
+        )
 
     summaries = str(snapshot.get("summaries") or "")[:3000]
     integrated = str(snapshot.get("integrated_summary") or "")[:3000]
@@ -131,9 +148,19 @@ def classify_with_assist(
     try:
         raw = run_model(model, prompt, model_id=app_config.model_id_for(model) or None)
     except Exception as exc:  # heterogeneous runner errors
-        return AssistedClassification(rule_result, llm_error=str(exc)[:300])
+        reason = failure_reason(exc, limit=300)
+        if breaker is not None and is_provider_failure(exc):
+            breaker.trip(reason)
+        return AssistedClassification(rule_result, llm_status="failed", llm_error=reason)
 
     data = _extract_json(raw)
+    if not data:
+        # No JSON at all is a failed call, not a verdict of "no folder".
+        return AssistedClassification(
+            rule_result,
+            llm_status="failed",
+            llm_error="model reply contained no usable classify JSON",
+        )
     folder_name = str(data.get("folder_name") or "").strip()
     rule = rule_by_folder(folder_name) if folder_name else None
     llm_tags = normalize_tags(_as_str_list(data.get("topic_tags"), 10))
@@ -145,6 +172,7 @@ def classify_with_assist(
             llm_tags=llm_tags,
             llm_keywords=llm_keywords,
             llm_error=f"unknown folder from model: {folder_name!r}" if folder_name else "no folder",
+            llm_status="rejected",
         )
     try:
         confidence = float(data.get("confidence", 0.7))
@@ -165,5 +193,9 @@ def classify_with_assist(
         )[:3],
     )
     return AssistedClassification(
-        classification, used_llm=True, llm_tags=llm_tags, llm_keywords=llm_keywords
+        classification,
+        used_llm=True,
+        llm_tags=llm_tags,
+        llm_keywords=llm_keywords,
+        llm_status="ok",
     )

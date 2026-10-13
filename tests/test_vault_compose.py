@@ -17,13 +17,18 @@ import pytest
 from core import vault_compose as vc
 from core.models import FileContent, PlaudFile, TranscriptSegment
 from core.storage import Storage
+from core.vault_index import related_notes as _real_related_notes
 
 NOW = int(time.time())
 
 
 @pytest.fixture()
 def storage(tmp_path: Path) -> Storage:
-    st = Storage(tmp_path / "plaud.db")
+    return _seeded_storage(tmp_path / "plaud.db")
+
+
+def _seeded_storage(db: Path) -> Storage:
+    st = Storage(db)
     st.upsert_file(PlaudFile(id="f1", filename="09-14 세미나", duration=1000), now=NOW)
     st.save_content(
         FileContent(
@@ -502,6 +507,151 @@ def test_wiki_skip_returns_the_existing_raw_source(
     no_generation()
     skipped = _wiki(storage, on_duplicate="skip")
     assert (skipped.status, skipped.action, skipped.path) == ("ok", "skipped", first.path)
+
+
+@pytest.mark.parametrize(
+    "new",
+    [
+        None,  # as written
+        'source: "https://web.plaud.ai/file/f1" # canonical',
+        "source: 'https://web.plaud.ai/file/f1'  # canonical",
+    ],
+)
+def test_a_raw_source_is_found_by_its_source_url_without_a_reference(
+    storage, vaults, recording_model, no_generation, tmp_path: Path, new
+) -> None:
+    first = _wiki(storage)
+    if new is not None:
+        path = Path(first.path)
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace('source: "https://web.plaud.ai/file/f1"', new, 1), "utf-8")
+    no_generation()
+    again = _wiki(_seeded_storage(tmp_path / "fresh.db"))  # e.g. from another machine
+    assert again.status == "duplicate"
+    assert [e["path"] for e in again.existing] == [first.path]
+
+
+@pytest.mark.parametrize(
+    "old, new",
+    [
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://web.plaud.ai/file/f10"'),
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://web.plaud.ai/file/xf1"'),
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://web.plaud.ai/file/f1/x"'),
+        ('source: "https://web.plaud.ai/file/f1"', 'source: "https://example.com/file/f1"'),
+        ("type: raw-source", "plaud_id: f2\ntype: raw-source"),
+        # The canonical link only inside another field's multi-line value.
+        (
+            'source: "https://web.plaud.ai/file/f1"',
+            'source: "https://web.plaud.ai/file/f2"\nnote: "see\nsource: https://web.plaud.ai/file/f1\n"',
+        ),
+        # The identity key twice, even with this recording's own link.
+        (
+            'source: "https://web.plaud.ai/file/f1"',
+            'source: "https://web.plaud.ai/file/f1"\nsource: "https://web.plaud.ai/file/f1"',
+        ),
+        # A tab anywhere in the block.
+        ("type: raw-source", "type:\traw-source"),
+    ],
+)
+def test_a_raw_source_owned_by_another_recording_is_never_this_ones(
+    storage, vaults, recording_model, tmp_path: Path, old: str, new: str
+) -> None:
+    # The note still mentions f1 elsewhere (its Plaud link in the body).
+    first = Path(_wiki(storage).path)
+    text = first.read_text(encoding="utf-8")
+    assert old in text and "web.plaud.ai/file/f1" in text.split(old, 1)[1]
+    foreign = text.replace(old, new, 1)
+    first.write_text(foreign, encoding="utf-8")
+    again = _wiki(_seeded_storage(tmp_path / "fresh.db"))
+    assert (again.status, again.action, again.existing) == ("ok", "created", [])
+    assert first.read_text(encoding="utf-8") == foreign
+
+
+# ----- cross-vault links ---------------------------------------------------
+
+
+def test_raw_source_main_vault_related_lists_only_main_vault_notes(
+    storage, vaults, recording_model, monkeypatch, index_note
+) -> None:
+    from core import vault_index
+
+    monkeypatch.setattr(vault_index, "related_notes", _real_related_notes)
+    titles = [f"Topic {n}" for n in range(7)]
+    for title in titles:
+        index_note(vaults["main"], f"30. Notes/{title}.md")
+    index_note(vaults["wiki"], "20. Wiki/Topic 0.md", note_type="concept")
+    storage.upsert_note_metadata(file_id="f1", metadata={"link_candidates": titles}, now=NOW)
+    text = Path(_wiki(storage).path).read_text(encoding="utf-8")
+    block = text.split("mainVaultRelated:\n", 1)[1].split("\n---", 1)[0]
+    links = [ln for ln in block.splitlines() if ln.startswith("  - ")]
+    assert 1 <= len(links) <= 5
+    assert all("Mothership: Topic" in ln for ln in links)
+    assert all("vault=CMDSPACE_Local_MBP&filepath=30.%20Notes%2FTopic" in ln for ln in links)
+    assert "vault=CMDS_LLM_Wiki" not in text and "[[Topic" not in text
+
+
+# ----- integrate()'s placeholder is not a transcript ----------------------
+
+
+def _placeholder_integration() -> None:
+    """An integrated artifact whose reply had no transcript section."""
+    from core import integrate
+    from core import paths as paths_mod
+
+    out = paths_mod.integrated_paths("f1", model="claude", template="default")
+    out["summary"].write_text("---\nkind: summary\n---\n\n통합 요약", encoding="utf-8")
+    out["transcript"].write_text(
+        f"---\nkind: transcript\n---\n\n{integrate.NO_TRANSCRIPT}", encoding="utf-8"
+    )
+
+
+def _with_cmds(storage: Storage) -> Storage:
+    storage.save_cmds_transcript(
+        file_id="f1",
+        model="scribe",
+        language="ko",
+        text="CMDS 전사 원문",
+        segments_json=json.dumps([{"speaker": "구요한", "content": "CMDS 전사 원문"}]),
+        now=NOW,
+    )
+    return storage
+
+
+@pytest.mark.parametrize("to", ["wiki", "main"])
+def test_a_placeholder_transcript_gives_way_to_the_real_one(
+    storage, vaults, recording_model, to: str
+) -> None:
+    # claude-review-1 regress-1: the newest integrated transcript was the
+    # placeholder, and it became the immutable raw source's Original Content.
+    _with_cmds(storage)
+    _placeholder_integration()
+    if to == "wiki":
+        result = _wiki(storage)
+    else:
+        result = vc.compose("f1", template="note-meeting", to="main", storage=storage)
+    assert result.status == "ok"
+    note = Path(result.path).read_text(encoding="utf-8")
+    prompts = " ".join(str(call) for call in recording_model)
+    assert "(no transcript section)" not in note and "(no transcript section)" not in prompts
+    assert "CMDS 전사 원문" in prompts
+    if to == "wiki":
+        assert "CMDS 전사 원문" in note  # the verbatim Original Content
+
+
+@pytest.mark.parametrize("to", ["wiki", "main"])
+def test_a_placeholder_alone_is_no_transcript(
+    vaults, recording_model, tmp_path: Path, to: str
+) -> None:
+    bare = Storage(tmp_path / "bare.db")
+    bare.upsert_file(PlaudFile(id="f1", filename="09-14 세미나", duration=1000), now=NOW)
+    _placeholder_integration()
+    if to == "wiki":
+        result = _wiki(bare)
+    else:
+        result = vc.compose("f1", template="note-meeting", to="main", storage=bare)
+    assert result.status == "no_transcript"
+    assert recording_model == []
+    assert not list(vaults["wiki"].rglob("*.md")) and not list(vaults["main"].rglob("*.md"))
 
 
 def test_wiki_overwrite_is_refused(storage, vaults, recording_model) -> None:

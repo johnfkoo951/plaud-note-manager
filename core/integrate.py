@@ -10,12 +10,14 @@ existing slots keep working while the integrated template remains stricter.
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from pathlib import Path
 from typing import Any
 
-from .paths import integrated_paths
-from .summarize import run_model
+from .paths import integrated_error_path, integrated_paths
+from .summarize import failure_reason, run_model
 from .templates import KIND_INTEGRATED, load_template, require_kind
 
 _FT_RE = re.compile(
@@ -26,6 +28,11 @@ _SUM_RE = re.compile(
     r"===SUMMARY_BEGIN===\s*(.*?)\s*===SUMMARY_END===",
     re.DOTALL,
 )
+
+# Written in place of a section the reply did not have, so the slot still
+# shows something. Readers that pass a transcript on treat it as absent.
+NO_TRANSCRIPT = "(no transcript section)"
+NO_SUMMARY = "(no summary section)"
 
 
 def split_integrated(raw: str) -> tuple[str, str]:
@@ -131,10 +138,24 @@ def integrate(
         plaud_summaries=plaud_summaries,
         transcription_context=transcription_context or "(없음)",
     )
-    response = run_model(model, prompt, model_id=model_id or None)
+    output_model = model_id or model
+    error_path = integrated_error_path(file_id, model=output_model, template=template_name)
+    try:
+        response = run_model(model, prompt, model_id=model_id or None)
+    except Exception as exc:
+        # Kept beside the slot's outputs so the app can say why this slot
+        # failed, even when Generate All ran several at once.
+        record = {
+            "at": int(time.time()),
+            "provider": model,
+            "model": output_model,
+            "template": template_name,
+            "reason": failure_reason(exc),
+        }
+        error_path.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        raise
     transcript, summary = split_integrated(response)
 
-    output_model = model_id or model
     paths = integrated_paths(file_id, model=output_model, template=template_name)
     front = (
         f"---\nfile_id: {file_id}\nprovider: {model}\nmodel: {output_model}\n"
@@ -142,12 +163,12 @@ def integrate(
     )
     paths["all"].write_text(front + response, encoding="utf-8")
     paths["transcript"].write_text(
-        front.replace("kind: integrated", "kind: transcript")
-        + (transcript or "(no transcript section)"),
+        front.replace("kind: integrated", "kind: transcript") + (transcript or NO_TRANSCRIPT),
         encoding="utf-8",
     )
     paths["summary"].write_text(
-        front.replace("kind: integrated", "kind: summary") + (summary or "(no summary section)"),
+        front.replace("kind: integrated", "kind: summary") + (summary or NO_SUMMARY),
         encoding="utf-8",
     )
+    error_path.unlink(missing_ok=True)
     return paths

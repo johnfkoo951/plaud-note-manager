@@ -73,18 +73,24 @@ plaud brief 42b0f9230ac0... --json | jq .
 ## 4. Vault 인덱싱
 
 ```bash
-# 첫 인덱싱 (모든 vault 풀스캔)
+# 설정된 vault(main, wiki)를 각자의 폴더에서 풀스캔
 plaud vault-index --full
 
-# 일상 사용: 변경된 노트만
+# 일상 사용: 변경된 노트만 (vault마다 이름과 폴더를 출력)
 plaud vault-index
 
-# 단일 vault만
-plaud vault-index --vault <your-obsidian-vault>
+# 단일 vault만: main | wiki | 폴더 경로 | main vault 옆 폴더 이름
+plaud vault-index --vault wiki
 
 # Plaud keywords → 우리 keywords/file_keywords 동기화 + vault_links 자동 매칭
 plaud vault-link
 ```
+
+관련 노트 링크를 만드는 곳(vault-send, compose, 메타데이터 생성)은 설정된 vault를
+1시간에 한 번까지 증분 재인덱싱한다. 실패해도 전송은 계속된다.
+`related`(`[[…]]`)는 노트가 들어가는 vault의 노트만, 위키 노트는 `wikiVaultRelated`
+Advanced URI 링크로만 쓴다(raw source 제외). 설정에서 빠진 vault의 인덱스 행은 남지만
+링크에는 쓰이지 않는다.
 
 권장: 옵시디언에서 큰 작업한 날 `plaud vault-index && plaud vault-link` 한 번.
 

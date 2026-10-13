@@ -17,6 +17,7 @@ import core.vault_send as vault_send_mod
 from core.metadata import build_recording_snapshot
 from core.models import FileContent, PlaudFile, TranscriptSegment
 from core.storage import Storage
+from core.vault_index import related_notes as _real_related_notes
 from core.vault_send import (
     ResolvedContent,
     build_note_markdown,
@@ -539,6 +540,468 @@ def test_a_same_name_note_naming_this_recording_counts_without_a_reference(
     other = Storage(tmp_path / "other.db")
     created = vault_send(FILE_ID, storage=other)
     assert created.action == "created" and created.path.endswith(" (2).md")
+
+
+FOREIGN_ID = "fed987cba654"  # another recording, same length as FILE_ID
+
+
+def _same_name_note(sandbox) -> Path:
+    """Where a send of FILE_ID writes, occupied by whatever the test puts there."""
+    _write_integrated(sandbox["tmp"])
+    return Path(vault_send(FILE_ID, storage=sandbox["storage"]).path)
+
+
+@pytest.mark.parametrize("policy", ["ask", "skip", "overwrite"])
+def test_another_recordings_note_that_mentions_this_one_is_never_its_duplicate(
+    sandbox, tmp_path: Path, policy: str
+) -> None:
+    # int-review-1 #1: recording B's note names A only in another field. With no
+    # reference row (a note from another machine), ask called it A's note,
+    # skip treated A as filed and overwrite replaced B's note.
+    note = _same_name_note(sandbox)
+    foreign = (
+        f"---\nplaud_id: {FOREIGN_ID}\n"
+        f"related_recording: https://web.plaud.ai/file/{FILE_ID}\n"
+        "---\nForeign recording original body\n"
+    )
+    note.write_text(foreign, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate=policy)
+    assert (result.status, result.action, result.existing) == ("ok", "created", [])
+    assert result.path.endswith(" (2).md")
+    assert note.read_text(encoding="utf-8") == foreign
+
+
+@pytest.mark.parametrize(
+    "front",
+    [
+        f"plaud_id: {FILE_ID}7",  # a longer id that contains this one
+        f"plaud_id: {FILE_ID[:-1]}",  # a prefix of this one
+        f"plaud_id: x{FILE_ID}",
+        f"plaud_id: [{FILE_ID}]",  # not a scalar
+        f"plaud_id: {FILE_ID}\nplaud_id: {FOREIGN_ID}",  # two identities
+        f"description: notes on {FILE_ID}",  # named outside plaud_id
+        f"source: https://web.plaud.ai/file/{FILE_ID}",  # a wiki field on a main note
+        f"related:\n  - {FILE_ID}",
+    ],
+)
+def test_only_this_notes_own_plaud_id_makes_it_a_duplicate(
+    sandbox, tmp_path: Path, front: str
+) -> None:
+    note = _same_name_note(sandbox)
+    note.write_text(f"---\n{front}\n---\nbody\n", encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_text(encoding="utf-8") == f"---\n{front}\n---\nbody\n"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f"no front matter\nplaud_id: {FILE_ID}\n",  # the id only in the body
+        f"---\nplaud_id: {FILE_ID}\nbody without a closing line\n",  # unterminated
+        f"---\ntitle: x\n---\nplaud_id: {FILE_ID}\n",  # after the block
+    ],
+)
+def test_missing_or_malformed_front_matter_never_claims_the_note(
+    sandbox, tmp_path: Path, text: str
+) -> None:
+    note = _same_name_note(sandbox)
+    note.write_text(text, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_text(encoding="utf-8") == text
+
+
+def test_a_meeting_note_draft_scan_keeps_the_send_reference(sandbox) -> None:
+    # claude-review-1 regress-3: meeting-note records every vault note naming
+    # the recording as a `draft`; the upsert relabelled the vault-send row,
+    # so a later send to another folder missed it and wrote a second note.
+    st = sandbox["storage"]
+    _write_integrated(sandbox["tmp"])
+    first = vault_send(FILE_ID, storage=st, dest="60. Collections/63. Meetings")
+    st.upsert_note_reference(  # what write_meeting_note does for each draft it finds
+        file_id=FILE_ID, path=first.path, kind="draft", title="x", now=99
+    )
+    again = vault_send(FILE_ID, storage=st)  # default ask, into the Inbox
+    assert again.status == "duplicate"
+    assert [e["path"] for e in again.existing] == [first.path]
+    assert _inbox_notes(sandbox) == []
+
+
+def test_a_placeholder_transcript_is_never_sent(sandbox) -> None:
+    from core.integrate import NO_TRANSCRIPT
+
+    _write_integrated(sandbox["tmp"], transcript=NO_TRANSCRIPT)
+    note = Path(vault_send(FILE_ID, storage=sandbox["storage"], with_transcript=True).path)
+    assert NO_TRANSCRIPT not in note.read_text(encoding="utf-8")
+
+
+def test_a_real_integrated_transcript_is_still_sent(sandbox) -> None:
+    _write_integrated(sandbox["tmp"], transcript="통합 전사본 실제 내용")
+    note = Path(vault_send(FILE_ID, storage=sandbox["storage"], with_transcript=True).path)
+    assert "통합 전사본 실제 내용" in note.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("policy", ["ask", "skip", "overwrite"])
+def test_a_stale_reference_row_never_claims_another_recordings_note(sandbox, policy: str) -> None:
+    # claude-review-1 regress-2: A's note was moved out of the Inbox, then B
+    # (same date, same title) was sent to A's old path, which A's reference
+    # row still names. Re-sending A reported B's note; overwrite replaced it.
+    st = sandbox["storage"]
+    for file_id in (FILE_ID, FOREIGN_ID):
+        st.upsert_file(PlaudFile(id=file_id, filename="Weekly meeting", start_time=1), now=1)
+        folder = sandbox["tmp"] / "integrated" / file_id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "claude__integrated.summary.md").write_text(
+            f"---\nkind: summary\n---\n\nbody of {file_id}", encoding="utf-8"
+        )
+    a_note = Path(vault_send(FILE_ID, storage=st).path)
+    moved = sandbox["vault"] / "60. Collections" / a_note.name
+    moved.parent.mkdir(parents=True)
+    a_note.rename(moved)
+    b_note = Path(vault_send(FOREIGN_ID, storage=st).path)
+    assert b_note == a_note  # B now sits where A's row points
+    b_text = b_note.read_text(encoding="utf-8")
+    result = vault_send(FILE_ID, storage=st, on_duplicate=policy)
+    assert (result.status, result.action) == ("ok", "created")
+    assert str(b_note) not in [e["path"] for e in result.existing]
+    assert b_note.read_text(encoding="utf-8") == b_text
+
+
+_A, _B = FILE_ID.encode(), FOREIGN_ID.encode()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # core-09 r4: a lone CR is a YAML line break, so B's identity hides
+        # behind what looked like one comment line.
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n# comment\rplaud_id: " + _B + b"\n---\nForeign body\n",
+            id="r4-lone-cr",
+        ),
+        # core-09 r4: decoding with errors="ignore" deleted the byte that kept
+        # this from being A's id.
+        pytest.param(b"---\nplaud_id: abc123\xffdef456\n---\nForeign body\n", id="r4-invalid-utf8"),
+        pytest.param(b"---\r\nplaud_id: " + _A + b"\r\n---\r\nbody\r\n", id="crlf"),
+        pytest.param(b"---\nplaud_id: " + _A + b"\ntitle: a\x00b\n---\n", id="nul"),
+        pytest.param(b"---\nplaud_id: " + _A + b"\ntitle: a\x0bb\n---\n", id="vertical-tab"),
+        pytest.param(b"---\nplaud_id: " + _A + b"\ntitle: a\x7fb\n---\n", id="del"),
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n# c\xc2\x85plaud_id: " + _B + b"\n---\n", id="nel"
+        ),
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n# c\xe2\x80\xa8plaud_id: " + _B + b"\n---\n",
+            id="line-separator",
+        ),
+        pytest.param(b"\xef\xbb\xbf---\nplaud_id: " + _A + b"\n---\n", id="bom"),
+    ],
+)
+def test_bytes_outside_plain_utf8_lines_mean_no_claim(sandbox, tmp_path: Path, raw: bytes) -> None:
+    note = _same_name_note(sandbox)
+    note.write_bytes(raw)
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_bytes() == raw
+
+
+def test_a_delimiter_cut_by_the_read_limit_is_no_delimiter(sandbox, tmp_path: Path) -> None:
+    # core-09 r5: the 64 KiB read ended right after the `---` that begins a
+    # longer line, which then passed for the closing line; B's identity and
+    # the real end of the block lay beyond the window.
+    prefix = b"---\nplaud_id: " + _A + b"\n#"
+    prefix += b"x" * (65533 - len(prefix) - 1) + b"\n"
+    raw = prefix + b"---not-a-delimiter: x\nplaud_id: " + _B + b"\n---\nForeign body\n"
+    assert len(raw) == 65595
+    note = _same_name_note(sandbox)
+    note.write_bytes(raw)
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_bytes() == raw
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A large block whose closing line is complete inside the window.
+        pytest.param(
+            b"---\nplaud_id: " + _A + b"\n#" + b"x" * 60000 + b"\n---\n" + b"y" * 10000,
+            id="large-but-complete",
+        ),
+        # The file ends on the closing line itself (no newline after it).
+        pytest.param(b"---\nplaud_id: " + _A + b"\n---", id="ends-at-the-delimiter"),
+    ],
+)
+def test_a_complete_delimiter_line_still_closes_the_block(
+    sandbox, tmp_path: Path, raw: bytes
+) -> None:
+    note = _same_name_note(sandbox)
+    note.write_bytes(raw)
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"))
+    assert result.status == "duplicate"
+    assert [e["path"] for e in result.existing] == [str(note)]
+
+
+def _never_claimed(sandbox, tmp_path: Path, text: str) -> None:
+    """Sending FILE_ID with `overwrite` and no reference row leaves `text` alone."""
+    note = _same_name_note(sandbox)
+    note.write_text(text, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"), on_duplicate="overwrite")
+    assert (result.action, result.existing) == ("created", [])
+    assert note.read_text(encoding="utf-8") == text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            f'---\ndescription: "Reference for another recording:\nplaud_id: {FILE_ID}\n"\n'
+            f'"plaud_id": {FOREIGN_ID}\n---\nForeign recording original body\n',
+            id="r1-multiline-description-and-quoted-key",
+        ),
+        pytest.param(
+            f'---\ndescription: ["Reference for another recording:\nplaud_id: {FILE_ID}\n'
+            f'# end"]\n---\nForeign recording original body\n',
+            id="r2-flow-collection-wrapping-a-multiline-scalar",
+        ),
+        pytest.param(
+            f"---\nplaud_id: {FILE_ID}\nplaud_id\t: {FOREIGN_ID}\n---\nForeign body\n",
+            id="r3-tab-before-the-colon-after",
+        ),
+        pytest.param(
+            f"---\nplaud_id\t: {FOREIGN_ID}\nplaud_id: {FILE_ID}\n---\nForeign body\n",
+            id="r3-tab-before-the-colon-before",
+        ),
+    ],
+)
+def test_the_reviewers_cases_never_claim_the_note(sandbox, tmp_path: Path, text: str) -> None:
+    _never_claimed(sandbox, tmp_path, text)
+
+
+# Each block also carries this recording's own, correct `plaud_id`: one
+# construct the reader does not model, anywhere, is enough to claim nothing.
+UNSUPPORTED = [
+    pytest.param("tags: [a, b]", id="flow-sequence"),
+    pytest.param("meta: {a: 1}", id="flow-mapping"),
+    pytest.param("notes: |\n  text", id="block-scalar-literal"),
+    pytest.param("notes: >-\n  folded\n  text", id="block-scalar-folded"),
+    pytest.param('description: "line one\n  line two"', id="multiline-double-quoted"),
+    pytest.param("description: 'line one\n  line two'", id="multiline-single-quoted"),
+    pytest.param("description: plain\n  continued", id="multiline-plain"),
+    pytest.param('description: "never closed', id="unclosed-quote"),
+    pytest.param("ref: &anchor value", id="anchor"),
+    pytest.param("ref: *anchor", id="alias"),
+    pytest.param("ref: !!str value", id="tag"),
+    pytest.param('"title": quoted key', id="quoted-key"),
+    pytest.param("meta:\n  nested: 1", id="nested-mapping"),
+    pytest.param("tags:\n- a", id="list-at-column-0"),
+    pytest.param("tags:\n\t- a", id="tab-indent"),
+    pytest.param("tags:\n  - a\n    - b", id="uneven-list-indent"),
+    pytest.param("? key\n: value", id="complex-key"),
+    pytest.param('title: "a\\qb"', id="unknown-escape"),
+    pytest.param("title: a: b", id="mapping-in-a-value"),
+    # The grammar's own edges: no tab anywhere, keys of ASCII words, comments
+    # only at column 0, items only at two spaces.
+    pytest.param("title\t: x", id="tab-before-the-colon"),
+    pytest.param("ti\ttle: x", id="tab-inside-a-key"),
+    pytest.param("title: x\t# c", id="tab-before-a-comment"),
+    pytest.param("title :x", id="space-before-the-colon"),
+    pytest.param("title:x", id="no-space-after-the-colon"),
+    pytest.param("title: # only a comment", id="comment-only-value"),
+    pytest.param("제목: x", id="non-ascii-key"),
+    pytest.param("date  created: x", id="double-space-in-a-key"),
+    pytest.param("  # indented comment", id="indented-comment"),
+    pytest.param("tags: [] # none", id="empty-list-with-a-comment"),
+    pytest.param("tags:\n   - a", id="three-space-item"),
+    pytest.param("  - orphan item", id="item-without-a-key"),
+]
+
+
+@pytest.mark.parametrize(
+    "front",
+    [
+        pytest.param(f"plaud_id: {FILE_ID}\nplaud_id: {FILE_ID}", id="plaud_id-twice-same-value"),
+        pytest.param(f"plaud_id: {FILE_ID}\nsource: plaud\nsource: plaud", id="source-twice"),
+    ],
+)
+def test_an_identity_key_given_twice_means_no_claim(sandbox, tmp_path: Path, front: str) -> None:
+    _never_claimed(sandbox, tmp_path, f"---\n{front}\n---\nbody\n")
+
+
+@pytest.mark.parametrize("construct", UNSUPPORTED)
+@pytest.mark.parametrize("where", ["before", "after"])
+def test_an_unsupported_construct_anywhere_means_no_claim(
+    sandbox, tmp_path: Path, construct: str, where: str
+) -> None:
+    lines = [f"plaud_id: {FILE_ID}", construct]
+    if where == "before":
+        lines.reverse()
+    _never_claimed(sandbox, tmp_path, "---\n" + "\n".join(lines) + "\n---\nbody\n")
+
+
+def test_the_apps_own_note_format_is_still_found(sandbox, tmp_path: Path) -> None:
+    from core.frontmatter import CmdsFrontmatter
+
+    front = CmdsFrontmatter(
+        type="meeting",
+        description='Plaud recording note: "주간 회의". Generated from the integrated output.',
+        tags=["plaud", "meeting"],
+        aliases=["주간 회의", "weekly: sync"],
+        author="테스터",
+        model="claude",
+        date_created="2026-05-29T14:30",
+        date="2026-05-29",
+        cmds="📚 840 Lectures",
+        index="🏷 Meeting Notes",
+        plaud_id=FILE_ID,
+        dual=True,
+        speakers=["구요한", "John Smith"],
+        attendees=["구요한"],
+        keywords=["옵시디언", "AI #교육"],
+        related=["Obsidian"],
+        reuse_channels=["newsletter:idea"],
+        extra={"content_kind": "integrated (claude__integrated)"},
+    ).render()
+    sparse = CmdsFrontmatter(type="note", description="x", plaud_id=FILE_ID).render()
+    assert "aliases: []" in sparse and "tags: []" in sparse
+    for text in (front, sparse):
+        note = _same_name_note(sandbox)
+        note.write_text(text + "\n\nbody\n", encoding="utf-8")
+        result = vault_send(FILE_ID, storage=Storage(tmp_path / f"{len(text)}.db"))
+        assert result.status == "duplicate", text
+        assert [e["path"] for e in result.existing] == [str(note)]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        f'---\nplaud_id: "{FILE_ID}"\n---\n',
+        f"---\nplaud_id: '{FILE_ID}'  \n---\n",
+        f"---\nplaud_id: {FILE_ID} # sent from the laptop\n---\n",
+        f'---\ntitle: "주간 회의 · 2026"\nplaud_id: {FILE_ID}\n---\n',  # UTF-8 beyond ASCII
+        # core-09 r1 #2: a quoted id followed by a comment.
+        f'---\nplaud_id: "{FILE_ID}" # correct owner\n---\nOriginal\n',
+        f"---\nplaud_id: '{FILE_ID}'  # after two spaces\n---\n",
+        # Rule 2 items, the `[]` literal, a multi-word key.
+        f"---\ntags:\n  - a\n  - 'b' # c\naliases: []\ndate created: x\nplaud_id: {FILE_ID}\n---\n",
+        # Rules 3 and 4: a column-0 comment and blank lines.
+        f"---\n# a comment\nplaud_id: {FILE_ID}\n\n   \n---\n",
+    ],
+)
+def test_a_genuine_same_recording_note_is_still_found(sandbox, tmp_path: Path, text: str) -> None:
+    note = _same_name_note(sandbox)
+    note.write_text(text, encoding="utf-8")
+    result = vault_send(FILE_ID, storage=Storage(tmp_path / "fresh.db"))
+    assert result.status == "duplicate"
+    assert [e["path"] for e in result.existing] == [str(note)]
+
+
+# ----- related links stay inside the vault they point into ----------------
+
+
+@pytest.fixture()
+def linked(sandbox, monkeypatch: pytest.MonkeyPatch, index_note):
+    """The sandbox with the real related-note lookup and a wiki next to it."""
+    monkeypatch.setattr(vault_index_mod, "related_notes", _real_related_notes)
+    wiki = sandbox["tmp"] / "CMDS_LLM_Wiki"
+    wiki.mkdir()
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(wiki))
+    st = sandbox["storage"]
+    st.upsert_file(PlaudFile(id=FILE_ID, filename="회의"), now=1)
+    st.save_content(
+        FileContent(
+            file_id=FILE_ID,
+            title="회의",
+            keywords=["Obsidian", "LLM Wiki Pattern", "Talk"],
+            transcript=[TranscriptSegment(start_time=0, end_time=1, speaker="A", content="x")],
+        ),
+        now=1,
+    )
+    index_note(sandbox["vault"], "Tools/Obsidian.md")
+    index_note(wiki, "20. Wiki/21. Concepts/LLM Wiki Pattern.md", note_type="concept")
+    index_note(wiki, "10. Raw Sources/Talk.md", note_type="raw-source")
+    return {**sandbox, "wiki": wiki}
+
+
+def test_a_main_send_links_wiki_pages_by_advanced_uri_only(linked) -> None:
+    _write_integrated(linked["tmp"])
+    text = Path(vault_send(FILE_ID, storage=linked["storage"]).path).read_text(encoding="utf-8")
+    assert 'related:\n  - "[[Obsidian]]"\nwikiVaultRelated:\n' in text
+    link = (
+        "[LLM Wiki: LLM Wiki Pattern](obsidian://advanced-uri?vault=CMDS_LLM_Wiki"
+        "&filepath=20.%20Wiki%2F21.%20Concepts%2FLLM%20Wiki%20Pattern.md)"
+    )
+    assert f'  - "{link}"' in text  # front matter
+    assert f"- {link}" in text  # the body's 관련 노트
+    assert "[[LLM Wiki Pattern]]" not in text and "[[Talk]]" not in text
+    assert "LLM Wiki: Talk" not in text  # raw sources are never linked
+
+
+def test_note_context_does_not_reuse_stored_titles_from_other_vaults(linked, index_note) -> None:
+    st = linked["storage"]
+    index_note(linked["tmp"] / "GOBI", "GobiOnly.md")
+    st.upsert_note_metadata(file_id=FILE_ID, metadata={"related": ["GobiOnly", "Obsidian"]}, now=1)
+    ctx = note_context(st, FILE_ID, build_recording_snapshot(st, FILE_ID))
+    assert ctx["related"] == ["Obsidian"]
+    assert [n["vault"] for n in ctx["main_related"]] == ["vault"]
+    assert [n["title"] for n in ctx["wiki_related"]] == ["LLM Wiki Pattern"]
+
+
+def test_note_context_writes_no_wikilinks_outside_the_main_vault(linked) -> None:
+    st = linked["storage"]
+    other = linked["tmp"] / "Other"
+    other.mkdir()
+    ctx = note_context(st, FILE_ID, build_recording_snapshot(st, FILE_ID), dest_root=other)
+    assert ctx["related"] == []
+    assert [n["title"] for n in ctx["main_related"]] == ["Obsidian"]  # still for cross links
+
+
+def test_a_send_outside_the_main_vault_gets_no_wikilinks(linked, tmp_path: Path) -> None:
+    # core-08 r1 #1: an absolute or `..` --dest writes into another vault, but
+    # the main vault's titles were still written there as `[[…]]`.
+    _write_integrated(linked["tmp"])
+    other = tmp_path / "Other"
+    other.mkdir()
+    for dest in (str(other / "Inbox"), "../Other/ParentInbox"):
+        result = vault_send(FILE_ID, storage=linked["storage"], dest=dest, on_duplicate="new")
+        path = Path(result.path).resolve()
+        assert result.status == "ok" and path.is_relative_to(other.resolve()), dest
+        text = path.read_text(encoding="utf-8")
+        assert "[[Obsidian]]" not in text, dest
+        assert "[LLM Wiki: LLM Wiki Pattern]" in text  # an addressed link is still fine
+    inside = vault_send(
+        FILE_ID, storage=linked["storage"], dest="60. Collections", on_duplicate="new"
+    )
+    assert "[[Obsidian]]" in Path(inside.path).read_text(encoding="utf-8")  # a main subfolder
+
+
+def test_a_configured_wiki_that_is_missing_gives_no_links(linked, tmp_path, monkeypatch) -> None:
+    # core-08 r2: the configured wiki folder is gone (offline, not yet made)
+    # while the old indexed page survives elsewhere; it was still linked.
+    old = linked["wiki"]
+    missing = tmp_path / "offline" / old.name
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(missing))
+    assert (old / "20. Wiki/21. Concepts/LLM Wiki Pattern.md").is_file()
+    assert vault_index_mod.related_notes(["LLM Wiki Pattern"], vaults=[old.name]) == []
+    _write_integrated(linked["tmp"])
+    result = vault_send(FILE_ID, storage=linked["storage"])
+    assert result.status == "ok"
+    text = Path(result.path).read_text(encoding="utf-8")
+    assert "wikiVaultRelated" not in text and "LLM Wiki:" not in text
+    assert '"[[Obsidian]]"' in text  # the main vault's own links are unaffected
+
+
+def test_related_links_refresh_the_index_and_survive_its_failure(sandbox, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def broken(**_k):
+        calls.append("refresh")
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(vault_index_mod, "refresh_if_stale", broken)
+    _write_integrated(sandbox["tmp"])
+    assert vault_send(FILE_ID, storage=sandbox["storage"]).status == "ok"
+    assert calls == ["refresh"]
 
 
 def test_the_duplicate_check_precedes_the_model_call(sandbox, monkeypatch) -> None:

@@ -81,6 +81,15 @@ def integrated_paths(file_id: str, *, model: str, template: str) -> dict[str, Pa
     }
 
 
+def integrated_error_path(file_id: str, *, model: str, template: str) -> Path:
+    """Why this slot's last integrate run failed; absent after a success.
+
+    Same stem as `integrated_paths`, but not `.md`, so no reader of the
+    integrated outputs mistakes it for one.
+    """
+    return integrated_dir(file_id) / f"{_safe(model)}__{_safe(template)}.error.json"
+
+
 def template_path(name: str) -> Path:
     return TEMPLATES_DIR / f"{name}.md"
 
