@@ -975,6 +975,22 @@ def test_a_send_outside_the_main_vault_gets_no_wikilinks(linked, tmp_path: Path)
     assert "[[Obsidian]]" in Path(inside.path).read_text(encoding="utf-8")  # a main subfolder
 
 
+def test_a_configured_wiki_that_is_missing_gives_no_links(linked, tmp_path, monkeypatch) -> None:
+    # core-08 r2: the configured wiki folder is gone (offline, not yet made)
+    # while the old indexed page survives elsewhere; it was still linked.
+    old = linked["wiki"]
+    missing = tmp_path / "offline" / old.name
+    monkeypatch.setenv("PLAUD_WIKI_VAULT", str(missing))
+    assert (old / "20. Wiki/21. Concepts/LLM Wiki Pattern.md").is_file()
+    assert vault_index_mod.related_notes(["LLM Wiki Pattern"], vaults=[old.name]) == []
+    _write_integrated(linked["tmp"])
+    result = vault_send(FILE_ID, storage=linked["storage"])
+    assert result.status == "ok"
+    text = Path(result.path).read_text(encoding="utf-8")
+    assert "wikiVaultRelated" not in text and "LLM Wiki:" not in text
+    assert '"[[Obsidian]]"' in text  # the main vault's own links are unaffected
+
+
 def test_related_links_refresh_the_index_and_survive_its_failure(sandbox, monkeypatch) -> None:
     calls: list[str] = []
 

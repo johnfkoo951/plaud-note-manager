@@ -581,7 +581,8 @@ def test_rows_of_an_old_root_never_become_links(tmp_path, monkeypatch) -> None:
     (old / "Concept.md").write_text("old", encoding="utf-8")
     (old / "Both.md").write_text("old", encoding="utf-8")
     roots = [old]
-    monkeypatch.setattr(vault_index, "configured_vaults", lambda: [("Wiki", roots[0])])
+    # The configured folders, which both the walk list and link checks read.
+    monkeypatch.setattr(vault_index, "_configured_roots", lambda: [roots[0]])
     _real_refresh(now=lambda: 1_000_000.0)
     roots[0] = current
     (current / "NewTopic.md").write_text("new", encoding="utf-8")

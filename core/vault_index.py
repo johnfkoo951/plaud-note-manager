@@ -79,16 +79,21 @@ def configured_vaults() -> list[tuple[str, Path]]:
     vault, then the wiki. Each is indexed from its own folder, so a wiki set
     outside the main vault's parent is found too; a wiki that is the main
     vault itself is listed once."""
-    from .vault_send import wiki_vault  # here: vault_send imports this module
-
     out: list[tuple[str, Path]] = []
     seen: set[Path] = set()
-    for root in (app_config.obsidian_vault(), wiki_vault()):
-        if root is None or not root.is_dir() or root.resolve() in seen:
+    for root in _configured_roots():
+        if not root.is_dir() or root.resolve() in seen:
             continue
         seen.add(root.resolve())
         out.append((root.name, root))
     return out
+
+
+def _configured_roots() -> list[Path]:
+    """The configured main and wiki folders, whether or not they exist now."""
+    from .vault_send import wiki_vault  # here: vault_send imports this module
+
+    return [root for root in (app_config.obsidian_vault(), wiki_vault()) if root is not None]
 
 
 def default_vaults() -> list[str]:
@@ -567,6 +572,8 @@ def _first_match(
     configured folder), a row counts only if it is the file at
     `root/rel_path` — what a link to `vault` + `rel_path` opens — so rows
     left from an earlier folder never become links."""
+    if root is not None and not root.is_dir():
+        return None  # configured but missing now: no link could open, old rows or not
     esc = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     current = root.resolve() if root is not None else None
     for kind, confidence, condition in _MATCHES:
@@ -637,7 +644,9 @@ def related_notes(
         ).fetchone()
         if not has_table:
             return []
-        roots = dict(configured_vaults())
+        # Every configured folder, missing ones included: a configured vault
+        # never falls back to rows of an older folder.
+        roots = {root.name: root for root in _configured_roots()}
         found: list[dict[str, str]] = []
         seen: set[tuple[str, str]] = set()
         for term in clean:
