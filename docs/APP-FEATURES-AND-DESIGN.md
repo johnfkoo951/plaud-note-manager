@@ -943,6 +943,13 @@ model 미설정 상태에서 낮은 품질의 대량 fallback을 만드는 대�
 incremental vault index는 변경 파일 upsert는 하지만 삭제·이동된 note를 자동 purge하는
 완전한 reconciliation은 아직 없다. YAML parser도 nested mapping 전체를 지원하지 않는다.
 
+관련 노트(`related` / `wikiVaultRelated`)는 실제로 쓰는 목적지 볼트 안에서만 찾는다. 조회는 볼트를
+지정하고 인덱스 행의 파일이 지금 존재하는지 확인하므로, 다른 볼트에만 있는 노트가 `[[…]]`로
+들어가지 않는다. 메인과 위키는 각자 자기 루트로 인덱싱되며, 메인 노트는 위키의 컴파일된 노트만
+advanced-uri 링크(`wikiVaultRelated`)로 연결한다(raw source 제외). 인덱스는 링크를 계산할 때
+볼트마다 시간당 한 번 증분 갱신하고, 갱신이 실패해도 송출은 막지 않는다. `vault-index --vault
+main|wiki|<path>`로 직접 갱신할 수 있다. 설정에서 빠진 예전 볼트의 인덱스 행은 남겨 두지만 링크에는 쓰이지 않는다.
+
 **`vault-send`와 Wiki**
 
 `vault-send`는 Wiki에 쓰지 않는다. Wiki는 raw source만 받으며, `vault-compose --to wiki`가
@@ -1031,6 +1038,13 @@ incremental vault index는 변경 파일 upsert는 하지만 삭제·이동된 n
 - Claude/Codex/Gemini/Grok CLI OAuth 상태 확인
 - vendor CLI interactive login 시작
 - backend/model/path 설정
+
+모델 호출이 실패하면 사유를 그 작업의 자리에 남긴다: 자동 metadata는 `metadata_json.auto_meta`의
+`last_error`/`last_error_at`(공급자 장애면 배치를 멈추고 `stopped`로 보고), classify 보조는 행마다
+`llm_status`/`llm_error`, integrate는 `<model>__<template>.error.json`(성공하면 삭제). CLI는
+`model call failed: <사유>`를 출력하고 exit 1로 끝난다. 사유는 통제된 문구(시간 초과, 쿼터, 로그인,
+HTTP 상태 등)만 쓰며 공급자 진단 원문·응답 본문·프롬프트·키는 저장하지 않는다. 호출 전 사전 점검은
+하지 않는다(`model_available()`은 실행 파일·키 존재만 본다).
 
 ## 7. 인증 설계
 

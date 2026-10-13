@@ -165,6 +165,9 @@ uv run plaud vault-compose <id> --to wiki --template note-lecture \
 `vault-send`가 아니라 `vault-compose --to wiki`로 보내며, 수집 목적
 (`--collection-purpose`)이 필요합니다. wiki 볼트 경로는 메인 볼트 옆
 `CMDS_LLM_Wiki`를 자동 인식하며 `plaud config-wiki-vault`로 바꿀 수 있습니다.
+같은 녹음을 같은 볼트에 다시 보내면 기본(`--on-duplicate ask`)은 아무것도 쓰지 않고
+기존 노트를 알려 줍니다 — `--on-duplicate skip|overwrite|new`로 정합니다(위키는
+덮어쓰기 불가, `new`는 새 버전). 앱에서는 열기·덮어쓰기·새로 만들기·취소를 묻습니다.
 앱에서는 Work Sidebar의 **Send to Vault** 메뉴(모드/목적지 선택), 각 슬롯
 카드의 ✈ 버튼(그 결과물만 전송), ⌘K 커맨드 팔레트에서 사용합니다.
 

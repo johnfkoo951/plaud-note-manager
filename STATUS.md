@@ -1,6 +1,21 @@
 # Plaud Note Manager — Development Status
 
-마지막 업데이트: 2026-09-22
+마지막 업데이트: 2026-10-13
+
+### 2026-10-13 백로그 A–J 라운드 (OpenRig 팀)
+`docs/BACKLOG.md` A–J를 OpenRig 리그(Claude 빌더 2 + Codex 리뷰어 1)로 처리. 모든 태스크는 정확한
+커밋 단위로 독립 리뷰 PASS 후 통합했고, 전체 diff를 서로 다른 두 모델로 다시 리뷰해 교차 결함을 추가 수정.
+- [x] 템플릿 계약: front matter `kind`(summary·integrated·internal)·`deprecated`·`replaced_by`, Python·Swift 동일 해석, 잘못된 kind는 모델 호출 전에 거부, `templates`/`template-show --json`·원문 그대로 출력 (A1, F).
+- [x] 설정 › Templates 읽기 전용 보기, 슬롯은 템플릿 kind대로 열리고 Generate All도 kind별 실행 (A1, F).
+- [x] `cmds-*` 템플릿 deprecated(새 슬롯 선택지에서 숨김), summarize 기본값 `note-general` (D, E).
+- [x] 화자 이름은 쉼표로만 분리·NFC 정규화·자리표시자 제외 (B).
+- [x] 위키는 `vault-compose --to wiki`(수집 목적 필수)로만; `vault-send`는 위키로 떨어지는 모든 대상을 거절 (C). 앱에 템플릿 작성 시트 (A2).
+- [x] 같은 녹음 재전송 시 기본 "묻기"(열기·덮어쓰기·새로·취소), 위키는 덮어쓰기 불가, 소유권은 노트 자신의 식별자로만 판정·이해 못 하는 front matter는 주장 안 함 (G).
+- [x] 모델 호출 실패 사유를 호출 지점별로 기록·표시(프롬프트·키는 저장하지 않음) (J).
+- [x] 관련 노트 링크는 실제 목적지 볼트 안에서만, 위키도 인덱싱·시간당 자동 갱신 (H).
+- [x] `vault_lint` 조건식 명시화, ruff format 기준선 (I).
+- 남은 것: K(Gemini 무료 티어 차단)는 외부 요인. dual-send 중복·legacy `plaud obsidian`·meeting-note 덮어쓰기는 G 범위 밖.
+- 이 라운드 이전에 빌드된 앱은 새 CLI와 함께 쓰면 위키 전송(`wiki_unsupported`)·재전송(`duplicate`)·요약 모드 `default` 슬롯(`bad_template`)에서 막힌다 — 같은 커밋으로 앱을 다시 빌드해 설치.
 
 ### 2026-09-22 대화 중심 워크스페이스
 - [x] 카드별 실행 작업 스피너·이름·병렬 슬롯 수 표시.

@@ -195,6 +195,8 @@ CLI는 `--on-duplicate skip|overwrite|new` 플래그.
 
 **해결 (2026-10-12):** `vault-send`·`vault-compose`에 `--on-duplicate ask|skip|overwrite|new`(기본 ask, 모델·Terminal 전에 판단)를 더했고, 앱은 열기·덮어쓰기·새로 만들기·취소 대화상자로 같은 요청을 다시 실행한다(위키·Claude Terminal은 덮어쓰기 없음) — core-06 60ff8d9, app-04 6f2ee73
 
+**추가 수정 (2026-10-13):** 전체 diff 리뷰 두 건이 찾은 교차 결함 — 다른 녹음의 노트를 소유자로 오인하던 동일 이름 판정과 오래된 참조 행을 노트 자신의 식별자(`plaud_id`·위키 `source`)로만 확인하고, 이해할 수 없는 front matter는 소유권을 주장하지 않게 했다; 회의록 실행이 송출 참조를 `draft`로 바꾸던 것도 막았다 — core-09 7502bd0, core-10 03b2c57
+
 ---
 
 ## H. 위키 볼트 미인덱싱
@@ -216,6 +218,8 @@ def default_vaults() -> list[str]:
 
 **조치**: `default_vaults()`가 위키도 포함하도록 확장. 단 `vault_notes` 행에 볼트 구분이
 있으므로 교차 볼트 링크는 **advanced-uri로만** 만들어야 한다(`[[…]]` 금지).
+
+**해결 (2026-10-13):** 관련 노트 조회를 실제로 쓰는 목적지 볼트로 한정하고 파일 존재를 확인하며(다른 볼트 노트가 `[[…]]`로 들어가던 잠복 결함 포함), 위키도 자기 루트로 인덱싱해 메인 노트에는 컴파일된 위키 노트만 `wikiVaultRelated`로 연결한다; 인덱스는 링크 계산 시 시간당 1회 증분 갱신하며 실패해도 송출을 막지 않는다 — core-08
 
 ---
 
@@ -256,6 +260,8 @@ if "source: plaud" not in text.split("\n---", 2)[0] if text.startswith("---") el
 **남은 것**: 다른 호출 지점(`auto_metadata`, `classify`, `integrate`)은 여전히 게이트만 믿는다.
 매 호출 프리플라이트는 비용이 들어 권하지 않고, 대신 **실패 사유를 저장·표시**하는 패턴을
 `dual_speakers`처럼 확산시키는 편이 낫다.
+
+**해결 (2026-10-13):** auto_metadata·classify 보조·integrate가 실패 사유를 각자의 자리에 기록하고(`auto_meta.last_error`, `llm_status`/`llm_error`, `<model>__<template>.error.json`) 앱이 해당 위치에 표시한다; 공급자 진단 원문·프롬프트·키는 저장하지 않고 통제된 사유 문구만 남긴다 — core-07 77051f5, app-05 7348815
 
 ---
 
