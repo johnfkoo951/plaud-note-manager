@@ -122,7 +122,7 @@ private struct PlaudLoginWindowView: View {
                         .keyboardShortcut(.cancelAction)
                         .disabled(validating)
                 }
-                Text("기존 계정과 같은 로그인 방식을 사용하세요. Google 패스키가 실패하면 Google 화면에서 ‘다른 방법 시도’를 선택하세요.")
+                Text("Plaud 화면의 ‘Sign in with a code’로 계정 이메일에 온 코드를 입력하세요(권장 — 같은 계정으로 연결됩니다). 앱 창 안의 Google 로그인은 패스키 단계에서 막힐 수 있습니다.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(alignment: .top) {

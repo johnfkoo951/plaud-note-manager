@@ -93,8 +93,8 @@ enum PlaudLoginNavigationStatus: Equatable {
         switch self {
         case .plaud: return "Plaud 로그인 진행 중입니다. 로그인 후 연결 상태를 확인합니다."
         case .googleSignIn: return "Google 로그인 화면입니다. 같은 Google 계정으로 인증을 완료하면 Plaud로 돌아갑니다."
-        case .googlePasskey: return "Google 패스키 인증 화면입니다. 기기 인증을 완료하거나 Google의 ‘다른 방법 시도’를 직접 선택해주세요."
-        case .googlePasskeyError: return "Google 패스키 인증에 실패했습니다. Google의 ‘다른 방법 시도’로 같은 계정의 다른 인증 방법을 선택할 수 있습니다."
+        case .googlePasskey: return "Google 패스키 인증 화면입니다. 앱 창에서는 이 단계가 끝까지 완료되지 않을 수 있습니다 — Google 창을 닫고 Plaud 화면의 ‘Sign in with a code’로 같은 이메일에 온 코드를 입력하세요."
+        case .googlePasskeyError: return "Google 패스키 인증에 실패했습니다. 앱 창에서는 비밀번호·문자 인증 뒤에도 이 단계에서 막힐 수 있습니다 — Google 창을 닫고 Plaud 화면의 ‘Sign in with a code’로 같은 이메일에 온 코드를 입력하세요."
         case .googleUnsupported: return "Google이 이 로그인 환경을 지원하지 않는다고 표시했습니다. 외부 브라우저에서 Plaud를 열어 같은 Google 계정으로 로그인해주세요."
         case .other: return "외부 인증 화면에서 로그인을 진행 중입니다."
         }

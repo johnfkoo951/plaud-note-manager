@@ -42,6 +42,8 @@ final class PlaudWebCapturePolicyTests: XCTestCase {
         let status = PlaudLoginNavigationStatus.classify(URL(string: "https://accounts.google.com/v3/signin/challenge/pk/error?token=synthetic-sensitive"))
         XCTAssertEqual(status, .googlePasskeyError)
         XCTAssertTrue(status.message.contains("Google 패스키"))
+        XCTAssertTrue(status.message.contains("Sign in with a code"))
+        XCTAssertTrue(PlaudLoginNavigationStatus.googlePasskey.message.contains("Sign in with a code"))
         XCTAssertFalse(status.message.contains("synthetic-sensitive"))
         XCTAssertEqual(PlaudLoginNavigationStatus.classify(URL(string: "https://accounts.google.com/v3/signin/challenge/pk")), .googlePasskey)
         XCTAssertEqual(PlaudLoginNavigationStatus.classify(URL(string: "https://accounts.google.com/signin?error=disallowed_useragent")), .googleUnsupported)
