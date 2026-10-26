@@ -125,10 +125,10 @@ final class VaultComposeArgumentsTests: XCTestCase {
     func testCostCaptionNamesComposesOwnModelAndConditionalReuse() {
         let main = VaultComposeCaption.cost(vault: "main")
         XCTAssertTrue(main.contains("Metadata model"))
-        XCTAssertFalse(main.contains("Cross-analysis"))
+        XCTAssertFalse(main.contains("최종본 모델"))
 
         let wiki = VaultComposeCaption.cost(vault: "wiki")
-        XCTAssertTrue(wiki.contains("Cross-analysis model"))
+        XCTAssertTrue(wiki.contains("최종본 모델"))
         XCTAssertTrue(wiki.contains("비어 있으면 Metadata model"), "dual_model falls back to metadata_model")
 
         for caption in [main, wiki, VaultComposeCaption.cost(vault: "")] {

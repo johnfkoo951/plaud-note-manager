@@ -905,6 +905,10 @@ private struct SettingsSheet: View {
 
     @State private var config: Database.AppConfig = Database.shared.loadAppConfig()
     @State private var presets: [ModelPresetVM] = []
+    /// Glossary/roster note locations as the CLI resolves them.
+    @State private var glossary: GlossaryInfo?
+    @State private var glossaryDraft = ""
+    @State private var contextDraft = ""
     @AppStorage("defaultContentViewMode") private var defaultViewModeRaw: String =
         ContentViewMode.rendered.rawValue
     @AppStorage("appearanceMode") private var appearanceModeRaw: String =
@@ -1046,8 +1050,8 @@ private struct SettingsSheet: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    section("Dual transcribe") {
-                        settingsRow("Cross-analysis model") {
+                    section("최종본 (Plaud × CMDS)") {
+                        settingsRow("최종본 모델") {
                             Picker("", selection: Binding(
                                 get: { config.dualModel.isEmpty
                                        ? config.metadataModel : config.dualModel },
@@ -1066,6 +1070,50 @@ private struct SettingsSheet: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    section("용어집") {
+                        noteRow("용어집 노트", draft: $glossaryDraft,
+                                placeholder: glossary?.glossaryDefault ?? "",
+                                resolved: glossary?.glossaryResolved,
+                                exists: glossary?.glossaryExists) { value in
+                            await store.setGlossary(path: value)
+                        }
+                        noteRow("실명 로스터", draft: $contextDraft,
+                                placeholder: glossary?.contextDefault ?? "",
+                                resolved: glossary?.contextResolved,
+                                exists: glossary?.contextExists) { value in
+                            await store.setGlossary(context: value)
+                        }
+                        settingsRow("자동 갱신") {
+                            Toggle("", isOn: Binding(
+                                get: { glossary?.autoUpdate ?? true },
+                                set: { newVal in
+                                    glossary?.autoUpdate = newVal
+                                    Task {
+                                        if let info = await store.setGlossary(autoUpdate: newVal) {
+                                            glossary = info
+                                        }
+                                    }
+                                }
+                            ))
+                            .toggleStyle(.switch)
+                            .labelsHidden()
+                        }
+                        Text("최종본을 만들 때와 화자 이름을 추천할 때 두 노트를 프롬프트에 넣습니다. "
+                             + "자동 갱신을 켜면 최종본이 나온 뒤 새 이름·용어 후보를 용어집의 "
+                             + "「검토 대기」 섹션에 덧붙입니다(녹음당 한 번, Metadata 모델). "
+                             + "경로는 볼트 기준 상대 경로, 또는 / · ~/ 로 시작하는 절대 경로. 비우면 기본값.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .task {
+                        if let info = await store.glossaryInfo() {
+                            glossary = info
+                            glossaryDraft = info.glossaryPath
+                            contextDraft = info.contextPath
+                        }
                     }
 
                     section("Metadata") {
@@ -1183,8 +1231,9 @@ private struct SettingsSheet: View {
         let model = config.dualModel.isEmpty ? config.metadataModel : config.dualModel
         let route = (config.backends[model] ?? "cli") == "api" ? "API" : "CLI (구독)"
         let inherited = config.dualModel.isEmpty ? " — metadata 설정을 따름" : ""
-        return "Dual Transcribe의 Plaud × ElevenLabs 교차분석을 \(model) \(route)로 실행합니다\(inherited). "
-            + "전사본 두 벌을 한 프롬프트에 담으므로 컨텍스트 여유가 있는 모델이 유리합니다."
+        return "최종본 만들기(ElevenLabs 전사 → Plaud 전사와 비교)를 \(model) \(route)로 실행합니다\(inherited). "
+            + "전사본 두 벌을 한 프롬프트에 담으므로 컨텍스트 여유가 있는 모델이 유리합니다. "
+            + "AI 작업 탭의 슬롯은 각자의 모델을 씁니다."
     }
 
     private var metadataModelCaption: String {
@@ -1288,6 +1337,68 @@ private struct SettingsSheet: View {
                 .frame(width: 118, alignment: .leading)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// A vault note location: typed (Enter saves), picked, or opened. Shows
+    /// where it resolves and whether the note is there.
+    private func noteRow(
+        _ label: String,
+        draft: Binding<String>,
+        placeholder: String,
+        resolved: String?,
+        exists: Bool?,
+        save: @escaping (String) async -> GlossaryInfo?
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 10) {
+                Text(label)
+                    .frame(width: 110, alignment: .leading)
+                    .foregroundStyle(.secondary)
+                TextField(placeholder, text: draft, onCommit: {
+                    let value = draft.wrappedValue
+                    Task { if let info = await save(value) { glossary = info } }
+                })
+                .textFieldStyle(.roundedBorder)
+                Button {
+                    let panel = NSOpenPanel()
+                    panel.canChooseFiles = true
+                    panel.canChooseDirectories = false
+                    panel.allowedContentTypes = [.init(filenameExtension: "md")].compactMap { $0 }
+                    if let resolved, !resolved.isEmpty {
+                        panel.directoryURL = URL(fileURLWithPath: resolved).deletingLastPathComponent()
+                    }
+                    if panel.runModal() == .OK, let url = panel.url {
+                        draft.wrappedValue = url.path
+                        Task { if let info = await save(url.path) { glossary = info } }
+                    }
+                } label: {
+                    Image(systemName: "doc.badge.plus")
+                }
+                .buttonStyle(.borderless)
+                .help("노트 고르기")
+                Button {
+                    if let resolved, !resolved.isEmpty { store.openPath(resolved) }
+                } label: {
+                    Image(systemName: "arrow.up.forward.app")
+                }
+                .buttonStyle(.borderless)
+                .disabled(exists != true)
+                .help("노트 열기")
+            }
+            if let resolved {
+                HStack(spacing: 4) {
+                    Image(systemName: exists == true ? "checkmark.circle.fill" : "xmark.circle")
+                        .foregroundStyle(exists == true ? Color.green : Color.orange)
+                    Text(resolved.isEmpty ? "볼트가 설정되지 않았습니다" : resolved)
+                        .lineLimit(1)
+                        .truncationMode(.head)
+                        .textSelection(.enabled)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .padding(.leading, 120)
+            }
+        }
     }
 
     private func pathRow(_ label: String, kind: String,
@@ -2431,7 +2542,7 @@ private struct FileRow: View {
                     Image(systemName: "bolt.badge.waveform")
                         .font(.system(size: 9.5, weight: .semibold))
                         .foregroundStyle(dualColor)
-                        .help("Dual: \(file.dualStatus ?? "")")
+                        .help("최종본: \(file.dualStatus ?? "")")
                 }
                 if let folderLabel {
                     if file.durationMs != nil { dotSeparator }
@@ -3718,7 +3829,7 @@ private struct RecordingInfoPanel: View {
             }
             Divider()
             VStack(alignment: .leading, spacing: 8) {
-                Text("듀얼 전사·재사용").font(.headline)
+                Text("최종본·재사용").font(.headline)
                 dualReuseRow
             }
             Divider()
@@ -3814,12 +3925,6 @@ private struct RecordingInfoPanel: View {
     private var dualReuseRow: some View {
         VStack(alignment: .leading, spacing: 10) {
             dualControl
-            if let dual = dualForFile, !dual.proposal.isEmpty,
-               dual.status != "relabel-pending", !isDualRunning {
-                Button("화자 이름 확인·수정", action: showSpeakers)
-                    .buttonStyle(.link)
-                    .font(AppUI.metaFont)
-            }
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 100), alignment: .leading)],
                       alignment: .leading, spacing: 6) {
                 ForEach(Self.reuseChannels, id: \.self) { channel in reuseChip(channel) }
@@ -3832,7 +3937,7 @@ private struct RecordingInfoPanel: View {
         if isDualRunning {
             HStack(spacing: 5) {
                 ProgressView().controlSize(.small)
-                Text(dualForFile.map { Self.dualStageLabel($0.status) } ?? "Dual…")
+                Text(dualForFile.map { Self.dualStageLabel($0.status) } ?? "최종본…")
                     .font(AppUI.metaFont)
                     .foregroundStyle(.secondary)
             }
@@ -3886,7 +3991,7 @@ private struct RecordingInfoPanel: View {
                 HStack(spacing: 4) {
                     Image(systemName: "bolt.badge.waveform")
                         .font(.system(size: 10, weight: .semibold))
-                    Text("듀얼 전사 → 통합본")
+                    Text("최종본 만들기")
                         .font(.system(size: 10.5, weight: .semibold))
                 }
                 .padding(.horizontal, 8)
@@ -3895,7 +4000,7 @@ private struct RecordingInfoPanel: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(AppUI.accentPink)
-            .help("ElevenLabs 전사 후 통합 전사본·요약까지 자동 생성합니다. 화자 이름은 나중에 확인할 수 있습니다.")
+            .help("ElevenLabs로 전사하고 Plaud 전사와 비교해 최종본(전사·요약)을 만듭니다. 화자 이름은 최종본 탭에서 한 번에 정합니다.")
         }
     }
 
@@ -3916,7 +4021,7 @@ private struct RecordingInfoPanel: View {
 
     private static func dualStageLabel(_ status: String) -> String {
         switch status {
-        case "marked": return "Dual: marked"
+        case "marked": return "최종본: 대기"
         case "transcribing": return "Transcribing…"
         case "relabel-pending": return "Speakers?"
         case "integrating": return "Integrating…"
@@ -3987,8 +4092,10 @@ private struct RecordingInfoPanel: View {
 
 // MARK: - Plaud Panel
 
-/// Source › Final: the dual pipeline's cross-analyzed final transcript +
-/// comprehensive summary, with one-click clipboard copy for downstream
+/// Source › Final: the final transcript (Plaud × CMDS compared) + summary.
+/// One kind of output whichever button made it — the dual pipeline or an AI
+/// slot's 최종본 mode; when several models made one, pick which to read.
+/// Speakers are named here in one go, with one-click copy for downstream
 /// content work (newsletter, lecture, …).
 private struct FinalPanel: View {
     /// Shared with `ViewModeSegment`'s wrap toggle: wrap prose, or let
@@ -3998,14 +4105,31 @@ private struct FinalPanel: View {
     @ObservedObject var store: FileStore
     @State private var tab: Tab = .transcript
     @State private var copied: String?
+    /// Every final of this recording, newest first; `chosenLabel` nil = newest.
+    @State private var variants: [IntegratedContentVM] = []
+    @State private var chosenLabel: String?
     @AppStorage("defaultContentViewMode") private var viewModeRaw: String =
         ContentViewMode.rendered.rawValue
 
     enum Tab: Hashable { case transcript, summary }
 
-    private var integrated: IntegratedContentVM? {
+    private struct VariantsKey: Equatable {
+        let fileID: String?
+        let newest: IntegratedContentVM?
+        let revision: UInt64
+    }
+
+    private var newest: IntegratedContentVM? {
         guard store.integratedContent?.fileID == store.selectedID else { return nil }
         return store.integratedContent
+    }
+
+    private var integrated: IntegratedContentVM? {
+        if let chosenLabel, let match = variants.first(where: { $0.label == chosenLabel }),
+           match.fileID == store.selectedID {
+            return match
+        }
+        return newest
     }
 
     var body: some View {
@@ -4022,17 +4146,30 @@ private struct FinalPanel: View {
                 emptyState
             }
         }
-        .onChange(of: store.selectedID) { _, _ in tab = .transcript; copied = nil }
+        .onChange(of: store.selectedID) { _, _ in
+            tab = .transcript; copied = nil; chosenLabel = nil; variants = []
+        }
+        .task(id: VariantsKey(fileID: store.selectedID, newest: newest,
+                              revision: store.contentRevision)) {
+            guard let fid = store.selectedID else { return }
+            let loaded = await Task.detached(priority: .userInitiated) {
+                Database.shared.integratedVariants(for: fid)
+            }.value
+            guard !Task.isCancelled, fid == store.selectedID else { return }
+            variants = loaded
+        }
     }
 
     private var header: some View {
         HStack(spacing: AppUI.spacingS) {
-            Label("최종본 · Dual (Plaud × ElevenLabs 교차분석)",
+            Label("최종본 · Plaud × CMDS 비교",
                   systemImage: "bolt.badge.waveform")
                 .font(AppUI.sectionFont)
                 .foregroundStyle(.secondary)
-            if let label = integrated?.label {
-                Text(label)
+            if variants.count > 1 {
+                variantMenu
+            } else if let label = integrated?.label {
+                Text(Self.variantName(label))
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.tertiary)
             }
@@ -4050,6 +4187,35 @@ private struct FinalPanel: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+    }
+
+    /// Several models made a final for this recording: read any of them.
+    private var variantMenu: some View {
+        Menu {
+            ForEach(Array(variants.enumerated()), id: \.element.label) { index, variant in
+                Button {
+                    chosenLabel = index == 0 ? nil : variant.label
+                } label: {
+                    if variant.label == integrated?.label {
+                        Label(Self.variantName(variant.label) + (index == 0 ? " · 최신" : ""),
+                              systemImage: "checkmark")
+                    } else {
+                        Text(Self.variantName(variant.label) + (index == 0 ? " · 최신" : ""))
+                    }
+                }
+            }
+        } label: {
+            Text("\(Self.variantName(integrated?.label ?? "")) (\(variants.count))")
+                .font(.system(size: 10.5, design: .monospaced))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("이 녹음의 최종본 \(variants.count)개 — 모델별로 골라 보기")
+    }
+
+    /// `claude-fable-5-1__integrated` → `claude-fable-5-1 · integrated`.
+    static func variantName(_ label: String) -> String {
+        label.replacingOccurrences(of: "__", with: " · ")
     }
 
     /// Copy for downstream context use: current tab, or both stitched.
@@ -4092,11 +4258,17 @@ private struct FinalPanel: View {
             if integrated.transcript.isEmpty {
                 CenteredStateView(message: "최종 전사본 섹션이 비어 있습니다.",
                                   systemImage: "bolt.badge.waveform")
-            } else if mode == .raw {
-                RawTextView(wrapLines: wrapLines, text: integrated.transcript)
             } else {
-                TranscriptBubbleList(text: integrated.transcript,
-                                     selfNames: store.selfSpeakerNames)
+                VStack(alignment: .leading, spacing: 10) {
+                    SpeakerNamingBar(store: store, fileID: integrated.fileID,
+                                     transcript: integrated.transcript)
+                    if mode == .raw {
+                        RawTextView(wrapLines: wrapLines, text: integrated.transcript)
+                    } else {
+                        TranscriptBubbleList(text: integrated.transcript,
+                                             selfNames: store.selfSpeakerNames)
+                    }
+                }
             }
         case .summary:
             if integrated.summary.isEmpty {
@@ -4114,8 +4286,8 @@ private struct FinalPanel: View {
         VStack(spacing: AppUI.spacingM) {
             CenteredStateView(
                 message: store.dualRunningIDs.contains(store.selectedID ?? "")
-                    ? "듀얼 전사·통합을 처리하고 있습니다. 완료되면 최종본이 표시됩니다."
-                    : "아직 듀얼 최종본이 없습니다.\n우측 정보·정리 탭의 Dual Transcribe로 생성하세요\n(ElevenLabs 전사 → 실명 확인 → Plaud×CMDS 교차분석).",
+                    ? "최종본을 만들고 있습니다. 완료되면 여기에 표시됩니다."
+                    : "아직 최종본이 없습니다.\nElevenLabs로 전사한 뒤 Plaud 전사와 비교해 최종본을 만듭니다.\n(AI 작업 탭의 슬롯에서 최종본 모드로 만들어도 같습니다.)",
                 loading: store.dualRunningIDs.contains(store.selectedID ?? ""),
                 systemImage: "bolt.badge.waveform"
             )
@@ -4123,7 +4295,7 @@ private struct FinalPanel: View {
                 Button {
                     Task { await store.runDual(id) }
                 } label: {
-                    Label("Dual Transcribe 시작", systemImage: "bolt.badge.waveform")
+                    Label("최종본 만들기", systemImage: "bolt.badge.waveform")
                 }
                 .disabled(store.dualRunningIDs.contains(id))
             }
@@ -4543,10 +4715,15 @@ private struct CmdsPanel: View {
                     controlBar
                     Divider()
                     if let cmds = store.cmdsTranscript, !cmds.isEmpty {
+                        if let fid = store.selectedID {
+                            SpeakerNamingBar(store: store, fileID: fid, transcript: cmds)
+                        }
                         if sections.count > 1 {
-                            sectionRelabelBars
-                        } else {
-                            flatRelabelBar
+                            DisclosureGroup("구간별로 다르게 지정 (한 녹음에 여러 대화)") {
+                                sectionRelabelBars
+                                    .padding(.top, 6)
+                            }
+                            .font(AppUI.metaFont)
                         }
                         if (ContentViewMode(rawValue: viewModeRaw) ?? .rendered) == .raw {
                             RawTextView(wrapLines: wrapLines, text: cmds)
@@ -4681,13 +4858,6 @@ private struct CmdsPanel: View {
             Spacer()
             Button("Manage saved speakers") { managingSpeakers = true }
                 .buttonStyle(.borderless)
-        }
-    }
-
-    @ViewBuilder
-    private var flatRelabelBar: some View {
-        if let only = sections.first, !only.speakers.isEmpty {
-            sectionRelabelRow(section: only, label: "Speakers")
         }
     }
 
@@ -4961,7 +5131,7 @@ private struct AIInspectorPanel: View {
     enum SlotMode: String, CaseIterable, Identifiable {
         case summary, integrated
         var id: String { rawValue }
-        var label: String { self == .summary ? "Summary" : "Integrated" }
+        var label: String { self == .summary ? "Summary" : "최종본" }
         /// Segment icon: plain doc for the single-summary path, merge arrows
         /// for the integrated (Plaud + CMDS) pipeline.
         var icon: String {
@@ -4974,7 +5144,7 @@ private struct AIInspectorPanel: View {
         var caption: String {
             self == .summary
                 ? "Plaud 전사·요약만 사용해 단일 요약 생성"
-                : "Plaud + CMDS 전사를 통합해 최종 전사본 + 요약 생성"
+                : "Plaud × CMDS 전사를 비교해 최종본(전사 + 요약) 생성 — 최종본 탭에 표시"
         }
     }
 

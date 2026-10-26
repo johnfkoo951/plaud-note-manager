@@ -7,7 +7,7 @@ enum RecordingActivity {
                          vault: Set<String>, transcribing: Set<String>, relabeling: Set<String>,
                          fetching: Set<String>, summaryKeys: Set<String>) -> [String: [String]] {
         var result: [String: [String]] = [:]
-        for (ids, label) in [(dual, "듀얼 전사·통합 중"), (transcribing, "음성 전사 중"),
+        for (ids, label) in [(dual, "최종본 만드는 중"), (transcribing, "음성 전사 중"),
                              (metadata, "메타데이터 생성 중"), (meeting, "회의록 생성 중"),
                              (vault, "볼트 전송 중"), (relabeling, "화자 이름 반영 중"),
                              (fetching, "녹음 데이터 수신 중")] {

@@ -1420,6 +1420,13 @@ final class FileStore: ObservableObject {
     /// progress state in the rename-speakers sheet.
     @Published var plaudRelabelingIDs: Set<String> = []
 
+    /// File IDs with an in-flight local rename (`plaud relabel`) — CMDS
+    /// transcript plus every final transcript. See FileStore+Speakers.
+    @Published var relabelingIDs: Set<String> = []
+
+    /// File IDs waiting on a model speaker-name proposal.
+    @Published var speakerProposingIDs: Set<String> = []
+
     /// Rename speakers in the Plaud SERVER transcript via
     /// `plaud plaud-relabel <id> OLD=NEW …` (the CLI refreshes the local
     /// cache), then re-fetch detail so the UI shows the renamed labels.
@@ -1478,7 +1485,13 @@ final class FileStore: ObservableObject {
         if !modelID.isEmpty {
             args += ["--model-id", modelID]
         }
-        await runPlaud(args: args)
+        if await runPlaud(args: args) {
+            harvestGlossary(fileID)
+        }
+        // The Final tab shows the newest final; this run may have made it.
+        if selectedID == fileID {
+            integratedContent = Database.shared.integratedContent(for: fileID)
+        }
     }
 
     func addSlot(name: String, model: String, modelID: String = "", template: String) async {

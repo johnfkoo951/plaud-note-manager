@@ -1,6 +1,14 @@
 # Plaud Note Manager — Development Status
 
-마지막 업데이트: 2026-10-13
+마지막 업데이트: 2026-10-26
+
+### 2026-10-26 최종본 하나로 · 화자 일괄 지정 · 용어집 루프
+- [x] "듀얼"과 슬롯 "Integrated"를 **최종본** 하나로: 같은 입력(`collect_inputs` + 용어집·로스터), 최종본 탭에서 모델별 최종본 선택.
+- [x] `plaud relabel <id> A=B …` — CMDS 전사 + 모든 최종본 파일의 화자 라벨을 동시에 교체(맞바꾸기 가능, 모델 호출 없음). placeholder는 본문에서도, 실명은 발화 귀속 위치에서만 바꾼다.
+- [x] 앱 화자 바(최종본·CMDS 탭): Plaud·CMDS 타임라인 겹침 + AI 제안으로 이름 추천을 미리 채우고 한 번에 적용, 이후에도 수정. 구간별 지정은 접어 둠.
+- [x] 용어집 노트(기본 `50. Assets/53. Transcription Context/cmds-glossary.md`) — 최종본·화자 추천 프롬프트에 주입, 최종본 뒤 새 이름·용어를 「검토 대기」에 덧붙이는 루프(`glossary-harvest`, 녹음당 1회). 설정 › 용어집에서 경로·자동 갱신.
+- 남은 것: `SpeakerRecommender.prefill` 규칙(신뢰도 하한·소스 우선순위·이름 충돌) 확정, 발화 한 줄 단위 화자 변경.
+
 
 ### 2026-10-13 백로그 A–J 라운드 (OpenRig 팀)
 `docs/BACKLOG.md` A–J를 OpenRig 리그(Claude 빌더 2 + Codex 리뷰어 1)로 처리. 모든 태스크는 정확한

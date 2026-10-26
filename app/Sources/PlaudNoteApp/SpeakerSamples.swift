@@ -104,39 +104,111 @@ enum SpeakerSamples {
         plaudSegmentsJSON: String,
         minShare: Double = 0.34
     ) -> [String: Match] {
-        let cmds = decode(cmdsSegmentsJSON, as: [CmdsSeg].self)
-        let plaud = decode(plaudSegmentsJSON, as: [PlaudSeg].self)
-        guard !cmds.isEmpty, !plaud.isEmpty else { return [:] }
+        overlapMatches(
+            target: spans(cmdsSegmentsJSON: cmdsSegmentsJSON),
+            reference: spans(plaudSegmentsJSON: plaudSegmentsJSON).filter {
+                !isPlaceholderLabel($0.speaker)
+            },
+            minShare: minShare
+        )
+    }
 
-        // overlap[cmdsSpeaker][plaudName] = milliseconds shared
+    // MARK: - 3. Timelines of any transcript
+
+    /// A stretch of speech attributed to one label.
+    struct Span: Hashable {
+        let speaker: String
+        let startMs: Int
+        let endMs: Int
+    }
+
+    static func spans(cmdsSegmentsJSON: String) -> [Span] {
+        decode(cmdsSegmentsJSON, as: [CmdsSeg].self).compactMap { seg in
+            guard let speaker = seg.speaker?.trimmingCharacters(in: .whitespaces),
+                  !speaker.isEmpty else { return nil }
+            let start = seg.start_ms ?? 0
+            return Span(speaker: speaker, startMs: start, endMs: max(start, seg.end_ms ?? start))
+        }
+    }
+
+    /// Plaud carries the display speaker in `speaker`, the raw label in
+    /// `original_speaker`.
+    static func spans(plaudSegmentsJSON: String) -> [Span] {
+        decode(plaudSegmentsJSON, as: [PlaudSeg].self).compactMap { seg in
+            guard let raw = seg.speaker ?? seg.original_speaker else { return nil }
+            let speaker = raw.trimmingCharacters(in: .whitespaces)
+            guard !speaker.isEmpty else { return nil }
+            let start = seg.start_time ?? 0
+            return Span(speaker: speaker, startMs: start, endMs: max(start, seg.end_time ?? start))
+        }
+    }
+
+    /// Spans of a `[HH:MM:SS] label: …` transcript — the final transcript, or
+    /// the CMDS one as the app formats it. A line carries only its start, so it
+    /// runs until the next line starts — capped: a line is judged by its
+    /// opening seconds, which is where its attribution is most reliable, and a
+    /// long pause or monologue does not outweigh many short lines.
+    static func spans(transcript: String, maxLineMs: Int = 12_000) -> [Span] {
+        var starts: [(speaker: String, ms: Int)] = []
+        for line in transcript.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard line.first == "[", let close = line.firstIndex(of: "]"),
+                  let ms = parseTimestamp(line[line.index(after: line.startIndex)..<close])
+            else { continue }
+            let rest = line[line.index(after: close)...]
+            guard let colon = rest.firstIndex(of: ":") else { continue }
+            let speaker = rest[..<colon].trimmingCharacters(in: .whitespaces)
+            guard !speaker.isEmpty else { continue }
+            starts.append((speaker, ms))
+        }
+        return starts.enumerated().map { index, item in
+            let next = index + 1 < starts.count ? starts[index + 1].ms : item.ms + maxLineMs
+            let end = min(max(next, item.ms), item.ms + maxLineMs)
+            return Span(speaker: item.speaker, startMs: item.ms, endMs: end)
+        }
+    }
+
+    /// `1:02:03`, `02:03` or `2:03` → milliseconds; nil for anything else.
+    static func parseTimestamp<S: StringProtocol>(_ raw: S) -> Int? {
+        let parts = raw.trimmingCharacters(in: .whitespaces).split(separator: ":")
+        guard (1...3).contains(parts.count) else { return nil }
+        var seconds = 0.0
+        for part in parts {
+            guard let value = Double(part) else { return nil }
+            seconds = seconds * 60 + value
+        }
+        return Int(seconds * 1000)
+    }
+
+    /// For each label in `target`, the `reference` label sharing the most of
+    /// its speaking time — when that share reaches `minShare`. A speaker split
+    /// evenly across several reference labels yields nothing rather than a
+    /// coin flip.
+    static func overlapMatches(
+        target: [Span],
+        reference: [Span],
+        minShare: Double = 0.34
+    ) -> [String: Match] {
+        guard !target.isEmpty, !reference.isEmpty else { return [:] }
+        let sortedRef = reference.sorted { $0.startMs < $1.startMs }
+
+        // overlap[targetLabel][referenceName] = milliseconds shared
         var overlap: [String: [String: Int]] = [:]
         var total: [String: Int] = [:]
-
-        for c in cmds {
-            guard let speaker = c.speaker, !speaker.isEmpty else { continue }
-            let cStart = c.start_ms ?? 0
-            let cEnd = max(cStart, c.end_ms ?? cStart)
-            guard cEnd > cStart else { continue }
-            total[speaker, default: 0] += cEnd - cStart
-
-            for p in plaud {
-                guard let raw = p.speaker ?? p.original_speaker, !raw.isEmpty else { continue }
-                let name = raw.trimmingCharacters(in: .whitespaces)
-                guard !isPlaceholderLabel(name) else { continue }
-                let pStart = p.start_time ?? 0
-                let pEnd = max(pStart, p.end_time ?? pStart)
-                let shared = min(cEnd, pEnd) - max(cStart, pStart)
+        for span in target where span.endMs > span.startMs {
+            total[span.speaker, default: 0] += span.endMs - span.startMs
+            for ref in sortedRef {
+                if ref.startMs >= span.endMs { break }
+                let shared = min(span.endMs, ref.endMs) - max(span.startMs, ref.startMs)
                 if shared > 0 {
-                    overlap[speaker, default: [:]][name, default: 0] += shared
+                    overlap[span.speaker, default: [:]][ref.speaker, default: 0] += shared
                 }
             }
         }
 
         var out: [String: Match] = [:]
         for (speaker, byName) in overlap {
-            guard let best = byName.max(by: { $0.value < $1.value }) else { continue }
-            let denominator = total[speaker] ?? 0
-            guard denominator > 0 else { continue }
+            guard let best = byName.max(by: { $0.value < $1.value }),
+                  let denominator = total[speaker], denominator > 0 else { continue }
             let share = Double(best.value) / Double(denominator)
             if share >= minShare {
                 out[speaker] = Match(name: best.key, share: min(1.0, share))

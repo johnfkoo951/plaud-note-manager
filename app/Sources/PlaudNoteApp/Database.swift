@@ -1453,6 +1453,17 @@ final class Database: @unchecked Sendable {
     /// Needs no model, so the sheet still works when the provider is
     /// unreachable — which is exactly when the LLM proposal comes back blank.
     func speakerHints(for fileID: String) -> SpeakerHintsVM {
+        let (cmdsJSON, plaudJSON) = speakerSegmentsJSON(for: fileID)
+        return SpeakerHintsVM(
+            samples: SpeakerSamples.samples(segmentsJSON: cmdsJSON),
+            plaudMatches: SpeakerSamples.plaudMatches(
+                cmdsSegmentsJSON: cmdsJSON, plaudSegmentsJSON: plaudJSON)
+        )
+    }
+
+    /// Raw CMDS and Plaud segment JSON — the two timelines speaker
+    /// suggestions are read from. "[]" when a side is missing.
+    func speakerSegmentsJSON(for fileID: String) -> (cmds: String, plaud: String) {
         let cmdsJSON: String = read { db -> String in
             guard let row = try Row.fetchOne(db, sql: """
                 SELECT segments FROM cmds_transcripts
@@ -1469,11 +1480,7 @@ final class Database: @unchecked Sendable {
             return row["transcript"] ?? "[]"
         } ?? "[]"
 
-        return SpeakerHintsVM(
-            samples: SpeakerSamples.samples(segmentsJSON: cmdsJSON),
-            plaudMatches: SpeakerSamples.plaudMatches(
-                cmdsSegmentsJSON: cmdsJSON, plaudSegmentsJSON: plaudJSON)
-        )
+        return (cmdsJSON, plaudJSON)
     }
 
     /// Cheap EXISTS probe for a cached CMDS transcript — avoids decoding the
@@ -1513,28 +1520,43 @@ final class Database: @unchecked Sendable {
     /// recording, read straight from `data/integrated/{id}/` — same
     /// resolution as the CLI's integrated-first pickers (newest mtime wins).
     func integratedContent(for fileID: String) -> IntegratedContentVM? {
+        guard let newest = integratedSummaryURLs(for: fileID).first else { return nil }
+        return integratedContent(fileID: fileID, summaryURL: newest)
+    }
+
+    /// Every final transcript of a recording — one per model × template run,
+    /// whether the dual pipeline or an AI slot made it — newest first.
+    func integratedVariants(for fileID: String) -> [IntegratedContentVM] {
+        integratedSummaryURLs(for: fileID).compactMap {
+            integratedContent(fileID: fileID, summaryURL: $0)
+        }
+    }
+
+    private func integratedSummaryURLs(for fileID: String) -> [URL] {
         let dir = URL(fileURLWithPath: "\(outputBaseDir(kind: "integrated"))/\(fileID)")
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: dir, includingPropertiesForKeys: [.contentModificationDateKey]
-        ) else { return nil }
-        let summaries = files.filter { $0.lastPathComponent.hasSuffix(".summary.md") }
-        guard let newest = summaries.max(by: {
-            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey])
+        ) else { return [] }
+        func modified(_ url: URL) -> Date {
+            (try? url.resourceValues(forKeys: [.contentModificationDateKey])
                 .contentModificationDate) ?? .distantPast
-            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey])
-                .contentModificationDate) ?? .distantPast
-            return a < b
-        }) else { return nil }
-        let transcriptURL = URL(fileURLWithPath: newest.path
+        }
+        return files
+            .filter { $0.lastPathComponent.hasSuffix(".summary.md") }
+            .sorted { modified($0) > modified($1) }
+    }
+
+    private func integratedContent(fileID: String, summaryURL: URL) -> IntegratedContentVM? {
+        let transcriptURL = URL(fileURLWithPath: summaryURL.path
             .replacingOccurrences(of: ".summary.md", with: ".transcript.md"))
         let summary = Self.stripFrontmatter(
-            (try? String(contentsOf: newest, encoding: .utf8)) ?? "")
+            (try? String(contentsOf: summaryURL, encoding: .utf8)) ?? "")
         let transcript = Self.stripFrontmatter(
             (try? String(contentsOf: transcriptURL, encoding: .utf8)) ?? "")
         guard !summary.isEmpty || !transcript.isEmpty else { return nil }
         return IntegratedContentVM(
             fileID: fileID,
-            label: newest.lastPathComponent.replacingOccurrences(of: ".summary.md", with: ""),
+            label: summaryURL.lastPathComponent.replacingOccurrences(of: ".summary.md", with: ""),
             transcript: transcript,
             summary: summary
         )

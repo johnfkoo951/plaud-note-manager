@@ -104,7 +104,7 @@ enum VaultComposeCaption {
         let model: String
         switch vault {
         case "main": model = "Settings › Metadata의 Metadata model"
-        case "wiki": model = "Settings › Dual transcribe의 Cross-analysis model(비어 있으면 Metadata model)"
+        case "wiki": model = "Settings › 최종본의 최종본 모델(비어 있으면 Metadata model)"
         default: model = "이 볼트에 쓰는 모델"
         }
         return "작성은 \(model)로 선택한 템플릿을 실행합니다. 이 녹음에 그 모델로 만든 같은 템플릿 "
