@@ -51,6 +51,15 @@ DEFAULT_CONFIG: dict = {
     "wiki_vault": "",
     "author": "",
     "api_info_dir": "",
+    # Glossary note (people, nicknames, proper nouns, jargon) and the roster
+    # note fed to the final-transcript and speaker-name prompts. Absolute or
+    # `~/` paths as given, anything else is relative to obsidian_vault; empty
+    # = the default under `50. Assets/53. Transcription Context/`.
+    "glossary_path": "",
+    "transcription_context_path": "",
+    # After a final transcript is made, append names/terms the glossary does
+    # not have yet to its review section (one model call per recording).
+    "glossary_auto_update": True,
     # Which model runs auto-classify (its backend — cli subscription vs api
     # key — follows the per-model "backends" entry above).
     "classify_model": "claude",
@@ -275,3 +284,17 @@ def classify_llm_threshold() -> float:
 
 def model_effort() -> str:
     return str(load().get("model_effort") or "medium")
+
+
+def set_glossary(
+    *, path: str | None = None, context: str | None = None, auto_update: bool | None = None
+) -> None:
+    """None leaves a setting alone; an empty string clears a path to its default."""
+    cfg = load()
+    if path is not None:
+        cfg["glossary_path"] = path.strip()
+    if context is not None:
+        cfg["transcription_context_path"] = context.strip()
+    if auto_update is not None:
+        cfg["glossary_auto_update"] = bool(auto_update)
+    save(cfg)

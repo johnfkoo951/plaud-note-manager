@@ -293,6 +293,17 @@ def advance(
         except Exception as exc:
             progress(f"metadata generation skipped: {exc}")
 
+        # -- glossary loop (best effort, once per recording) ---------------
+        try:
+            from .glossary import auto_update_enabled, harvest
+
+            if auto_update_enabled():
+                harvested = harvest(storage, file_id)
+                if harvested.added:
+                    report.steps.append(f"glossary+{len(harvested.added)}")
+        except Exception as exc:
+            progress(f"glossary update skipped: {exc}")
+
         _set(storage, file_id, "vault-ready")
         report.status = "vault-ready"
 

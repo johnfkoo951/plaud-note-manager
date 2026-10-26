@@ -56,6 +56,21 @@ def _isolated_vault_index(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(vault_index, "refresh_if_stale", lambda **_k: None)
 
 
+@pytest.fixture(autouse=True)
+def _isolated_glossary(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """No test reads or appends to the developer's real glossary note, or
+    records harvest state in the live data dir. Glossary tests point
+    `_configured` at a note of their own."""
+    import core.glossary as glossary
+
+    missing = str(tmp_path / "no-glossary.md")
+    monkeypatch.setattr(
+        glossary, "_configured", lambda key: missing if key == "glossary_path" else ""
+    )
+    monkeypatch.setattr(glossary, "STATE_FILE", tmp_path / "glossary_harvest.json")
+    monkeypatch.setattr(glossary, "LOCK_FILE", tmp_path / "glossary.lock")
+
+
 @pytest.fixture()
 def index_note():
     """Write `root/rel` and index it, as vault `root.name`, in the test's

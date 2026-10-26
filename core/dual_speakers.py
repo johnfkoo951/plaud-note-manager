@@ -27,14 +27,30 @@ MAX_SAMPLE_CHARS = 9000
 
 
 def transcription_context_path() -> Path | None:
-    vault = app_config.obsidian_vault()
-    if not vault:
-        return None
-    path = vault / CONTEXT_RELPATH
-    return path if path.exists() else None
+    """The roster note — `transcription_context_path` in config, else the vault default."""
+    from .glossary import context_path
+
+    path = context_path()
+    return path if path is not None and path.exists() else None
 
 
 def load_transcription_context(*, hint: str = "", max_chars: int = MAX_CONTEXT_CHARS) -> str:
+    """Roster blocks plus the glossary note, for the final-transcript and
+    speaker-name prompts.
+
+    Glossary first: it is the note the user keeps current by hand, and it is
+    short. The roster follows within `max_chars`.
+    """
+    from .glossary import load_for_prompt
+
+    glossary = load_for_prompt()
+    roster = _roster_sections(hint=hint, max_chars=max_chars)
+    if glossary and roster:
+        return f"### 용어집\n{glossary}\n\n### 실명 로스터\n{roster}"
+    return glossary or roster
+
+
+def _roster_sections(*, hint: str = "", max_chars: int = MAX_CONTEXT_CHARS) -> str:
     """Roster blocks from the vault context note, most relevant first.
 
     The note is organized as `## section` headings with ~190-token code

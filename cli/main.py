@@ -2776,6 +2776,123 @@ def cmds_relabel(
     )
 
 
+@safe_command(name="relabel")
+def relabel_cmd(
+    file_id: str,
+    mappings: list[str] = typer.Argument(..., help="Pairs like speaker_0=구요한 speaker_1=홍길동"),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Rename speakers across the whole recording: CMDS transcript + every final.
+
+    No model call — final transcripts are rewritten in place. Pairs apply all
+    at once, so `A=B B=A` swaps two speakers. Run it again any time to fix a
+    name.
+    """
+    from dataclasses import asdict as _asdict
+
+    from core.relabel import relabel_recording
+
+    mapping: dict[str, str] = {}
+    for pair in mappings:
+        if "=" not in pair:
+            raise typer.BadParameter(f"expected old=new, got {pair}")
+        old, new = pair.split("=", 1)
+        mapping[old.strip()] = new.strip()
+    report = relabel_recording(Storage(), file_id, mapping)
+    if json_out:
+        _emit_json({**_asdict(report), "changed": report.changed})
+        return
+    if not report.mapping:
+        console.print("[yellow]nothing to rename[/yellow]")
+        return
+    console.print(
+        f"[green]relabeled[/green] {report.mapping} — "
+        f"CMDS {report.cmds_segments} segments, {len(report.files)} final file(s)"
+    )
+
+
+@safe_command(name="glossary-harvest")
+def glossary_harvest_cmd(
+    file_id: str,
+    force: bool = typer.Option(
+        False, "--force", help="Run again for a recording already harvested."
+    ),
+    auto: bool = typer.Option(
+        False, "--auto", help="Do nothing when glossary auto-update is off (used by the app)."
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show candidates; do not write the note."
+    ),
+    model: str = typer.Option("", help=MODEL_HELP + " Empty = configured metadata model."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Add new names/terms from a recording's final transcript to the glossary note.
+
+    Candidates land in the note's "검토 대기" section; confirm them by moving
+    the line up into a curated section, or delete it.
+    """
+    from dataclasses import asdict as _asdict
+
+    from core.glossary import HarvestReport, auto_update_enabled, harvest
+
+    if auto and not auto_update_enabled():
+        report = HarvestReport(file_id=file_id, status="disabled")
+    else:
+        report = harvest(Storage(), file_id, model=model, force=force, dry_run=dry_run)
+    if json_out:
+        _emit_json(_asdict(report))
+        return
+    if report.status == "added":
+        verb = "would add" if dry_run else "added"
+        console.print(f"[green]{verb} {len(report.added)}[/green] → {report.path}")
+        for item in report.added:
+            console.print(f"  {item['term']} ({item['kind']}) {item.get('note') or ''}")
+    else:
+        console.print(f"[yellow]{report.status}[/yellow] {report.detail}")
+
+
+@safe_command(name="config-glossary")
+def config_glossary_cmd(
+    path: str | None = typer.Option(
+        None, "--path", help="Glossary note: absolute, ~/…, or vault-relative. '' = default."
+    ),
+    context: str | None = typer.Option(
+        None, "--context", help="Roster note (transcription context). '' = default."
+    ),
+    auto: str = typer.Option("", "--auto", help="on | off — append new terms after a final."),
+    json_out: bool = typer.Option(False, "--json"),
+) -> None:
+    """Show or set the glossary/roster notes the final-transcript prompt reads."""
+    from core import glossary
+
+    if auto and auto not in ("on", "off"):
+        raise typer.BadParameter("--auto must be 'on' or 'off'")
+    if path is not None or context is not None or auto:
+        app_config.set_glossary(
+            path=path, context=context, auto_update=(auto == "on") if auto else None
+        )
+    gl, ctx = glossary.glossary_path(), glossary.context_path()
+    cfg = app_config.load()
+    info = {
+        "glossary_path": cfg.get("glossary_path", ""),
+        "glossary_resolved": str(gl) if gl else "",
+        "glossary_exists": bool(gl and gl.is_file()),
+        "glossary_default": glossary.DEFAULT_GLOSSARY_RELPATH,
+        "context_path": cfg.get("transcription_context_path", ""),
+        "context_resolved": str(ctx) if ctx else "",
+        "context_exists": bool(ctx and ctx.is_file()),
+        "context_default": glossary.DEFAULT_CONTEXT_RELPATH,
+        "auto_update": glossary.auto_update_enabled(),
+    }
+    if json_out:
+        _emit_json(info)
+        return
+    for label, key in (("glossary", "glossary"), ("roster", "context")):
+        mark = "[green]ok[/green]" if info[f"{key}_exists"] else "[red]missing[/red]"
+        console.print(f"{label:>8}: {info[f'{key}_resolved'] or '(no vault)'}  {mark}")
+    console.print(f"    auto: {'on' if info['auto_update'] else 'off'}")
+
+
 @safe_command(name="speakers")
 def speakers_list() -> None:
     """List saved speakers."""
@@ -3008,7 +3125,6 @@ def cmds_integrate(
       - `{model}__{template}.transcript.md`  (final transcript only)
       - `{model}__{template}.summary.md`     (summary only)
     """
-    import json as _json
     from core.integrate import integrate
     from core.summarize import model_available, model_unavailable_message
     from core.templates import KIND_INTEGRATED
@@ -3018,46 +3134,15 @@ def cmds_integrate(
         console.print(f"[red]{model} unavailable[/red] — {model_unavailable_message(model)}")
         raise typer.Exit(1)
 
+    from core.dual_speakers import _hint, load_transcription_context
+    from core.integrate import collect_inputs
+
     storage = Storage()
-
-    # CMDS transcript (timestamped + diarized)
-    cmds_text = ""
-    speakers = ""
-    cmds_row = storage.get_cmds_transcript(file_id)
-    if cmds_row:
-        segs = _json.loads(cmds_row["segments"] or "[]")
-        sp_set = sorted({s.get("speaker") for s in segs if s.get("speaker")})
-        speakers = ", ".join(filter(None, sp_set))
-        cmds_text = "\n".join(
-            f"[{int(s.get('start_ms') or 0) / 1000:.1f}s] "
-            f"{s.get('speaker') or ''}: {s.get('content') or ''}"
-            for s in segs
-        )
-
-    # Plaud transcript + summaries
-    plaud_text = ""
-    plaud_summaries = ""
-    title = ""
-    keywords = ""
-    content_row = storage.get_content_row(file_id)
-    if content_row:
-        title = content_row["title"] or ""
-        keywords = ", ".join(_json.loads(content_row["keywords"] or "[]")[:15])
-        tr_segs = _json.loads(content_row["transcript"] or "[]")
-        plaud_text = "\n".join(
-            f"[{int(s.get('start_time') or 0) / 1000:.1f}s] "
-            f"{s.get('speaker') or ''}: {s.get('content') or ''}"
-            for s in tr_segs
-        )
-        primary = content_row["summary_md"] or ""
-        extras = _json.loads(content_row["summary_extra"] or "[]")
-        blocks = []
-        if primary:
-            blocks.append(f"### Primary\n\n{primary}")
-        for i, body in enumerate(extras):
-            blocks.append(f"### Template {i + 1}\n\n{body}")
-        plaud_summaries = "\n\n".join(blocks) or "(없음)"
-
+    # Same inputs as the dual pipeline's integrate stage — one kind of final
+    # transcript, whichever button made it.
+    inputs = collect_inputs(storage, file_id)
+    cmds_text = inputs["cmds_transcript"]
+    plaud_text = inputs["plaud_transcript"]
     if not cmds_text and not plaud_text:
         console.print("[red]no transcript available[/red] — transcribe or fetch detail first")
         raise typer.Exit(1)
@@ -3073,11 +3158,13 @@ def cmds_integrate(
         template_name=template,
         cmds_transcript=cmds_text or "(없음)",
         plaud_transcript=plaud_text or "(없음)",
-        plaud_summaries=plaud_summaries or "(없음)",
-        title=title,
-        keywords=keywords,
-        speakers=speakers,
+        plaud_summaries=inputs["plaud_summaries"] or "(없음)",
+        title=inputs["title"],
+        keywords=inputs["keywords"],
+        speakers=inputs["speakers"],
         model_id=model_id,
+        # Glossary + roster, so names and family nicknames come out right.
+        transcription_context=load_transcription_context(hint=_hint(storage, file_id)),
     )
     console.print(
         f"[green]saved[/green] all={paths['all'].name}, "
