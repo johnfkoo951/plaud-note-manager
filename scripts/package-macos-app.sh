@@ -182,5 +182,15 @@ codesign --verify --deep --strict "$INSTALL_CANDIDATE"
 replace_bundle "$INSTALL_CANDIDATE" "$DEST" "$INSTALL_STAGE_DIR/Previous $APP_NAME.app"
 xattr -dr com.apple.quarantine "$DEST" 2>/dev/null || true
 
+# Only the installed copy should answer plaudnote:// links (Hookmark,
+# Obsidian). The dist/ bundle carries the same bundle id and scheme, so drop
+# it from LaunchServices — otherwise a link clicked while the app is closed
+# could launch the build artifact instead of /Applications.
+LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
+if [[ -x "$LSREGISTER" ]]; then
+  "$LSREGISTER" -u "$DIST_BUNDLE" >/dev/null 2>&1 || true
+  "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
+fi
+
 echo "Installed: $DEST"
 echo "Built: $BUILD_TIMESTAMP; source fingerprint: $SOURCE_FINGERPRINT"
