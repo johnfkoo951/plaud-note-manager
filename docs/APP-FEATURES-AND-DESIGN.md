@@ -1078,6 +1078,28 @@ main|wiki|<path>`로 직접 갱신할 수 있다. 설정에서 빠진 예전 볼
 HTTP 상태 등)만 쓰며 공급자 진단 원문·응답 본문·프롬프트·키는 저장하지 않는다. 호출 전 사전 점검은
 하지 않는다(`model_available()`은 실행 파일·키 존재만 본다).
 
+### 6.9 리마인드와 하루치 녹음 (OmniControl 연동)
+
+**상태: 구현됨 (2026-11-20)**
+
+녹음 요약에서 녹음 주인(화자 목록의 `is_self`)이 챙길 것을 뽑아 두고, OmniControl 스케줄 잡이
+정해진 때 보낸다. 이 레포는 데이터와 선별만, 시각·전달은 OmniControl `bridge/plaud_remind.py`가 맡는다.
+
+- `plaud remind scan` — 최근 N일(기본 14) 녹음 중 요약이 있고 아직 안 읽은 것을 새것부터 한 번씩
+  `reminder-extract` 템플릿으로 읽는다. 항목 = 일정(event)·마감(deadline)·할 일(todo)·기억할 것(note),
+  날짜는 녹음 일시 기준으로 절대 날짜화, 중요도 1–3. 실패한 녹음은 다음 실행에 다시 읽는다.
+- `plaud remind due --when morning|evening --json` — 지금 보낼 항목. 리드타임 규칙은
+  `core/reminders.py::reminder_reason` 한 곳: 날짜 있는 것은 전날 저녁·당일 아침, 마감은 D-3부터 매일 아침,
+  ★3 일정은 일주일 안에 들어올 때 한 번, 48시간 안에 들어온 녹음의 항목은 "새로 들어옴"으로 한 번.
+  지난 항목은 보내지 않는다.
+- `plaud remind ack ID:SLOT …` — 보낸 것을 기록. 같은 (항목, 슬롯)은 다시 나오지 않는다.
+- `plaud remind list` · `plaud remind dismiss <id>` — 끝났거나 틀린 항목 끄기.
+- `plaud day-recordings --date YYYY-MM-DD|today|yesterday` — 그날 시작한 녹음의 시작·끝 시각과
+  `plaudnote://` 링크(JSON). 새벽 캘린더 링크 잡이 일정과 짝지을 때 쓴다.
+
+테이블 `reminders`·`reminder_scans`·`reminder_sends`는 로컬 전용이며 처음 쓸 때 만든다
+(Swift 앱과 공유하는 `SCHEMA_VERSION` 밖).
+
 ## 7. 인증 설계
 
 ### 7.1 Plaud의 두 인증 수명

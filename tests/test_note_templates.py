@@ -53,6 +53,7 @@ SHIPPED_KINDS = {
     "metadata": KIND_INTERNAL,
     "speaker-names": KIND_INTERNAL,
     "glossary-extract": KIND_INTERNAL,
+    "reminder-extract": KIND_INTERNAL,
     "vault-meeting-note": KIND_INTERNAL,
     **dict.fromkeys(EXPECTED, KIND_SUMMARY),
     "cmds-meeting": KIND_SUMMARY,
@@ -73,7 +74,7 @@ def test_every_expected_template_is_present() -> None:
 
 def test_every_shipped_template_loads() -> None:
     names = sorted(p.stem for p in TEMPLATES_DIR.glob("*.md"))
-    assert len(names) == 22
+    assert len(names) == 23
     for name in names:
         load_template(name)  # list_templates() would swallow a failure
 
@@ -85,7 +86,7 @@ def test_every_shipped_template_declares_its_kind() -> None:
         assert meta.get("kind") in (KIND_SUMMARY, KIND_INTEGRATED, KIND_INTERNAL), path.name
     kinds = {t.name: t.kind for t in list_templates()}
     assert kinds == SHIPPED_KINDS
-    assert Counter(kinds.values()) == {KIND_INTEGRATED: 2, KIND_INTERNAL: 5, KIND_SUMMARY: 15}
+    assert Counter(kinds.values()) == {KIND_INTEGRATED: 2, KIND_INTERNAL: 6, KIND_SUMMARY: 15}
 
 
 DEPRECATED = {

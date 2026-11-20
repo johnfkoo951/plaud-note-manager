@@ -3808,5 +3808,11 @@ def launch_claude(prompt: str, *, cwd: Path) -> None:
     subprocess.run(["osascript", "-e", script], check=False)
 
 
+from cli.remind import day_recordings_cmd, remind_app  # noqa: E402  (after `app`)
+
+app.add_typer(remind_app, name="remind")
+app.command("day-recordings")(day_recordings_cmd)
+
+
 if __name__ == "__main__":
     app()
