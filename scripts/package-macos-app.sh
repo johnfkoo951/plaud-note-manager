@@ -86,6 +86,10 @@ sips -z 512 512 "$ICON_SOURCE" --out "$ICONSET/icon_512x512.png" >/dev/null
 sips -z 1024 1024 "$ICON_SOURCE" --out "$ICONSET/icon_512x512@2x.png" >/dev/null
 iconutil -c icns "$ICONSET" -o "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
 
+# AppleScript dictionary — Hookmark reads `selected recording url/name` from it.
+SDEF_SOURCE="$ROOT_DIR/app/Resources/PlaudNoteManager.sdef"
+cp "$SDEF_SOURCE" "$APP_BUNDLE/Contents/Resources/PlaudNoteManager.sdef"
+
 BUILD_TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 SOURCE_FINGERPRINT="unknown"
 if git -C "$ROOT_DIR" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
@@ -141,6 +145,22 @@ cat >"$APP_BUNDLE/Contents/Info.plist" <<PLIST
   <true/>
   <key>NSQuitAlwaysKeepsWindows</key>
   <false/>
+  <!-- plaudnote://open?id=<file_id> and plaudnote://day?date=YYYY-MM-DD -->
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>$IDENTIFIER.link</string>
+      <key>CFBundleURLSchemes</key>
+      <array>
+        <string>plaudnote</string>
+      </array>
+    </dict>
+  </array>
+  <key>NSAppleScriptEnabled</key>
+  <true/>
+  <key>OSAScriptingDefinition</key>
+  <string>PlaudNoteManager.sdef</string>
 </dict>
 </plist>
 PLIST

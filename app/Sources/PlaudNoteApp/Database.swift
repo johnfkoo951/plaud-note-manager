@@ -330,11 +330,23 @@ struct ModelPresetVM: Identifiable, Hashable {
     var displayName: String { "\(providerLabel) · \(apiName)" }
 }
 
+/// Sidebar badge counts. Archived recordings count only under `archive`.
+struct CategoryCounts: Equatable {
+    var all = 0
+    var unfiled = 0
+    var starred = 0
+    var trash = 0
+    var archive = 0
+}
+
 enum SidebarItem: Hashable {
     case allFiles
     case unfiled
     case starred
     case trash
+    /// Recordings whose 사용 단계 is `archived` — hidden from every other
+    /// list (see `ArchiveVisibility`).
+    case archive
     case folder(String)
     case tag(String)
     /// Nested-tag PARENT node: matches every recording whose tag equals the
@@ -748,6 +760,8 @@ final class Database: @unchecked Sendable {
             sql += " AND f.is_trash = 0 AND f.starred = 1"
         case .trash:
             sql += " AND f.is_trash = 1"
+        case .archive:
+            sql += " AND f.is_trash = 0 AND \(Self.archivedPredicate("f.id"))"
         case .folder(let id):
             sql += " AND f.is_trash = 0 AND f.id IN (SELECT file_id FROM file_folders WHERE folder_id = ?)"
             args.append(id)
@@ -784,6 +798,7 @@ final class Database: @unchecked Sendable {
                       SELECT ff.folder_id AS folder_id, COUNT(*) AS cnt
                         FROM file_folders ff
                         JOIN files fi ON fi.id = ff.file_id AND fi.is_trash = 0
+                       WHERE NOT \(Self.archivedPredicate("fi.id"))
                        GROUP BY ff.folder_id
                   ) c ON c.folder_id = f.id
                  ORDER BY f.name COLLATE NOCASE
@@ -791,27 +806,37 @@ final class Database: @unchecked Sendable {
         } ?? []
     }
 
-    func categoryCounts() -> (all: Int, unfiled: Int, starred: Int, trash: Int) {
-        // Single pass over `files` instead of four separate COUNT queries.
+    /// SQL predicate: the recording whose id is `idColumn` is archived
+    /// (사용 단계 `archived`). Mirrors `ArchiveVisibility.isArchived` so the
+    /// sidebar counts match what the lists show.
+    static func archivedPredicate(_ idColumn: String) -> String {
+        "EXISTS (SELECT 1 FROM note_metadata am WHERE am.file_id = \(idColumn) AND TRIM(am.usage_status) = 'archived')"
+    }
+
+    func categoryCounts() -> CategoryCounts {
+        // Single pass over `files` instead of separate COUNT queries.
         // NOT EXISTS (not NOT IN) so a NULL file_id row can never poison the
-        // unfiled predicate.
+        // unfiled predicate. Archived recordings count only under Archive.
         read { db in
             guard let row = try Row.fetchOne(db, sql: """
-                SELECT COALESCE(SUM(is_trash = 0), 0) AS all_count,
-                       COALESCE(SUM(is_trash = 0 AND NOT EXISTS(
+                SELECT COALESCE(SUM(is_trash = 0 AND NOT archived), 0) AS all_count,
+                       COALESCE(SUM(is_trash = 0 AND NOT archived AND NOT EXISTS(
                            SELECT 1 FROM file_folders ff
-                            WHERE ff.file_id = files.id
+                            WHERE ff.file_id = t.id
                        )), 0) AS unfiled_count,
-                       COALESCE(SUM(is_trash = 0 AND starred = 1), 0) AS starred_count,
-                       COALESCE(SUM(is_trash = 1), 0) AS trash_count
-                  FROM files
-            """) else { return (0, 0, 0, 0) }
-            let all: Int = row["all_count"] ?? 0
-            let unfiled: Int = row["unfiled_count"] ?? 0
-            let starred: Int = row["starred_count"] ?? 0
-            let trash: Int = row["trash_count"] ?? 0
-            return (all, unfiled, starred, trash)
-        } ?? (0, 0, 0, 0)
+                       COALESCE(SUM(is_trash = 0 AND NOT archived AND starred = 1), 0) AS starred_count,
+                       COALESCE(SUM(is_trash = 1), 0) AS trash_count,
+                       COALESCE(SUM(is_trash = 0 AND archived), 0) AS archive_count
+                  FROM (SELECT id, is_trash, starred,
+                               \(Self.archivedPredicate("files.id")) AS archived
+                          FROM files) t
+            """) else { return CategoryCounts() }
+            return CategoryCounts(all: row["all_count"] ?? 0,
+                                  unfiled: row["unfiled_count"] ?? 0,
+                                  starred: row["starred_count"] ?? 0,
+                                  trash: row["trash_count"] ?? 0,
+                                  archive: row["archive_count"] ?? 0)
+        } ?? CategoryCounts()
     }
 
     /// Distinct tags across non-trash files with their file counts, ordered by
@@ -822,6 +847,7 @@ final class Database: @unchecked Sendable {
                 SELECT nt.tag AS tag, COUNT(DISTINCT nt.file_id) AS cnt
                   FROM note_tags nt
                   JOIN files f ON f.id = nt.file_id AND f.is_trash = 0
+                 WHERE NOT \(Self.archivedPredicate("f.id"))
                  GROUP BY nt.tag
                  ORDER BY cnt DESC, nt.tag COLLATE NOCASE
             """).map { row -> (tag: String, count: Int) in

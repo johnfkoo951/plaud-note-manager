@@ -51,6 +51,15 @@ struct PlaudNoteApp: App {
                 }
                 .keyboardShortcut("k", modifiers: .command)
             }
+            CommandGroup(after: .pasteboard) {
+                // [title](plaudnote://open?id=…) for the selected recording —
+                // paste into Obsidian/Notes to reopen it here.
+                Button("Copy Link to Recording") {
+                    NotificationCenter.default.post(name: .copyPlaudRecordingLink,
+                                                    object: nil)
+                }
+                .keyboardShortcut("c", modifiers: [.command, .option])
+            }
         }
     }
 }

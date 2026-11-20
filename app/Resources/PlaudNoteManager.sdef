@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE dictionary SYSTEM "file://localhost/System/Library/DTDs/sdef.dtd">
+<!--
+  AppleScript surface for Plaud Note Manager. Read by Hookmark's custom
+  "Get Address" / "Get Name" scripts (docs/HOOKMARK.md) to hook the recording
+  selected in the app. Values come from NSApplication KVC getters in
+  app/Sources/PlaudNoteApp/RecordingLinkScripting.swift.
+-->
+<dictionary title="Plaud Note Manager Terminology" xmlns:xi="http://www.w3.org/2003/XInclude">
+  <xi:include href="file:///System/Library/ScriptingDefinitions/CocoaStandard.sdef"
+              xpointer="xpointer(/dictionary/suite)"/>
+
+  <suite name="Plaud Note Manager Suite" code="PlNm"
+         description="Links to recordings, for Hookmark and other apps.">
+    <class-extension extends="application"
+                     description="Plaud Note Manager's top-level scripting object.">
+      <property name="selected recording url" code="PlSu" type="text" access="r"
+                description="plaudnote://open?id=… link to the recording selected in the app, or empty text when nothing is selected.">
+        <cocoa key="plaudSelectedRecordingURL"/>
+      </property>
+      <property name="selected recording name" code="PlSn" type="text" access="r"
+                description="Title of the selected recording, or empty text when nothing is selected.">
+        <cocoa key="plaudSelectedRecordingName"/>
+      </property>
+    </class-extension>
+  </suite>
+</dictionary>

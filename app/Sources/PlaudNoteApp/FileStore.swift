@@ -119,7 +119,7 @@ final class FileStore: ObservableObject {
     @Published var tagCounts: [(tag: String, count: Int)] = []
     /// Tags pinned to the top of the Tags section (config.json `pinned_tags`).
     @Published var pinnedTags: [String] = []
-    @Published var categoryCounts: (all: Int, unfiled: Int, starred: Int, trash: Int) = (0, 0, 0, 0)
+    @Published var categoryCounts = CategoryCounts()
     @Published var cacheStatus: (total: Int, cached: Int) = (0, 0)
     @Published var sidebar: SidebarItem = .allFiles
     @Published var search: String = ""
@@ -144,6 +144,26 @@ final class FileStore: ObservableObject {
     /// empty-state copy so it shows the term that returned nothing.
     @Published var contentSearchQuery: String = ""
     @Published var selectedID: String?
+    /// List column layout (목록 / 달력). Entering the calendar pages it to
+    /// the selected recording's month.
+    @Published var libraryMode: LibraryMode = LibraryMode.stored {
+        didSet {
+            UserDefaults.standard.set(libraryMode.rawValue, forKey: LibraryMode.defaultsKey)
+            if libraryMode == .calendar, oldValue != .calendar { alignCalendarWithSelection() }
+        }
+    }
+    /// First day of the month the calendar shows (nil until first opened).
+    @Published var calendarMonth: CalendarDay?
+    /// Days picked in the calendar (⌘ / ⇧ multi-select); empty = the whole
+    /// month on screen is listed.
+    @Published var calendarSelection = CalendarSelection()
+    /// Set by deep links so the list scrolls the revealed row into view.
+    @Published var revealRequest: RevealRequest?
+    /// User-facing problem with an incoming `plaudnote://` link.
+    @Published var deepLinkNotice: String?
+    /// A link that arrived before the first library load (cold launch).
+    private var pendingDeepLink: RecordingLink?
+    private var libraryLoaded = false
     @Published var content: FileContentVM?
     @Published var noteMetadata: NoteMetadataVM?
     /// Dual-transcribe pipeline state of the selected recording (nil = unmarked).
@@ -401,6 +421,7 @@ final class FileStore: ObservableObject {
         $selectedID
             .removeDuplicates()
             .sink { [weak self] id in
+                if let self { RecordingLinkBoard.shared.activeStore = self }
                 self?.loadContent(for: id)
                 // Opening a recording marks it seen (read-state dot flips
                 // green -> gray without waiting for a DB-watcher reload).
@@ -512,6 +533,11 @@ final class FileStore: ObservableObject {
                 // set using the *current* sidebar/search.
                 strongSelf.applyFilter(sidebar: strongSelf.sidebar,
                                        search: strongSelf.search)
+                strongSelf.libraryLoaded = true
+                if let link = strongSelf.pendingDeepLink {
+                    strongSelf.pendingDeepLink = nil
+                    strongSelf.open(link)
+                }
                 if strongSelf.selfSpeakerNames != selfNames { strongSelf.selfSpeakerNames = selfNames }
                 strongSelf.reloadInFlight = false
                 if strongSelf.reloadRequested {
@@ -550,7 +576,7 @@ final class FileStore: ObservableObject {
             let result = contentSearchHits.compactMap { id -> PlaudFileVM? in
                 guard let item = byID[id],
                       matchesSidebar(item.file, folderIDs: item.folderIDs,
-                                     sidebar: sidebar)
+                                     sidebar: sidebar, searching: true)
                 else { return nil }
                 return item.file
             }
@@ -560,7 +586,7 @@ final class FileStore: ObservableObject {
 
         let result = masterFiles.compactMap { item -> PlaudFileVM? in
             guard matchesSidebar(item.file, folderIDs: item.folderIDs,
-                                 sidebar: sidebar) else { return nil }
+                                 sidebar: sidebar, searching: !needle.isEmpty) else { return nil }
             if !needle.isEmpty {
                 guard (item.file.filename ?? "").lowercased().contains(needle)
                 else { return nil }
@@ -571,10 +597,14 @@ final class FileStore: ObservableObject {
     }
 
     /// Whether a file matches the sidebar selection. Shared by the normal and
-    /// content-search filter paths.
+    /// content-search filter paths. Archived recordings only pass where
+    /// `ArchiveVisibility` lets them (Archive, Trash, a search, 사용 완료).
     private func matchesSidebar(_ file: PlaudFileVM, folderIDs: Set<String>,
-                                sidebar: SidebarItem) -> Bool {
+                                sidebar: SidebarItem, searching: Bool) -> Bool {
         guard UsageStage.matches(file.usageStatus, selection: usageStages) else { return false }
+        guard ArchiveVisibility.shows(isArchived: ArchiveVisibility.isArchived(file.usageStatus),
+                                      in: sidebar, stageFilter: usageStages,
+                                      searching: searching) else { return false }
         switch sidebar {
         case .allFiles:
             return !file.isTrash
@@ -584,6 +614,8 @@ final class FileStore: ObservableObject {
             return !file.isTrash && file.starred
         case .trash:
             return file.isTrash
+        case .archive:
+            return !file.isTrash
         case .folder(let id):
             return !file.isTrash && folderIDs.contains(id)
         case .tag(let tag):
@@ -1175,6 +1207,34 @@ final class FileStore: ObservableObject {
         reload()
     }
 
+    /// Archive (사용 단계 → 사용 완료): the row leaves every list but Archive.
+    /// When it was the open recording, open its neighbour instead so triage
+    /// keeps going — the same row position, like archiving in Mail.
+    func archive(_ fileID: String) async {
+        let wasSelected = selectedID == fileID
+        let neighbour = neighbourID(of: fileID)
+        await setUsageStatus(fileID, status: UsageStage.archived.dbValue)
+        guard wasSelected, selectedID == fileID, sidebar != .archive,
+              !usageStages.contains(.archived) else { return }
+        selectedID = neighbour
+    }
+
+    /// Back to Not Used — the same target the leading swipe has always used.
+    func unarchive(_ fileID: String) async {
+        await setUsageStatus(fileID, status: UsageStage.unused.dbValue)
+    }
+
+    func isArchived(_ fileID: String) -> Bool {
+        ArchiveVisibility.isArchived(masterFiles.first { $0.id == fileID }?.file.usageStatus)
+    }
+
+    /// The row below `fileID` in the visible list, or the one above at the end.
+    private func neighbourID(of fileID: String) -> String? {
+        guard let index = files.firstIndex(where: { $0.id == fileID }) else { return nil }
+        if index + 1 < files.count { return files[index + 1].id }
+        return index > 0 ? files[index - 1].id : nil
+    }
+
     // MARK: - Dual-transcribe pipeline
 
     /// Run (or resume) the dual pipeline. Long-running: ElevenLabs transcription
@@ -1361,7 +1421,8 @@ final class FileStore: ObservableObject {
             return
         }
         masterFiles[idx].file.starred = newValue
-        if !masterFiles[idx].file.isTrash {
+        if !masterFiles[idx].file.isTrash,
+           !ArchiveVisibility.isArchived(masterFiles[idx].file.usageStatus) {
             categoryCounts.starred = max(0, categoryCounts.starred + (newValue ? 1 : -1))
         }
         applyFilter(sidebar: sidebar, search: search)
@@ -1381,6 +1442,111 @@ final class FileStore: ObservableObject {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(url.absoluteString, forType: .string)
+    }
+
+    // MARK: - plaudnote:// links (Hookmark, Obsidian, other apps)
+
+    /// Link + title of the selected recording — what AppleScript (and so
+    /// Hookmark) reads. Looks in the full library, not just the visible rows.
+    var selectedRecordingLink: (url: URL, title: String)? {
+        guard let id = selectedID else { return nil }
+        let title = masterFiles.first { $0.id == id }?.file.filename
+        return (RecordingLink.url(forRecording: id), RecordingLink.displayTitle(title))
+    }
+
+    /// `plaudnote://open?id=…` only.
+    func copyAppLink(_ fileID: String) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(RecordingLink.url(forRecording: fileID).absoluteString, forType: .string)
+    }
+
+    /// `[title](plaudnote://open?id=…)` as text, plus an HTML anchor so rich
+    /// text apps (Notes, Mail) paste the title as a live link. The charset
+    /// meta keeps Korean titles from turning into mojibake on paste.
+    func copyMarkdownLink(_ fileID: String) {
+        let title = masterFiles.first { $0.id == fileID }?.file.filename
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setString(RecordingLink.markdown(title: title, id: fileID), forType: .string)
+        pb.setString("<meta charset=\"utf-8\">" + RecordingLink.html(title: title, id: fileID),
+                     forType: .html)
+    }
+
+    /// Entry point for `onOpenURL`. Links that arrive before the first
+    /// library load (the app was launched by the link) wait for it.
+    func handleDeepLink(_ url: URL) {
+        guard let link = RecordingLink.parse(url) else {
+            deepLinkNotice = "이 링크를 열 수 없습니다: \(url.absoluteString)"
+            return
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        guard libraryLoaded else {
+            pendingDeepLink = link
+            return
+        }
+        open(link)
+    }
+
+    private func open(_ link: RecordingLink) {
+        switch link {
+        case .recording(let id): reveal(id)
+        case .day(let day): showDay(day)
+        }
+    }
+
+    /// Select a recording and bring it into view. If the current sidebar,
+    /// search or 사용 단계 filter hides it, fall back to All Files (Trash or
+    /// Archive for a trashed or archived one) — a link is an explicit "take
+    /// me there".
+    func reveal(_ fileID: String) {
+        guard let item = masterFiles.first(where: { $0.id == fileID }) else {
+            deepLinkNotice = "링크한 녹음을 라이브러리에서 찾지 못했습니다. 아직 동기화되지 않았거나 Plaud에서 지워졌을 수 있습니다.\n(\(fileID))"
+            return
+        }
+        if !files.contains(where: { $0.id == fileID }) {
+            if !search.isEmpty { search = "" }
+            if !usageStages.isEmpty { usageStages = [] }
+            sidebar = item.file.isTrash ? .trash
+                : (ArchiveVisibility.isArchived(item.file.usageStatus) ? .archive : .allFiles)
+        }
+        if libraryMode == .calendar, let date = item.file.createdAt {
+            let day = CalendarDay(date)
+            calendarMonth = day.monthStart
+            if !calendarSelection.contains(day) { calendarSelection = CalendarSelection() }
+        }
+        selectedID = fileID
+        revealRequest = RevealRequest(id: fileID)
+    }
+
+    /// Open the calendar on one day across the whole library (all folders,
+    /// no search, every 사용 단계) — what a daily-note link expects.
+    func showDay(_ day: CalendarDay) {
+        if !search.isEmpty { search = "" }
+        if !usageStages.isEmpty { usageStages = [] }
+        sidebar = .allFiles
+        calendarMonth = day.monthStart
+        calendarSelection = CalendarSelection(day: day)
+        libraryMode = .calendar
+    }
+
+    /// On entering the calendar, page to the selected recording's month
+    /// unless it is already on screen; with nothing selected, start on the
+    /// newest visible recording (or today) the first time.
+    private func alignCalendarWithSelection() {
+        if let date = selectedFile?.createdAt {
+            let day = CalendarDay(date)
+            let onScreen = calendarSelection.isEmpty
+                ? (calendarMonth.map { day.sameMonth(as: $0) } ?? false)
+                : calendarSelection.contains(day)
+            if !onScreen {
+                calendarMonth = day.monthStart
+                calendarSelection = CalendarSelection()
+            }
+        } else if calendarMonth == nil {
+            let newest = files.compactMap(\.createdAt).max() ?? Date()
+            calendarMonth = CalendarDay(newest).monthStart
+        }
     }
 
     @Published var cmdsTranscript: String?

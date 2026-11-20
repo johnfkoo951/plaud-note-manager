@@ -567,6 +567,26 @@ struct ContentView: View {
         ) { _ in
             showCommandPalette.toggle()
         }
+        // plaudnote:// links from Hookmark, Obsidian, a browser… This window
+        // takes them instead of SwiftUI opening a fresh window per link.
+        .onOpenURL { url in store.handleDeepLink(url) }
+        .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
+        .onReceive(
+            NotificationCenter.default.publisher(for: .copyPlaudRecordingLink)
+        ) { _ in
+            if let id = store.selectedID { store.copyMarkdownLink(id) }
+        }
+        .alert(
+            "링크를 열 수 없음",
+            isPresented: Binding(
+                get: { store.deepLinkNotice != nil },
+                set: { if !$0 { store.deepLinkNotice = nil } }
+            )
+        ) {
+            Button("OK") { store.deepLinkNotice = nil }
+        } message: {
+            Text(store.deepLinkNotice ?? "")
+        }
     }
 
     /// Overwrite is the destructive answer of the duplicate dialog.
@@ -1477,6 +1497,7 @@ private struct SidebarView: View {
     /// subtle drop highlight on the targeted folder row.
     @State private var dropTargetID: String?
     @State private var unfiledTargeted: Bool = false
+    @State private var archiveTargeted: Bool = false
     @AppStorage("tagSortMode") private var tagSortModeRaw: String =
         TagSortMode.frequency.rawValue
     @AppStorage("tagNestedView") private var tagNestedView: Bool = false
@@ -1506,6 +1527,14 @@ private struct SidebarView: View {
             get: { store.sidebar },
             set: { if let v = $0 { store.sidebar = v } }
         )) {
+            // Library status card (counts, cache progress, ElevenLabs
+            // credit) — scrolls away with the sidebar, never selectable.
+            Section {
+                LibraryOverview(store: store)
+                    .listRowInsets(EdgeInsets(top: 2, leading: 6, bottom: 6, trailing: 6))
+                    .listRowBackground(Color.clear)
+                    .selectionDisabled()
+            }
             Section {
                 row(.allFiles, "tray.full", "All files", store.categoryCounts.all)
                 // Dropping a file on Unfiled clears its folder assignment.
@@ -1521,6 +1550,19 @@ private struct SidebarView: View {
                     } isTargeted: { unfiledTargeted = $0 }
                 row(.starred, "star.fill", "Starred", store.categoryCounts.starred,
                     tint: FileRow.starGold)
+                // Archived (사용 완료) recordings live only here. Dropping a
+                // recording on the row archives it.
+                row(.archive, "archivebox", "Archive", store.categoryCounts.archive)
+                    .background(
+                        archiveTargeted ? Color.accentColor.opacity(0.18) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: AppUI.tightRadius)
+                    )
+                    .dropDestination(for: String.self) { items, _ in
+                        guard let fileID = items.first, !fileID.isEmpty else { return false }
+                        Task { await store.archive(fileID) }
+                        return true
+                    } isTargeted: { archiveTargeted = $0 }
+                    .help("사용 완료·중요도 낮은 녹음 — 다른 목록에서는 숨겨짐. 녹음을 끌어다 놓으면 아카이브")
                 row(.trash, "trash", "Trash", store.categoryCounts.trash)
             }
             Section {
@@ -1826,6 +1868,18 @@ private struct FileListView: View {
         store.search.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var calendarMonth: CalendarDay {
+        store.calendarMonth ?? CalendarDay(Date()).monthStart
+    }
+
+    /// Rows the list shows: everything the filters let through, or — in
+    /// calendar mode — just the month/day picked in the calendar.
+    private var listedFiles: [PlaudFileVM] {
+        guard store.libraryMode == .calendar else { return store.files }
+        return RecordingCalendarModel.files(store.files, month: calendarMonth,
+                                            days: store.calendarSelection.days)
+    }
+
     /// True when content search is active, settled (not running), and produced
     /// zero visible rows — drives the dedicated empty state.
     private var contentSearchEmpty: Bool {
@@ -1838,11 +1892,6 @@ private struct FileListView: View {
     var body: some View {
         let activities = store.recordingActivities
         VStack(spacing: 0) {
-            LibraryOverview(store: store)
-                .padding(.horizontal, AppUI.spacingM)
-                .padding(.top, AppUI.spacingM)
-                .padding(.bottom, 10)
-
             if store.lastClassifyApply != nil {
                 ClassifyUndoBanner(store: store)
                     .padding(.horizontal, AppUI.spacingM)
@@ -1922,10 +1971,23 @@ private struct FileListView: View {
             }
 
             usageFilter
+
+            if store.libraryMode == .calendar {
+                RecordingCalendarView(
+                    files: store.files,
+                    month: Binding(get: { calendarMonth },
+                                   set: { store.calendarMonth = $0 }),
+                    selection: $store.calendarSelection
+                )
+                .padding(.horizontal, AppUI.spacingM)
+                .padding(.bottom, 8)
+                calendarScopeBar
+            }
             Divider()
 
+            ScrollViewReader { proxy in
             List(selection: $store.selectedID) {
-                ForEach(store.files) { file in
+                ForEach(listedFiles) { file in
                     FileRow(file: file,
                             isSelected: store.selectedID == file.id,
                             density: rowDensity,
@@ -1952,6 +2014,16 @@ private struct FileListView: View {
                                 Label(file.starred ? "Unstar" : "Star",
                                       systemImage: file.starred ? "star.slash" : "star")
                             }
+                            let archived = ArchiveVisibility.isArchived(file.usageStatus)
+                            Button {
+                                Task {
+                                    if archived { await store.unarchive(file.id) }
+                                    else { await store.archive(file.id) }
+                                }
+                            } label: {
+                                Label(archived ? "Unarchive" : "Archive",
+                                      systemImage: archived ? "tray.and.arrow.up" : "archivebox")
+                            }
                             Divider()
                             Menu("사용 단계") {
                                 UsageStageMenuItems(store: store, fileID: file.id,
@@ -1968,6 +2040,14 @@ private struct FileListView: View {
                             }
                             Button("Copy Plaud URL") {
                                 store.copyPlaudWebURL(file.id)
+                            }
+                            // plaudnote:// — reopens this recording in this app
+                            // from Hookmark, Obsidian or any other app.
+                            Button("Copy App Link (Markdown)") {
+                                store.copyMarkdownLink(file.id)
+                            }
+                            Button("Copy App Link (URL)") {
+                                store.copyAppLink(file.id)
                             }
                             Divider()
                             // Radio semantics: a file lives in at most ONE
@@ -1988,13 +2068,11 @@ private struct FileListView: View {
                             // Toggle archived <-> unused via the existing
                             // usage-status path. No delete swipe: Plaud has
                             // no server delete API.
-                            let isArchived = file.usageStatus == "archived"
+                            let isArchived = ArchiveVisibility.isArchived(file.usageStatus)
                             Button {
                                 Task {
-                                    await store.setUsageStatus(
-                                        file.id,
-                                        status: isArchived ? "unused" : "archived"
-                                    )
+                                    if isArchived { await store.unarchive(file.id) }
+                                    else { await store.archive(file.id) }
                                 }
                             } label: {
                                 Label(isArchived ? "Unarchive" : "Archive",
@@ -2042,7 +2120,35 @@ private struct FileListView: View {
                     .padding()
                 } else if contentSearchEmpty {
                     contentSearchEmptyState
+                } else if store.sidebar == .archive && store.files.isEmpty
+                            && trimmedQuery.isEmpty {
+                    CenteredHint(systemImage: "archivebox",
+                                 title: "아카이브가 비어 있습니다",
+                                 detail: "중요도가 낮거나 다 쓴 녹음을 Archive로 보내면 다른 목록에서 사라지고 여기 모입니다. 행을 오른쪽으로 밀거나, 우클릭 ▸ Archive, 또는 사이드바 Archive로 끌어다 놓으세요.")
+                } else if store.libraryMode == .calendar && listedFiles.isEmpty
+                            && !store.files.isEmpty {
+                    CenteredHint(systemImage: "calendar",
+                                 title: store.calendarSelection.isEmpty
+                                    ? "이 달에는 녹음이 없습니다" : "고른 날짜에 녹음이 없습니다",
+                                 detail: "달 제목을 눌러 녹음이 있는 달로 이동할 수 있어요.")
                 }
+            }
+            // Deep links (plaudnote://) select a row that may be far down
+            // the list; scroll it to the middle once the filters settle.
+            .onChange(of: store.revealRequest) { _, request in
+                guard let request else { return }
+                Task { @MainActor in
+                    // A long List only estimates the height of rows it has
+                    // not drawn yet, so the first jump to a far row lands
+                    // short; the second, once rows near it are laid out,
+                    // lands on it.
+                    for delay in [80, 250] {
+                        try? await Task.sleep(for: .milliseconds(delay))
+                        guard store.revealRequest == request else { return }
+                        proxy.scrollTo(request.id, anchor: .center)
+                    }
+                }
+            }
             }
         }
         .sheet(item: $moveTarget) { target in
@@ -2087,9 +2193,63 @@ private struct FileListView: View {
                 .accessibilityLabel("사용 단계 필터 해제")
                 .help("사용 단계 필터 해제")
             }
+            Picker("보기", selection: $store.libraryMode) {
+                Image(systemName: "list.bullet")
+                    .accessibilityLabel("목록")
+                    .tag(LibraryMode.list)
+                Image(systemName: "calendar")
+                    .accessibilityLabel("달력")
+                    .tag(LibraryMode.calendar)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
+            .help("목록 / 달력 보기 — 달력에서 날짜를 눌러 그날 녹음만 보기")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+    }
+
+    /// What the calendar narrowed the list to, with a way back to the month.
+    private var calendarScopeBar: some View {
+        let rows = listedFiles
+        let totalMs = rows.reduce(0.0) { $0 + max(0, $1.durationMs ?? 0) }
+        let scope: String = {
+            if !store.calendarSelection.isEmpty {
+                return store.calendarSelection.summary()
+            }
+            return calendarMonth.date()?.formatted(.dateTime.year().month(.wide)) ?? ""
+        }()
+        return HStack(spacing: 6) {
+            Image(systemName: store.calendarSelection.isEmpty ? "calendar" : "calendar.day.timeline.left")
+                .foregroundStyle(.secondary)
+            Text(scope)
+                .font(AppUI.sectionFont)
+            Text("· \(rows.count)개 · \(RecordingCalendarModel.durationLabel(ms: totalMs))")
+                .font(AppUI.metaFont)
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 0)
+            if !store.calendarSelection.isEmpty {
+                Button("달 전체") { store.calendarSelection = CalendarSelection() }
+                    .buttonStyle(.borderless)
+                    .font(AppUI.metaFont)
+                    .help("선택한 날짜를 풀고 이 달 전체 보기")
+            }
+            if store.calendarSelection.days.count == 1,
+               let day = store.calendarSelection.days.first {
+                Button {
+                    let pb = NSPasteboard.general
+                    pb.clearContents()
+                    pb.setString(RecordingLink.url(forDay: day).absoluteString, forType: .string)
+                } label: {
+                    Image(systemName: "link")
+                }
+                .buttonStyle(.borderless)
+                .help("이 날짜 링크 복사 (plaudnote://day) — 데일리 노트에 붙이면 이 날 녹음 목록으로 바로 열림")
+            }
+        }
+        .padding(.horizontal, AppUI.spacingM + 2)
+        .padding(.bottom, 6)
     }
 
     /// Shown when 전체내용 search settles with zero hits. Notes that only
@@ -2248,7 +2408,7 @@ private struct LibraryOverview: View {
                         .font(.system(size: 10, weight: .heavy))
                         .foregroundStyle(AppUI.brandGreen)
                     Text("Recordings")
-                        .font(.system(size: 22, weight: .bold))
+                        .font(.system(size: 18, weight: .bold))
                 }
                 Spacer()
                 Image(systemName: "waveform.badge.sparkles")
@@ -2257,30 +2417,20 @@ private struct LibraryOverview: View {
                     .foregroundStyle(AppUI.accentPink)
             }
 
-            HStack(spacing: 7) {
-                MiniMetricCard(
-                    label: "All",
-                    value: "\(store.categoryCounts.all)",
-                    systemName: "tray.full",
-                    color: AppUI.brandGreen
-                )
-                MiniMetricCard(
-                    label: "Unfiled",
-                    value: "\(store.categoryCounts.unfiled)",
-                    systemName: "tray",
-                    color: AnuPalette.sky
-                )
-                MiniMetricCard(
-                    label: "Cached",
-                    value: "\(store.cacheStatus.cached)/\(store.cacheStatus.total)",
-                    systemName: "bolt.horizontal.circle",
-                    color: AppUI.accentPink
-                )
+            // Three across when the sidebar is wide enough; at narrow
+            // widths Cached (the longest value) drops to its own row.
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 6) { allCard; unfiledCard; cachedCard }
+                    .frame(minWidth: 252)
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) { allCard; unfiledCard }
+                    cachedCard
+                }
             }
 
             elevenLabsLine
         }
-        .padding(12)
+        .padding(10)
         // 2026 Liquid Glass inspired: regularMaterial + brand tint overlay + glass stroke
         .background(
             RoundedRectangle(cornerRadius: AppUI.glassRadius)
@@ -2290,6 +2440,22 @@ private struct LibraryOverview: View {
             RoundedRectangle(cornerRadius: AppUI.glassRadius)
                 .stroke(AppUI.glassStroke, lineWidth: 0.6)
         )
+    }
+
+    private var allCard: some View {
+        MiniMetricCard(label: "All", value: "\(store.categoryCounts.all)",
+                       systemName: "tray.full", color: AppUI.brandGreen)
+    }
+
+    private var unfiledCard: some View {
+        MiniMetricCard(label: "Unfiled", value: "\(store.categoryCounts.unfiled)",
+                       systemName: "tray", color: AnuPalette.sky)
+    }
+
+    private var cachedCard: some View {
+        MiniMetricCard(label: "Cached",
+                       value: "\(store.cacheStatus.cached)/\(store.cacheStatus.total)",
+                       systemName: "bolt.horizontal.circle", color: AppUI.accentPink)
     }
 
     /// ElevenLabs STT credit balance + next reset — the budget behind

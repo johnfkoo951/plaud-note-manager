@@ -280,7 +280,7 @@ struct CommandPaletteOverlay: View {
         let fileID = store.selectedID
         let file = store.selectedFile
         let hasSelection = fileID != nil
-        let isArchived = file?.usageStatus == "archived"
+        let isArchived = fileID.map { store.isArchived($0) } ?? false
         let hasFolder = fileID.map { !store.folderIDs(for: $0).isEmpty } ?? false
         let metadataRunning = fileID.map {
             store.metadataGeneratingIDs.contains($0)
@@ -300,9 +300,8 @@ struct CommandPaletteOverlay: View {
         ) {
             guard let fileID else { return true }
             Task {
-                await store.setUsageStatus(
-                    fileID, status: isArchived ? "unused" : "archived"
-                )
+                if isArchived { await store.unarchive(fileID) }
+                else { await store.archive(fileID) }
             }
             return true
         })
@@ -440,6 +439,17 @@ struct CommandPaletteOverlay: View {
         })
 
         items.append(PaletteAction(
+            id: "copy-app-link",
+            title: "Copy App Link (Markdown)",
+            systemImage: "link.badge.plus",
+            isEnabled: hasSelection
+        ) {
+            guard let fileID else { return true }
+            store.copyMarkdownLink(fileID)
+            return true
+        })
+
+        items.append(PaletteAction(
             id: "rename",
             title: "Rename…",
             systemImage: "pencil",
@@ -482,8 +492,18 @@ struct CommandPaletteOverlay: View {
                              systemImage: "tray", target: .unfiled))
         items.append(navItem(id: "nav-starred", title: "Go to: Starred",
                              systemImage: "star", target: .starred))
+        items.append(navItem(id: "nav-archive", title: "Go to: Archive",
+                             systemImage: "archivebox", target: .archive))
         items.append(navItem(id: "nav-trash", title: "Go to: Trash",
                              systemImage: "trash", target: .trash))
+        items.append(PaletteAction(
+            id: "toggle-calendar",
+            title: store.libraryMode == .calendar ? "Show List" : "Show Calendar",
+            systemImage: store.libraryMode == .calendar ? "list.bullet" : "calendar"
+        ) {
+            store.libraryMode = store.libraryMode == .calendar ? .list : .calendar
+            return true
+        })
         for folder in store.folders {
             items.append(navItem(
                 id: "nav-folder-\(folder.id)",

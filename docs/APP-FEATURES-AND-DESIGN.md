@@ -306,6 +306,7 @@ icon은 기존 icon 조회·prefill이 완결되지 않아 **부분 구현**으�
 - Star / Unstar
 - Rename
 - Plaud Web 열기 / URL 복사
+- 앱 링크 복사 (`plaudnote://`, Markdown 또는 URL) — `docs/HOOKMARK.md`
 - Move / Unfile
 - Archive / Unarchive
 - CMDS 전사
@@ -321,6 +322,35 @@ ElevenLabs 잔액은 최대 30분 동안 cache하며 전사 완료 뒤에는 강
 생략되지 않게 한다.
 
 녹음을 선택하면 `seen_at`이 즉시 로컬 DB에 기록된다. 현재 Mark as Unread 동작은 없다.
+
+#### 달력 보기
+
+**상태: 구현됨**
+
+사용 단계 줄 오른쪽의 목록/달력 전환(`⌘K` → Show Calendar)으로 목록 위에 월 달력을 띄운다.
+달력은 현재 sidebar·검색·사용 단계 필터를 통과한 녹음만 센다.
+
+- 날짜 칸은 그날 녹음 수를 표시하고, 그달 가장 많이 녹음한 날 대비 총 녹음 길이로 색을 칠한다
+  (제곱근 스케일 4단계 — `RecordingCalendarModel.heatLevel`).
+- 날짜를 누르면 목록이 그날로 좁혀지고, 다시 누르거나 "달 전체"를 누르면 그달 전체로 돌아간다.
+- 달 제목 메뉴는 녹음이 있는 달만 개수와 함께 연도별로 보여 준다.
+- 날짜는 로컬 시간대 기준이다. 날짜를 고르면 그날의 `plaudnote://day` 링크를 복사할 수 있다.
+- 보기 선택은 재실행 후에도 유지된다(`libraryMode`).
+
+#### Archive
+
+**상태: 구현됨**
+
+사용 단계 `archived`(사용 완료)는 "작업 목록에서 치운 녹음"이다. 이 녹음들은 All Files,
+Unfiled, Starred, 폴더, 태그, 달력에서 빠지고 sidebar의 **Archive**에만 모인다. 개수 배지도
+같은 규칙을 따른다. 예외는 `ArchiveVisibility` 하나에 모여 있다.
+
+- 검색어가 있으면 아카이브된 녹음도 결과에 나온다 (메일 보관함과 같은 방식).
+- 사용 단계 필터에서 "사용 완료"를 고르면 다시 보인다.
+- Trash가 휴지통 녹음의 유일한 위치라는 규칙은 그대로다.
+
+아카이브 방법: 행을 오른쪽으로 밀기, 우클릭 → Archive, `⌘K` → `E`, 녹음을 sidebar Archive로
+끌어다 놓기. 열어 둔 녹음을 아카이브하면 바로 아래 녹음이 열린다. Unarchive는 Not Used로 되돌린다.
 
 ### 5.5 녹음 상세 헤더
 
@@ -743,7 +773,9 @@ Sidebar와 Command Palette의 `vault-send`가 현재 통합본 우선 송출 경
 - Rename
 - Re-fetch Detail
 - 최근 auto-classify undo
-- All / Unfiled / Starred / Trash / 각 folder로 이동
+- 앱 링크 복사 (Markdown)
+- Show Calendar / Show List
+- All / Unfiled / Starred / Archive / Trash / 각 folder로 이동
 
 ### 5.18 Settings
 
