@@ -36,15 +36,59 @@ enum UsageStage: String, CaseIterable, Identifiable {
     }
 
     static func matches(_ raw: String?, selection: Set<UsageStage>) -> Bool {
-        selection.isEmpty || resolve(raw).map { selection.contains($0) } == true
+        selection.isEmpty || selection == UsageStageFilter.all
+            || resolve(raw).map { selection.contains($0) } == true
+    }
+}
+
+/// The 사용 단계 menu. The stored filter keeps `[]` for "nothing chosen",
+/// and what that lists depends on the place: working lists leave 사용 완료
+/// to Archive, Trash keeps every stage, Archive is 사용 완료 by definition.
+/// The menu ticks what is actually listed, so "전체 단계" means all four.
+enum UsageStageFilter {
+    static let all = Set(UsageStage.allCases)
+
+    /// What an empty filter lists in `sidebar`.
+    static func implied(in sidebar: SidebarItem) -> Set<UsageStage> {
+        switch sidebar {
+        case .archive: return [.archived]
+        case .trash: return all
+        default: return all.subtracting([.archived])
+        }
+    }
+
+    static func ticked(_ stored: Set<UsageStage>, in sidebar: SidebarItem) -> Set<UsageStage> {
+        stored.isEmpty ? implied(in: sidebar) : stored
+    }
+
+    /// The filter to store after ticking or unticking one stage. Landing
+    /// back on the place's own default (or on nothing) clears the filter.
+    static func toggling(_ stage: UsageStage, on: Bool, stored: Set<UsageStage>,
+                         in sidebar: SidebarItem) -> Set<UsageStage> {
+        var next = ticked(stored, in: sidebar)
+        if on { next.insert(stage) } else { next.remove(stage) }
+        return next.isEmpty || next == implied(in: sidebar) ? [] : next
+    }
+
+    /// True when the filter changes what this place lists (shows the ✕).
+    static func isActive(_ stored: Set<UsageStage>, in sidebar: SidebarItem) -> Bool {
+        !stored.isEmpty && stored != implied(in: sidebar)
+    }
+
+    static func label(_ stored: Set<UsageStage>, in sidebar: SidebarItem) -> String {
+        let shown = ticked(stored, in: sidebar)
+        if shown == all { return "전체" }
+        if shown == all.subtracting([.archived]) { return "전체 · 사용 완료 제외" }
+        return UsageStage.allCases.filter { shown.contains($0) }.map(\.title)
+            .joined(separator: ", ")
     }
 }
 
 /// Where an archived (사용 완료) recording still shows. Archive exists to get
 /// low-value or finished recordings out of the working lists, so they leave
 /// All Files, Unfiled, Starred, folders, tags and the calendar — but, like
-/// mail archives, a search still finds them, and so does asking for
-/// 사용 완료 in the 사용 단계 filter. Trash stays the only owner of trashed
+/// mail archives, a search still finds them, and so does ticking 사용 완료
+/// (or 전체 단계) in the 사용 단계 filter. Trash stays the only owner of trashed
 /// rows; the caller checks `isTrash` separately.
 enum ArchiveVisibility {
     static func shows(isArchived: Bool, in sidebar: SidebarItem,

@@ -2162,15 +2162,19 @@ private struct FileListView: View {
 
     private var usageFilter: some View {
         HStack(spacing: 8) {
+            let sidebar = store.sidebar
             Menu {
-                Button("전체 단계") { store.usageStages = [] }
+                Button("전체 단계 (사용 완료 포함)") { store.usageStages = UsageStageFilter.all }
+                if sidebar != .trash {
+                    Button("기본 (사용 완료 제외)") { store.usageStages = [] }
+                }
                 Divider()
                 ForEach(UsageStage.allCases) { stage in
                     Toggle(stage.title, isOn: Binding(
-                        get: { store.usageStages.contains(stage) },
+                        get: { UsageStageFilter.ticked(store.usageStages, in: sidebar).contains(stage) },
                         set: { selected in
-                            if selected { store.usageStages.insert(stage) }
-                            else { store.usageStages.remove(stage) }
+                            store.usageStages = UsageStageFilter.toggling(
+                                stage, on: selected, stored: store.usageStages, in: sidebar)
                         }
                     ))
                 }
@@ -2178,14 +2182,16 @@ private struct FileListView: View {
                 Label("사용 단계", systemImage: "line.3.horizontal.decrease.circle")
             }
             .fixedSize()
-            .help("여러 단계를 선택하면 선택한 단계 중 하나에 해당하는 녹음을 표시합니다.")
-            Text(store.usageStages.isEmpty ? "전체" : UsageStage.allCases
-                .filter { store.usageStages.contains($0) }.map(\.title).joined(separator: ", "))
+            .disabled(sidebar == .archive)
+            .help(sidebar == .archive
+                  ? "Archive에는 사용 완료 녹음만 있습니다."
+                  : "체크한 단계의 녹음만 표시합니다. 사용 완료는 기본으로 빠지고 Archive에 모입니다.")
+            Text(UsageStageFilter.label(store.usageStages, in: sidebar))
                 .font(AppUI.metaFont)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            if !store.usageStages.isEmpty {
+            if UsageStageFilter.isActive(store.usageStages, in: sidebar) {
                 Button { store.usageStages = [] } label: {
                     Image(systemName: "xmark.circle.fill")
                 }

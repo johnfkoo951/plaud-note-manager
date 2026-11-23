@@ -183,3 +183,42 @@ final class ArchiveVisibilityTests: XCTestCase {
         XCTAssertFalse(ArchiveVisibility.isArchived("vault-linked"))
     }
 }
+
+final class UsageStageFilterTests: XCTestCase {
+    private let working: Set<UsageStage> = [.unused, .prepared, .tracking]
+
+    func testTicksMatchWhatThePlaceLists() {
+        XCTAssertEqual(UsageStageFilter.ticked([], in: .allFiles), working)
+        XCTAssertEqual(UsageStageFilter.ticked([], in: .folder("f")), working)
+        XCTAssertEqual(UsageStageFilter.ticked([], in: .trash), UsageStageFilter.all)
+        XCTAssertEqual(UsageStageFilter.ticked([], in: .archive), [.archived])
+        XCTAssertEqual(UsageStageFilter.ticked([.tracking], in: .allFiles), [.tracking])
+    }
+
+    func testAllStagesShowArchivedInWorkingLists() {
+        // The bug: "전체" stored as [] still hid 사용 완료.
+        let all = UsageStageFilter.all
+        XCTAssertTrue(UsageStage.matches("archived", selection: all))
+        XCTAssertTrue(ArchiveVisibility.shows(isArchived: true, in: .allFiles,
+                                              stageFilter: all, searching: false))
+        XCTAssertEqual(UsageStageFilter.label(all, in: .allFiles), "전체")
+        XCTAssertEqual(UsageStageFilter.label([], in: .allFiles), "전체 · 사용 완료 제외")
+        XCTAssertEqual(UsageStageFilter.label([], in: .trash), "전체")
+    }
+
+    func testTickingArchivedFromTheDefaultSelectsAllFour() {
+        let next = UsageStageFilter.toggling(.archived, on: true, stored: [], in: .allFiles)
+        XCTAssertEqual(next, UsageStageFilter.all)
+        XCTAssertTrue(UsageStageFilter.isActive(next, in: .allFiles))
+        // Unticking it again lands on the default, which clears the filter.
+        XCTAssertEqual(UsageStageFilter.toggling(.archived, on: false, stored: next, in: .allFiles), [])
+    }
+
+    func testUntickingFromTheDefaultNarrows() {
+        XCTAssertEqual(UsageStageFilter.toggling(.unused, on: false, stored: [], in: .allFiles),
+                       [.prepared, .tracking])
+        XCTAssertEqual(UsageStageFilter.toggling(.tracking, on: false, stored: [.tracking],
+                                                 in: .allFiles), [])
+        XCTAssertFalse(UsageStageFilter.isActive(UsageStageFilter.all, in: .trash))
+    }
+}

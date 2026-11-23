@@ -346,7 +346,9 @@ Unfiled, Starred, 폴더, 태그, 달력에서 빠지고 sidebar의 **Archive**�
 같은 규칙을 따른다. 예외는 `ArchiveVisibility` 하나에 모여 있다.
 
 - 검색어가 있으면 아카이브된 녹음도 결과에 나온다 (메일 보관함과 같은 방식).
-- 사용 단계 필터에서 "사용 완료"를 고르면 다시 보인다.
+- 사용 단계 필터에서 "사용 완료"를 체크하거나 **전체 단계 (사용 완료 포함)**를 고르면 다시 보인다.
+  필터를 건드리지 않은 기본 상태는 "전체 · 사용 완료 제외"로 표시되고, 메뉴 체크도 실제로 보이는
+  세 단계에 걸려 있다 (`UsageStageFilter`). Trash의 기본은 네 단계 전부, Archive에서는 필터가 꺼진다.
 - Trash가 휴지통 녹음의 유일한 위치라는 규칙은 그대로다.
 
 아카이브 방법: 행을 오른쪽으로 밀기, 우클릭 → Archive, `⌘K` → `E`, 녹음을 sidebar Archive로
@@ -445,7 +447,7 @@ core/DB에는 metadata title, category, vault path, references도 저장되지�
 | `metadata-ready` | 메타데이터 준비 | 정리용 metadata가 준비됨 |
 | `vault-linked` | 집중 사용중 | Obsidian note와 연결됨 |
 | `used-elsewhere` | 집중 사용중 | 앱 밖 다른 맥락에서 활용함 |
-| `archived` | 사용 완료 | 로컬 lifecycle 표식; All 목록에서 자동으로 숨기지는 않음 |
+| `archived` | 사용 완료 | 로컬 lifecycle 표식; 작업 목록에서 빠지고 Archive에 모임 (위 Archive 절) |
 
 `archived`는 Plaud Trash 이동이 아니다.
 
